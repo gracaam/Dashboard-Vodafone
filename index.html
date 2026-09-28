@@ -5772,6 +5772,76 @@ function construirLinkOutlookWeb({ para, cco, assunto, corpo }) {
   return { url, excedeuLimite: url.length > LIMITE_CARACTERES_OUTLOOK };
 }
 
+// Geração de .eml (2026-09-28, pedido explícito do utilizador — testado e
+// confirmado por Augusto no Citrix): o Outlook Web ignora o "bcc" do deep link
+// acima; um ficheiro .eml com o cabeçalho `X-Unsent: 1` faz a aplicação Outlook
+// abrir o ficheiro como rascunho novo (com botão Enviar), não como email recebido —
+// e permite embutir o PDF como anexo MIME real, coisa que nenhum link consegue.
+// Nunca envia sozinho — só gera o ficheiro, sempre para o utilizador abrir e rever
+// antes de clicar Enviar à mão.
+
+// RFC 2047 "encoded-word" — necessário para Subject/nomes de ficheiro com acentos
+// (ç, ã, é...), que um cabeçalho de email cru (7-bit ASCII) não suporta.
+function codificarCabecalhoEmail(texto) {
+  return `=?UTF-8?B?${btoa(unescape(encodeURIComponent(texto || "")))}?=`;
+}
+
+// btoa só aceita strings latin1 — para bytes binários (PDF), converter em blocos
+// evita "Maximum call stack size exceeded" com ficheiros grandes (apply/spread de
+// um array demasiado comprido de uma vez).
+function arrayBufferParaBase64(buffer) {
+  let binario = "";
+  const bytes = new Uint8Array(buffer);
+  const TAMANHO_BLOCO = 0x8000;
+  for (let i = 0; i < bytes.length; i += TAMANHO_BLOCO) {
+    binario += String.fromCharCode(...bytes.subarray(i, i + TAMANHO_BLOCO));
+  }
+  return btoa(binario);
+}
+
+const quebrarLinhasBase64 = (base64) => (base64.match(/.{1,76}/g) || []).join("\r\n");
+
+function nomeFicheiroSeguro(texto) {
+  return (texto || "sem assunto").replace(/[\\/:*?"<>|]/g, "-").trim();
+}
+
+async function gerarEmlCampanha({ para, cco, assunto, corpo, anexo }) {
+  const fronteira = `----=_Parte_${Date.now()}`;
+  const corpoBase64 = quebrarLinhasBase64(btoa(unescape(encodeURIComponent(corpo || ""))));
+  const cabecalhos = [
+    "X-Unsent: 1",
+    "MIME-Version: 1.0",
+    `To: ${para}`,
+  ];
+  if (cco && cco.length) cabecalhos.push(`Bcc: ${cco.join(", ")}`);
+  cabecalhos.push(`Subject: ${codificarCabecalhoEmail(assunto)}`);
+
+  const linhas = [...cabecalhos];
+  if (anexo) {
+    const anexoBase64 = quebrarLinhasBase64(arrayBufferParaBase64(await anexo.arrayBuffer()));
+    linhas.push(
+      `Content-Type: multipart/mixed; boundary="${fronteira}"`, "",
+      `--${fronteira}`,
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: base64", "",
+      corpoBase64, "",
+      `--${fronteira}`,
+      `Content-Type: application/pdf; name="${anexo.name}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${anexo.name}"`, "",
+      anexoBase64, "",
+      `--${fronteira}--`
+    );
+  } else {
+    linhas.push(
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: base64", "",
+      corpoBase64
+    );
+  }
+  return new Blob([linhas.join("\r\n")], { type: "message/rfc822" });
+}
+
 function PainelCampanhaEmail({ destinatarios }) {
   const [anexo, setAnexo] = useState(null);
   const [assunto, setAssunto] = useState("");
@@ -5793,13 +5863,7 @@ function PainelCampanhaEmail({ destinatarios }) {
     const ok = await copiarParaAreaTransferencia(link ? `${texto}\n\n${link}` : texto);
     setCopiado((c) => ({ ...c, texto: ok ? "ok" : "erro" }));
   };
-  // "Abrir no Outlook" (2026-09-28, revisto no mesmo dia para usar o Outlook na Web
-  // — mailto: não funciona no Citrix da Vodafone). Com muitos destinatários/texto
-  // longo o link fica pouco fiável; nesse caso não abrimos nada, avisamos e
-  // apontamos para "Copiar emails (CCO)"/"Copiar texto" em vez disso (sempre
-  // funcionam, seja qual for o tamanho). O anexo nunca vai no link — continua a ser
-  // anexado à mão no Outlook.
-  //
+  const [aPreparar, setAPreparar] = useState(false);
   // 🐛→✅ Privacidade corrigida (2026-09-28, achado do próprio utilizador): pôr
   // clientes em CC (para nunca deixar "Para" vazio) expõe o email de cada cliente a
   // todos os outros — CC é visível para todos os destinatários, ao contrário de BCC.
@@ -5807,14 +5871,40 @@ function PainelCampanhaEmail({ destinatarios }) {
   // — cada cliente vê o email como se fosse de Augusto para Augusto, sem ver mais
   // ninguém nem saber quantos o receberam; Augusto recebe uma cópia (registo da
   // campanha) e fica em "Enviados". Nunca um cliente em "to"/"cc", só em "bcc".
-  const abrirNoOutlook = () => {
+
+  // "Preparar email (Outlook)" (2026-09-28) — método PRINCIPAL, testado e confirmado
+  // por Augusto no Citrix: gera um .eml com X-Unsent:1 (abre como rascunho novo, com
+  // botão Enviar) e o PDF já embutido como anexo real — a única forma de resolver os
+  // 3 problemas ao mesmo tempo (Bcc preenchido, anexo, sem mailto:/Citrix a bloquear).
+  const prepararEmailOutlook = async () => {
+    setAPreparar(true);
+    const corpo = link ? `${texto}\n\n${link}` : texto;
+    const blob = await gerarEmlCampanha({ para: EMAIL_AUGUSTO, cco: comEmail.map((d) => d.email), assunto, corpo, anexo });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const data = new Date().toLocaleDateString("pt-PT").replace(/\//g, "-");
+    a.download = `Campanha - ${nomeFicheiroSeguro(assunto)} - ${data}.eml`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setAvisoOutlook("Abre o ficheiro descarregado (duplo clique) — abre no Outlook pronto a enviar.");
+    setAPreparar(false);
+  };
+
+  // "Abrir no Outlook (web)" — alternativa, só para quando o .eml não é prático
+  // (ex. fora do Citrix, sem a app Outlook instalada). Achado real de Augusto ao
+  // testar: o deep link do Outlook Web IGNORA o parâmetro "bcc" — por isso este
+  // botão copia sempre os emails para a área de transferência e avisa para colar à
+  // mão, em vez de prometer um Bcc já preenchido que nunca aparece sozinho.
+  const abrirNoOutlookWeb = async () => {
     const corpo = link ? `${texto}\n\n${link}` : texto;
     const { url, excedeuLimite } = construirLinkOutlookWeb({ para: EMAIL_AUGUSTO, cco: comEmail.map((d) => d.email), assunto, corpo });
     if (excedeuLimite) {
       setAvisoOutlook("Demasiados destinatários/texto para o Outlook abrir de uma vez — usa \"Copiar emails (CCO)\" e \"Copiar texto\" e cola manualmente.");
       return;
     }
-    setAvisoOutlook("");
+    await copiarParaAreaTransferencia(comEmail.map((d) => d.email).join("; "));
+    setAvisoOutlook("Emails copiados — no Outlook, carrega em \"Bcc\" e faz Ctrl+V (o link não preenche o Bcc sozinho).");
     window.open(url, "_blank");
   };
   // "Descarregar PDF" (2026-09-28) — o Outlook Web não aceita anexos por link; a
@@ -5860,7 +5950,7 @@ function PainelCampanhaEmail({ destinatarios }) {
       ) : (
         <DropzoneFaturas accept=".pdf" onFicheiros={(files) => setAnexo(files[0])}
           titulo="Arrasta o PDF para aqui ou clica para escolher"
-          subtitulo="Fica só como referência — anexa-o no Outlook." />
+          subtitulo={'Vai já anexado no ficheiro de "Preparar email".'} />
       )}
 
       <div>
@@ -5881,18 +5971,17 @@ function PainelCampanhaEmail({ destinatarios }) {
       </div>
 
       {avisoOutlook && <div className="text-xs rounded-md px-2.5 py-2 bg-amber-50 text-amber-800 border border-amber-200">{avisoOutlook}</div>}
-      {anexo && (
-        <div className="flex items-center gap-1.5 text-xs" style={{ color: "var(--vf-muted)" }}>
-          <Icone nome="clip" className="w-3.5 h-3.5 shrink-0" />
-          Lembra-te de anexar "{anexo.name}" no Outlook — o link não leva o ficheiro.
-        </div>
-      )}
 
       <div className="space-y-2 pt-1">
+        <button onClick={prepararEmailOutlook} disabled={comEmail.length === 0 || aPreparar} className="w-full bg-neutral-900 text-white disabled:opacity-40">
+          <Icone nome="email" className="w-4 h-4" />
+          {aPreparar ? "A preparar…" : `Preparar email (Outlook)${comEmail.length ? ` · ${comEmail.length}` : ""}`}
+        </button>
+        <div className="text-[11px] text-center" style={{ color: "var(--vf-muted)" }}>ou, alternativa (sem app Outlook / fora do Citrix):</div>
         <div className="flex gap-2">
-          <button onClick={abrirNoOutlook} disabled={comEmail.length === 0} className="flex-1 bg-neutral-900 text-white disabled:opacity-40">
+          <button onClick={abrirNoOutlookWeb} disabled={comEmail.length === 0} className="flex-1 vf-sec">
             <Icone nome="email" className="w-4 h-4" />
-            Abrir no Outlook{comEmail.length ? ` · ${comEmail.length}` : ""}
+            Abrir no Outlook (web)
           </button>
           {anexo && (
             <button onClick={descarregarAnexo} className="vf-sec whitespace-nowrap" title={`Descarregar "${anexo.name}" para arrastar para o email`}>
