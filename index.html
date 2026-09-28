@@ -1802,7 +1802,7 @@ function gerarEmailAnaliseFaturas(nomeCliente, contas, dataAnalise, nomeContacto
     linhas.push(`Identificámos ${acessosEsgotados.valor} que atingiram o limite de dados incluído no último mês — se fizer sentido, posso rever convosco se o plano atual continua adequado à utilização real.`, "");
   }
   linhas.push("Fico disponível para esclarecer qualquer dúvida sobre esta análise, ou para agendar uma chamada.", "");
-  linhas.push("Com os melhores cumprimentos,", "Augusto Graça", "Vodafone Business");
+  linhas.push(ASSINATURA_EMAIL_TEXTO);
 
   return { assunto, corpo: linhas.join("\n") };
 }
@@ -5772,6 +5772,36 @@ function construirLinkOutlookWeb({ para, cco, assunto, corpo }) {
   return { url, excedeuLimite: url.length > LIMITE_CARACTERES_OUTLOOK };
 }
 
+// Assinatura de email (2026-09-28, pedido explícito de Augusto) — ÚNICO sítio a
+// alterar: usada no fim de todos os .eml de campanha (HTML + texto simples) e no
+// email da Análise de Faturas. `negrito`/`link` só afetam a versão HTML.
+const ASSINATURA_EMAIL = [
+  { texto: "Atenciosamente" },
+  { texto: "Augusto Miguel Graça", negrito: true },
+  { texto: "Representante Empresarial" },
+  { texto: "Tlm. +351 910 463 036" },
+  { texto: "vodafone.com/business", link: "https://www.vodafone.com/business" },
+  { texto: "" },
+  { texto: "16914 - Apoio a Clientes Empresariais (9h00:20h00)" },
+  { texto: "16915 - Apoio Serviço One Net (9h00:24h00)" },
+  { texto: "16916 - Apoio Redes Empresariais / Net Premium (8h00:20h00)" },
+  { texto: "16917 – Suporte Técnico Empresarial (8h00:20h00)" },
+  { texto: "1214 - Apoio Técnico Dados Móveis (8h00:20h00)" },
+];
+const ASSINATURA_EMAIL_TEXTO = ASSINATURA_EMAIL.map((l) => l.texto).join("\n");
+const escaparHtml = (t) => (t || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const ASSINATURA_EMAIL_HTML = ASSINATURA_EMAIL.map((l) => {
+  const t = escaparHtml(l.texto);
+  if (l.negrito) return `<b>${t}</b>`;
+  if (l.link) return `<a href="${l.link}">${t}</a>`;
+  return t;
+}).join("<br>\n");
+// Corpo do painel + linha em branco + assinatura.
+const juntarAssinaturaTexto = (corpo) => `${corpo || ""}\n\n${ASSINATURA_EMAIL_TEXTO}`;
+const juntarAssinaturaHtml = (corpo) =>
+  `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family:Calibri,Arial,sans-serif;font-size:11pt">` +
+  `<div>${escaparHtml(corpo).replace(/\r?\n/g, "<br>\n")}</div><br>\n<div>${ASSINATURA_EMAIL_HTML}</div></body></html>`;
+
 // Geração de .eml (2026-09-28, pedido explícito do utilizador — testado e
 // confirmado por Augusto no Citrix): o Outlook Web ignora o "bcc" do deep link
 // acima; um ficheiro .eml com o cabeçalho `X-Unsent: 1` faz a aplicação Outlook
@@ -5807,7 +5837,8 @@ function nomeFicheiroSeguro(texto) {
 
 async function gerarEmlCampanha({ para, cco, assunto, corpo, anexo }) {
   const fronteira = `----=_Parte_${Date.now()}`;
-  const corpoBase64 = quebrarLinhasBase64(btoa(unescape(encodeURIComponent(corpo || ""))));
+  const fronteiraAlt = `${fronteira}_alt`;
+  const b64Utf8 = (t) => quebrarLinhasBase64(btoa(unescape(encodeURIComponent(t))));
   const cabecalhos = [
     "X-Unsent: 1",
     "MIME-Version: 1.0",
@@ -5816,28 +5847,36 @@ async function gerarEmlCampanha({ para, cco, assunto, corpo, anexo }) {
   if (cco && cco.length) cabecalhos.push(`Bcc: ${cco.join(", ")}`);
   cabecalhos.push(`Subject: ${codificarCabecalhoEmail(assunto)}`);
 
+  // Corpo sempre multipart/alternative: texto simples + HTML (assinatura com negrito/link).
+  const parteAlternativa = [
+    `Content-Type: multipart/alternative; boundary="${fronteiraAlt}"`, "",
+    `--${fronteiraAlt}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: base64", "",
+    b64Utf8(juntarAssinaturaTexto(corpo)), "",
+    `--${fronteiraAlt}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: base64", "",
+    b64Utf8(juntarAssinaturaHtml(corpo)), "",
+    `--${fronteiraAlt}--`,
+  ];
+
   const linhas = [...cabecalhos];
   if (anexo) {
     const anexoBase64 = quebrarLinhasBase64(arrayBufferParaBase64(await anexo.arrayBuffer()));
     linhas.push(
       `Content-Type: multipart/mixed; boundary="${fronteira}"`, "",
       `--${fronteira}`,
-      "Content-Type: text/plain; charset=UTF-8",
-      "Content-Transfer-Encoding: base64", "",
-      corpoBase64, "",
+      ...parteAlternativa, "",
       `--${fronteira}`,
-      `Content-Type: application/pdf; name="${anexo.name}"`,
+      `Content-Type: application/pdf; name="${codificarCabecalhoEmail(anexo.name)}"`,
       "Content-Transfer-Encoding: base64",
-      `Content-Disposition: attachment; filename="${anexo.name}"`, "",
+      `Content-Disposition: attachment; filename="${codificarCabecalhoEmail(anexo.name)}"`, "",
       anexoBase64, "",
       `--${fronteira}--`
     );
   } else {
-    linhas.push(
-      "Content-Type: text/plain; charset=UTF-8",
-      "Content-Transfer-Encoding: base64", "",
-      corpoBase64
-    );
+    linhas.push(...parteAlternativa);
   }
   return new Blob([linhas.join("\r\n")], { type: "message/rfc822" });
 }
@@ -5897,7 +5936,7 @@ function PainelCampanhaEmail({ destinatarios }) {
   // botão copia sempre os emails para a área de transferência e avisa para colar à
   // mão, em vez de prometer um Bcc já preenchido que nunca aparece sozinho.
   const abrirNoOutlookWeb = async () => {
-    const corpo = link ? `${texto}\n\n${link}` : texto;
+    const corpo = juntarAssinaturaTexto(link ? `${texto}\n\n${link}` : texto);
     const { url, excedeuLimite } = construirLinkOutlookWeb({ para: EMAIL_AUGUSTO, cco: comEmail.map((d) => d.email), assunto, corpo });
     if (excedeuLimite) {
       setAvisoOutlook("Demasiados destinatários/texto para o Outlook abrir de uma vez — usa \"Copiar emails (CCO)\" e \"Copiar texto\" e cola manualmente.");
