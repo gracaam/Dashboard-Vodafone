@@ -214,19 +214,29 @@ function LoginFirebaseInline({ mensagem }) {
 // a confirmar a fonte atual (aqui sim, subtil é correto — é um estado resolvido, não
 // uma ação pendente).
 function MigracaoNuvemBanner({ nome, firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar }) {
+  // Aviso quando a migração é recusada (2026-09-28, achado real de Augusto) — as
+  // funções migrarParaNuvem agora podem devolver { ok: false, motivo } em vez de só
+  // { ok: false } (ex. dados locais ainda a carregar, ou a nuvem já tem dados e
+  // recusa sobrescrever) — antes esse motivo era descartado em silêncio.
+  const [aviso, setAviso] = useState("");
   if (!firebaseUser) return <LoginFirebaseInline mensagem={`Liga-te para levar ${nome} para a nuvem (acessível de qualquer computador):`} />;
   if (nuvemAtiva) return <div className="text-[11px] text-neutral-400">☁️ {nome} na nuvem — {firebaseUser.email}</div>;
   const migrar = async () => {
     if (!window.confirm(`Vais copiar ${nParaMigrar} registo(s) de ${nome} para a nuvem. Isto não apaga nada localmente — o Excel continua exatamente como está. Continuar?`)) return;
-    await migrarParaNuvem();
+    setAviso("");
+    const resultado = await migrarParaNuvem();
+    if (resultado && resultado.ok === false && resultado.motivo) setAviso(resultado.motivo);
   };
   return (
-    <div className="flex items-center gap-2 flex-wrap text-sm bg-blue-50 border-2 border-blue-200 rounded-lg px-3.5 py-2.5">
-      <span className="text-blue-900 font-medium">☁️ {nome} ainda não estão na nuvem — {nParaMigrar} registo(s) prontos a copiar.</span>
-      <button onClick={migrar} disabled={aMigrar}
-        className="text-sm px-3 py-1.5 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-40">
-        {aMigrar ? "A migrar…" : `Migrar ${nome} para a nuvem`}
-      </button>
+    <div className="flex flex-col gap-2 text-sm bg-blue-50 border-2 border-blue-200 rounded-lg px-3.5 py-2.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-blue-900 font-medium">☁️ {nome} ainda não estão na nuvem — {nParaMigrar} registo(s) prontos a copiar.</span>
+        <button onClick={migrar} disabled={aMigrar}
+          className="text-sm px-3 py-1.5 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-40">
+          {aMigrar ? "A migrar…" : `Migrar ${nome} para a nuvem`}
+        </button>
+      </div>
+      {aviso && <div className="text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5">{aviso}</div>}
     </div>
   );
 }
@@ -4046,9 +4056,22 @@ function useObjetivosTrimestrais(ligacaoPasta) {
   const objetivos = nuvemAtiva ? (objetivosNuvem || {}) : objetivosLocal;
 
   const [aMigrar, setAMigrar] = useState(false);
+  // 🐛→✅ Corrigido (2026-09-28, achado real de Augusto): faltavam 2 proteções aqui.
+  // (1) Sem esperar por `carregadoDoFicheiro`, clicar "Migrar" antes do ficheiro da
+  // pasta acabar de carregar migrava o estado inicial (vazio/desatualizado) em vez
+  // dos dados reais, marcando `migrado:true` para sempre com dados incompletos. (2)
+  // Sem verificar o que já está na nuvem, uma 2ª tentativa de migração (ex. depois
+  // de um erro, ou a partir de outro computador) podia sobrescrever dados reais já
+  // lá gravados. Nunca sobrescreve — se a nuvem já tiver algum trimestre, cancela.
   const migrarParaNuvem = async () => {
     if (!firebaseUser || nuvemAtiva) return { ok: false };
+    if (!carregadoDoFicheiro) return { ok: false, motivo: "Ainda a carregar os dados locais — espera um instante e tenta outra vez." };
     setAMigrar(true);
+    const existente = await firebaseDb.collection("comissoes_config").doc("objetivos_trimestrais").get();
+    if (existente.exists && Object.keys(existente.data() || {}).length > 0) {
+      setAMigrar(false);
+      return { ok: false, motivo: "Já existem Objetivos Trimestrais na nuvem — migração cancelada para não sobrescrever." };
+    }
     await firebaseDb.collection("comissoes_config").doc("objetivos_trimestrais").set(objetivosLocal);
     await marcarMigrado();
     setAMigrar(false);
@@ -5339,9 +5362,20 @@ function useFidelizacaoTrimestre(ligacaoPasta) {
   const atualizadoEm = nuvemAtiva ? atualizadoEmNuvem : atualizadoEmLocal;
 
   const [aMigrar, setAMigrar] = useState(false);
+  // 🐛→✅ Corrigido (2026-09-28, achado real de Augusto) — mesmas 2 proteções de
+  // useObjetivosTrimestrais: espera pelo carregamento local antes de migrar, e
+  // nunca sobrescreve se a nuvem já tiver algum registo (verificação direta à
+  // coleção, nunca ao cache local `nuvem.itens` — este só teria dados depois de
+  // `nuvemAtiva` já ser true, o que nunca acontece antes de migrar).
   const migrarParaNuvem = async () => {
     if (!firebaseUser || nuvemAtiva) return { ok: false };
+    if (!carregado) return { ok: false, motivo: "Ainda a carregar os dados locais — espera um instante e tenta outra vez." };
     setAMigrar(true);
+    const existente = await firebaseDb.collection("carteira_fidelizacao_trimestre").limit(1).get();
+    if (!existente.empty) {
+      setAMigrar(false);
+      return { ok: false, motivo: "Já existem Grupos Trimestrais na nuvem — migração cancelada para não sobrescrever." };
+    }
     for (const c of listaLocal) await nuvem.definir(c);
     await firebaseDb.collection("meta").doc("carteira_fidelizacao_trimestre").set({ atualizadoEm: atualizadoEmLocal });
     await marcarMigrado();
@@ -9603,9 +9637,18 @@ function useHistoricoComissoesReais(ligacaoPasta) {
   const historico = nuvemAtiva ? (historicoNuvem || {}) : historicoLocal;
 
   const [aMigrar, setAMigrar] = useState(false);
+  // 🐛→✅ Corrigido (2026-09-28, achado real de Augusto) — mesmas 2 proteções de
+  // useObjetivosTrimestrais: espera pelo carregamento local antes de migrar, e
+  // nunca sobrescreve se a nuvem já tiver histórico.
   const migrarParaNuvem = async () => {
     if (!firebaseUser || nuvemAtiva) return { ok: false };
+    if (!carregadoDoFicheiro) return { ok: false, motivo: "Ainda a carregar os dados locais — espera um instante e tenta outra vez." };
     setAMigrar(true);
+    const existente = await firebaseDb.collection("comissoes_config").doc("historico_reais").get();
+    if (existente.exists && Object.keys(existente.data() || {}).length > 0) {
+      setAMigrar(false);
+      return { ok: false, motivo: "Já existe Histórico de Comissões Reais na nuvem — migração cancelada para não sobrescrever." };
+    }
     await firebaseDb.collection("comissoes_config").doc("historico_reais").set(historicoLocal);
     await marcarMigrado();
     setAMigrar(false);
