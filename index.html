@@ -1937,44 +1937,8 @@ async function lerJsonDadosPrivados(handleProjeto, nomeFicheiro) {
   }
 }
 
-// Grava um ficheiro JSON em dados-privados/. Best-effort — se a pasta não estiver
-// ligada ou a escrita falhar por algum motivo, não bloqueia o resto da app (devolve
-// false em vez de lançar).
-async function guardarJsonDadosPrivados(handleProjeto, nomeFicheiro, dados) {
-  if (!handleProjeto) return false;
-  try {
-    const pasta = await handleProjeto.getDirectoryHandle("dados-privados", { create: true });
-    const fileHandle = await pasta.getFileHandle(nomeFicheiro, { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(JSON.stringify(dados, null, 2));
-    await writable.close();
-    return true;
-  } catch (e) {
-    console.warn(`Não foi possível gravar ${nomeFicheiro} em dados-privados/:`, e.message);
-    return false;
-  }
-}
 
-// Remove um ficheiro JSON de dados-privados/ — usado para invalidar uma análise gravada
-// (Fase E) quando as faturas de origem deixam de estar anexadas (ver "limpar faturas
-// após exportar" em AnaliseFaturasView). Best-effort, tal como guardarJsonDadosPrivados:
-// sem pasta ligada, ou ficheiro já inexistente (getDirectoryHandle/removeEntry lançam
-// NotFoundError), não é um erro — já está no estado desejado.
-async function removerJsonDadosPrivados(handleProjeto, nomeFicheiro) {
-  if (!handleProjeto) return;
-  try {
-    const pasta = await handleProjeto.getDirectoryHandle("dados-privados", { create: false });
-    await pasta.removeEntry(nomeFicheiro);
-  } catch (e) {}
-}
 
-// Fase E — persistência do resumo da "Análise de Faturas" (REQUISITOS_ANALISE_FATURAS.md,
-// ponto F: "guardar o resultado ... para não recalcular"). Um ficheiro por cliente, nome
-// sanitizado como já se faz para pastas (sanitizarNomePasta) — nunca pelo NIF, para o
-// ficheiro ficar legível a olho dentro de dados-privados/.
-function nomeFicheiroAnaliseFaturas(nomeCliente) {
-  return `${sanitizarNomePasta(nomeCliente)}-analise-faturas.json`;
-}
 
 // Controlo de versão da cache de análise — decisão explícita do utilizador (2026-09-17),
 // depois de o caso real Cliente A mostrar uma análise gravada ANTES da correção da
@@ -2646,34 +2610,16 @@ async function guardarExcelAnalise(handleProjeto, nomeCliente, wb, sufixo) {
   return { gravadoNaPasta: false, nomeFicheiro };
 }
 
-// Grava um ficheiro de texto (HTML/Markdown) em 03_Analise Faturas/{cliente}/Analise/
-// — mesma convenção do Excel (guardarExcelAnalise): grava na pasta se ligada e SEMPRE
-// dispara o download do browser como garantia (create:true nunca sobrescreve aqui
-// porque o nome do ficheiro já vem com data — repetir no mesmo dia sobrescreve de
-// propósito, gerar no dia seguinte cria um ficheiro novo, nunca perde a análise
-// anterior).
-async function guardarFicheiroTexto(handleProjeto, nomeCliente, nomeFicheiro, conteudo, mimeType) {
-  if (handleProjeto) {
-    try {
-      const pastaPropostas = await handleProjeto.getDirectoryHandle("03_Analise Faturas", { create: true });
-      const pastaCliente = await pastaPropostas.getDirectoryHandle(sanitizarNomePasta(nomeCliente), { create: true });
-      const pastaAnalise = await pastaCliente.getDirectoryHandle("Analise", { create: true });
-      const fileHandle = await pastaAnalise.getFileHandle(nomeFicheiro, { create: true });
-      const writable = await fileHandle.createWritable();
-      await writable.write(conteudo);
-      await writable.close();
-      return { gravadoNaPasta: true, nomeFicheiro };
-    } catch (e) {
-      console.warn(`Não foi possível gravar ${nomeFicheiro} na pasta do cliente:`, e.message);
-    }
-  }
+// Descarrega um ficheiro de texto (HTML/Markdown) gerado pela Análise de Faturas
+// (modo local, sem nuvem) — download normal do browser.
+function descarregarFicheiroTexto(nomeFicheiro, conteudo, mimeType) {
   const blob = new Blob([conteudo], { type: mimeType || "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = nomeFicheiro;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  return { gravadoNaPasta: false, nomeFicheiro };
+  return { nomeFicheiro };
 }
 
 // Fase 3, Passo 3 (2026-09-20) — grava o Excel de decisão ("Novos Tarifários") na
@@ -2970,13 +2916,12 @@ function encontrarColunaPorCabecalho(sheet, range, nomeColuna, linhaCabecalho) {
 // Remove a linha do prospect (por NIF) do Prospectos.xlsx ligado. Em vez de reconstruir a
 // folha inteira (que reordena colunas e perde formatação/validações), só apaga as células
 // dessa linha — o resto do ficheiro fica byte a byte igual.
-async function removerProspectDoExcel(nif, handleProjeto) {
+async function removerProspectDoExcel(nif) {
   const handle = await obterHandlePermitido("prospetos");
   if (!handle) return false;
   try {
     const file = await handle.getFile();
     const buffer = await file.arrayBuffer();
-    await criarBackupExcel(handleProjeto, buffer, "Prospectos");
     const wb = XLSX.read(buffer, { type: "array" });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const range = XLSX.utils.decode_range(sheet["!ref"]);
@@ -3002,13 +2947,12 @@ async function removerProspectDoExcel(nif, handleProjeto) {
 // Acrescenta uma linha nova ao Caracterização_clientes_carteira.xlsx ligado, escrevendo célula
 // a célula nas colunas certas (encontradas pelo nome do cabeçalho) — não reconstrói a folha,
 // por isso mantém a ordem das colunas, formatação e validações das linhas já existentes.
-async function adicionarClienteAoExcel(prospeto, simulador, handleProjeto) {
+async function adicionarClienteAoExcel(prospeto, simulador) {
   const handle = await obterHandlePermitido("clientes");
   if (!handle) return false;
   try {
     const file = await handle.getFile();
     const buffer = await file.arrayBuffer();
-    await criarBackupExcel(handleProjeto, buffer, "Caracterizacao_clientes_carteira");
     const wb = XLSX.read(buffer, { type: "array" });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const range = XLSX.utils.decode_range(sheet["!ref"]);
@@ -3060,13 +3004,12 @@ async function adicionarClienteAoExcel(prospeto, simulador, handleProjeto) {
 // do cabeçalho, cria a coluna no fim se não existir, nunca reconstrói a folha). Usada
 // pelo botão "+ Novo prospect" (decisão explícita do utilizador, 2026-09-08: criar um
 // prospect no dashboard passa a escrever logo no Excel real, não só em localStorage).
-async function adicionarProspectAoExcel(dados, handleProjeto) {
+async function adicionarProspectAoExcel(dados) {
   const handle = await obterHandlePermitido("prospetos");
   if (!handle) return false;
   try {
     const file = await handle.getFile();
     const buffer = await file.arrayBuffer();
-    await criarBackupExcel(handleProjeto, buffer, "Prospectos");
     const wb = XLSX.read(buffer, { type: "array" });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const range = XLSX.utils.decode_range(sheet["!ref"]);
@@ -3114,13 +3057,12 @@ async function adicionarProspectAoExcel(dados, handleProjeto) {
 // índice de linha guardado no mapeamento (`linhaExcel`) — usada para completar registos
 // que já existiam no ficheiro sem NIF preenchido (secção "Sem NIF"). Só escreve essa
 // célula, nunca toca no resto da linha.
-async function escreverNifNaLinha(tipo, linhaExcel, nif, nomeColunaNif, handleProjeto) {
+async function escreverNifNaLinha(tipo, linhaExcel, nif, nomeColunaNif) {
   const handle = await obterHandlePermitido(tipo);
   if (!handle) return false;
   try {
     const file = await handle.getFile();
     const buffer = await file.arrayBuffer();
-    await criarBackupExcel(handleProjeto, buffer, tipo === "clientes" ? "Caracterizacao_clientes_carteira" : "Prospectos");
     const wb = XLSX.read(buffer, { type: "array" });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const range = XLSX.utils.decode_range(sheet["!ref"]);
@@ -3137,28 +3079,6 @@ async function escreverNifNaLinha(tipo, linhaExcel, nif, nomeColunaNif, handlePr
   }
 }
 
-// Guarda uma cópia do Excel, tal como estava ANTES de qualquer escrita, em
-// dados-privados/backups-excel/ — decisão explícita do utilizador (2026-09-XX):
-// nenhuma escrita no Excel (Negócios, Prospetos ou Clientes) deve acontecer sem uma
-// cópia de segurança da versão anterior. Nunca bloqueia a escrita em si — se a pasta do
-// projeto não estiver ligada, simplesmente não há cópia desta vez (best-effort, tal
-// como o resto da sincronização com dados-privados/).
-async function criarBackupExcel(handleProjeto, bufferOriginal, nomeBase) {
-  if (!handleProjeto) return false;
-  try {
-    const pasta = await handleProjeto.getDirectoryHandle("dados-privados", { create: true });
-    const pastaBackups = await pasta.getDirectoryHandle("backups-excel", { create: true });
-    const carimbo = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const fileHandle = await pastaBackups.getFileHandle(`${nomeBase}_${carimbo}.xlsx`, { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(bufferOriginal);
-    await writable.close();
-    return true;
-  } catch (e) {
-    console.warn("Não foi possível criar backup do Excel:", e.message);
-    return false;
-  }
-}
 
 // Valida o NIF de um registo novo (Cliente ou Prospect): obrigatório, e nunca duplicado
 // de outro registo já existente em Clientes OU Prospetos (o NIF é a chave única entre
@@ -3400,45 +3320,27 @@ function mesclarCarteiraFidelizacao(anteriorLista, novaLista, nifsComNegocioImpl
 // daí, se o browser já se lembra da permissão, lê sozinho ao abrir a página — caso
 // contrário fica à espera de 1 clique em "Continuar" (não abre o seletor de ficheiro,
 // só pede autorização de novo para o mesmo ficheiro já escolhido).
-// Fonte: "padrao" (baseEstatica, hoje sempre []) | "excel" (acabado de ler) | "arquivo"
-// (snapshot já extraído, lido de dados-privados/{nomeFicheiroArquivo} — pode ter
-// chegado via iCloud de outro Mac). Decisão explícita do utilizador (2026-09-08):
-// mesma lógica já usada em Negócios do Trimestre — tenta sempre o arquivo primeiro
-// (evita pedir o Excel outra vez), só recorre ao Excel se ainda não houver arquivo.
-// `ligacaoPasta` vem de fora (App, ligação única partilhada por todo o dashboard —
-// ver "LIGAÇÃO ÚNICA" nas notas de arquitetura).
-function useDadosLigados(tipo, mapear, baseEstatica, ligacaoPasta, nomeFicheiroArquivo) {
+// Fonte: "padrao" (baseEstatica, hoje sempre []) | "excel" (acabado de ler).
+function useDadosLigados(tipo, mapear, baseEstatica) {
   const ligacao = useLigacaoExcel(tipo);
   const [dados, setDados] = useState(baseEstatica);
   const [fonte, setFonte] = useState("padrao");
   const [aCarregar, setACarregar] = useState(false);
   const [tentouCarregarInicial, setTentouCarregarInicial] = useState(false);
 
-  const persistirSnapshot = (lista) => {
-    if (ligacaoPasta.pronto) guardarJsonDadosPrivados(ligacaoPasta.handle, nomeFicheiroArquivo, lista);
-  };
-
   const carregar = async () => {
     if (!ligacao.handle) return false;
     setACarregar(true);
     const lidos = await lerDadosDoHandle(ligacao.handle, mapear);
-    if (lidos) { setDados(lidos); setFonte("excel"); persistirSnapshot(lidos); }
+    if (lidos) { setDados(lidos); setFonte("excel"); }
     setACarregar(false);
     return !!lidos;
   };
 
-  // Um único efeito para as duas fontes possíveis (arquivo vs Excel), para nunca
-  // haver corrida entre "já tenho arquivo" e "o Excel já estava ligado de antes".
   useEffect(() => {
-    if (tentouCarregarInicial) return;
-    (async () => {
-      if (ligacaoPasta.pronto) {
-        const doArquivo = await lerJsonDadosPrivados(ligacaoPasta.handle, nomeFicheiroArquivo);
-        if (doArquivo) { setDados(doArquivo); setFonte("arquivo"); setTentouCarregarInicial(true); return; }
-      }
-      if (ligacao.pronto) { await carregar(); setTentouCarregarInicial(true); }
-    })();
-  }, [ligacaoPasta.pronto, ligacao.pronto, tentouCarregarInicial]);
+    if (tentouCarregarInicial || !ligacao.pronto) return;
+    (async () => { await carregar(); setTentouCarregarInicial(true); })();
+  }, [ligacao.pronto, tentouCarregarInicial]);
 
   const continuar = async () => { const ok = await ligacao.continuar(); if (ok) await carregar(); return ok; };
   const ligar = async () => { const ok = await ligacao.ligar(); if (ok) await carregar(); return ok; };
@@ -4009,7 +3911,6 @@ function calcularNivelTrimestralProposta(negociosDoTrimestre, objetivosPorCatego
 // ver Manual de Comissões secção 3.2), nunca fixos como OBJETIVO_TRIMESTRAL_POR_
 // CATEGORIA fingia até agora. Mesma persistência dupla (localStorage + dados-privados/
 // quando a pasta está ligada) já usada em useAssuntos — nunca depende do Excel.
-const OBJETIVOS_TRIMESTRAIS_FICHEIRO = "objetivos-trimestrais.json";
 // Nuvem (2026-09-28, pedido explícito do utilizador): antes desta migração, os
 // objetivos trimestrais só viviam no localStorage de cada computador (ou no
 // dados-privados/ da pasta, quando ligada) — nunca sincronizavam entre o Mac e um
@@ -4018,7 +3919,7 @@ const OBJETIVOS_TRIMESTRAIS_FICHEIRO = "objetivos-trimestrais.json";
 // "comissoes_config", documento "objetivos_trimestrais". Local (localStorage +
 // dados-privados) mantém-se exatamente como estava, como fallback/origem da
 // migração — só troca de fonte depois do próprio utilizador confirmar.
-function useObjetivosTrimestrais(ligacaoPasta) {
+function useObjetivosTrimestrais() {
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("objetivos_trimestrais", firebaseUser);
   const nuvemAtiva = !!firebaseUser && nuvemMigrada;
@@ -4036,36 +3937,19 @@ function useObjetivosTrimestrais(ligacaoPasta) {
   const [objetivosLocal, setObjetivosLocal] = useState(() => {
     try { return JSON.parse(localStorage.getItem("objetivos-trimestrais") || "{}"); } catch { return {}; }
   });
-  const [carregadoDoFicheiro, setCarregadoDoFicheiro] = useState(false);
-
-  useEffect(() => {
-    if (!ligacaoPasta.pronto || carregadoDoFicheiro) return;
-    (async () => {
-      const doFicheiro = await lerJsonDadosPrivados(ligacaoPasta.handle, OBJETIVOS_TRIMESTRAIS_FICHEIRO);
-      if (doFicheiro) setObjetivosLocal(doFicheiro);
-      else if (Object.keys(objetivosLocal).length > 0) await guardarJsonDadosPrivados(ligacaoPasta.handle, OBJETIVOS_TRIMESTRAIS_FICHEIRO, objetivosLocal);
-      setCarregadoDoFicheiro(true);
-    })();
-  }, [ligacaoPasta.pronto]);
 
   useEffect(() => {
     try { localStorage.setItem("objetivos-trimestrais", JSON.stringify(objetivosLocal)); } catch {}
-    if (ligacaoPasta.pronto && carregadoDoFicheiro) guardarJsonDadosPrivados(ligacaoPasta.handle, OBJETIVOS_TRIMESTRAIS_FICHEIRO, objetivosLocal);
   }, [objetivosLocal]);
 
   const objetivos = nuvemAtiva ? (objetivosNuvem || {}) : objetivosLocal;
 
   const [aMigrar, setAMigrar] = useState(false);
-  // 🐛→✅ Corrigido (2026-09-28, achado real de Augusto): faltavam 2 proteções aqui.
-  // (1) Sem esperar por `carregadoDoFicheiro`, clicar "Migrar" antes do ficheiro da
-  // pasta acabar de carregar migrava o estado inicial (vazio/desatualizado) em vez
-  // dos dados reais, marcando `migrado:true` para sempre com dados incompletos. (2)
-  // Sem verificar o que já está na nuvem, uma 2ª tentativa de migração (ex. depois
+  // 🐛→✅ Corrigido (2026-09-28, achado real de Augusto): sem verificar o que já está na nuvem, uma 2ª tentativa de migração (ex. depois
   // de um erro, ou a partir de outro computador) podia sobrescrever dados reais já
   // lá gravados. Nunca sobrescreve — se a nuvem já tiver algum trimestre, cancela.
   const migrarParaNuvem = async () => {
     if (!firebaseUser || nuvemAtiva) return { ok: false };
-    if (!carregadoDoFicheiro) return { ok: false, motivo: "Ainda a carregar os dados locais — espera um instante e tenta outra vez." };
     setAMigrar(true);
     const existente = await firebaseDb.collection("comissoes_config").doc("objetivos_trimestrais").get();
     if (existente.exists && Object.keys(existente.data() || {}).length > 0) {
@@ -4291,13 +4175,12 @@ function lerNegociosDoWorkbook(wb) {
 // só altera as células dos campos editáveis dessa linha (tudo o resto fica intacto,
 // incluindo fórmulas de bónus/acelerador); caso contrário acrescenta na primeira
 // linha livre a seguir aos dados existentes. Devolve a linha usada, ou false se falhar.
-async function gravarNegocioNoExcel(negocio, linhaExistente, handleProjeto) {
+async function gravarNegocioNoExcel(negocio, linhaExistente) {
   const handle = await obterHandlePermitido("negocios");
   if (!handle) return false;
   try {
     const file = await handle.getFile();
     const buffer = await file.arrayBuffer();
-    await criarBackupExcel(handleProjeto, buffer, "Mapa_Trimestral");
     const wb = XLSX.read(buffer, { type: "array" });
     const sheet = wb.Sheets["Pipe"];
     if (!sheet) return false;
@@ -4430,13 +4313,12 @@ async function gravarNegocioNoExcel(negocio, linhaExistente, handleProjeto) {
 // podem ser ambíguos) da folha "Pipe". Só apaga as células dessa linha, nunca
 // reconstrói a folha. Chamada sempre depois de confirmação explícita do utilizador
 // (botão "Apagar negócio", com "Tens a certeza?" antes) — nunca sem confirmar.
-async function removerNegocioDoExcel(linhaExcel, handleProjeto) {
+async function removerNegocioDoExcel(linhaExcel) {
   const handle = await obterHandlePermitido("negocios");
   if (!handle) return false;
   try {
     const file = await handle.getFile();
     const buffer = await file.arrayBuffer();
-    await criarBackupExcel(handleProjeto, buffer, "Mapa_Trimestral");
     const wb = XLSX.read(buffer, { type: "array" });
     const sheet = wb.Sheets["Pipe"];
     if (!sheet) return false;
@@ -4465,16 +4347,6 @@ function calcularAlertaFidelizacao(dataInicio, meses) {
   return d;
 }
 
-const NEGOCIOS_FICHEIRO = "negocios-trimestre.json";
-
-// Fonte de dados: "excel" (acabado de ler do Mapa Trimestral ligado) ou "arquivo"
-// (snapshot já extraído, lido de dados-privados/negocios-trimestre.json — pode ter
-// chegado via iCloud Drive de outro Mac, sem precisar de voltar a ligar o Excel).
-// Decisão explícita do utilizador (2026-09-08): continua a pedir para ligar o Excel
-// manualmente como sempre — não guardamos o Excel em si, só os dados já extraídos
-// dele. Ao carregar, se já existir um snapshot em dados-privados/ mostra-o
-// diretamente; só volta a pedir o Excel quando o utilizador clicar em "Ligar"/
-// "Atualizar" (que também substitui o snapshot pelos dados frescos).
 // Coleção "negocios" na nuvem (Passo 2, 2026-09-19, decisão explícita do utilizador:
 // Excel deixa de ser a fonte principal). Ao contrário de Clientes/Prospetos (1
 // documento por NIF, useColecaoFirestore) um NIF pode ter VÁRIOS negócios — por isso
@@ -4501,22 +4373,16 @@ function useNegociosFirestore(ativo) {
   return { itens, aCarregar, definir, remover };
 }
 
-function useNegocios(ligacaoPasta) {
+function useNegocios() {
   const ligacao = useLigacaoExcel("negocios");
   const [negocios, setNegocios] = useState([]);
-  const [fonte, setFonte] = useState("vazio"); // "vazio" | "excel" | "arquivo"
+  const [fonte, setFonte] = useState("vazio"); // "vazio" | "excel"
   const [aCarregar, setACarregar] = useState(false);
   const [tentouCarregarInicial, setTentouCarregarInicial] = useState(false);
   // Workbook em memória da última leitura do Excel — só usado pela validação em
   // paralelo da Fase 2 (lerTabelaXP precisa da folha "XP" completa, não só das linhas
-  // já mapeadas de "negocios"). Fica null quando a lista vem do snapshot em cache
-  // (dados-privados/negocios.json) em vez de uma leitura fresca do Excel — a
-  // comparação só fica disponível depois de ligar/atualizar o Excel nesta sessão.
+  // já mapeadas de "negocios").
   const [wbAtual, setWbAtual] = useState(null);
-
-  const persistirSnapshot = (lista) => {
-    if (ligacaoPasta.pronto) guardarJsonDadosPrivados(ligacaoPasta.handle, NEGOCIOS_FICHEIRO, lista);
-  };
 
   const carregar = async () => {
     if (!ligacao.handle) return false;
@@ -4527,26 +4393,16 @@ function useNegocios(ligacaoPasta) {
       setNegocios(lidos);
       setFonte("excel");
       setWbAtual(wb);
-      persistirSnapshot(lidos);
     }
     setACarregar(false);
     return !!wb;
   };
 
-  // Um único efeito para as duas fontes possíveis, para nunca haver corrida entre
-  // "já tenho snapshot" e "o Excel já estava ligado de uma vez anterior" — tenta
-  // sempre o snapshot primeiro (evita pedir o Excel outra vez), só recorre ao Excel
-  // se ainda não houver snapshot nenhum.
+  // Excel já ligado de uma vez anterior → lê sozinho ao abrir, uma única vez.
   useEffect(() => {
-    if (tentouCarregarInicial) return;
-    (async () => {
-      if (ligacaoPasta.pronto) {
-        const doArquivo = await lerJsonDadosPrivados(ligacaoPasta.handle, NEGOCIOS_FICHEIRO);
-        if (doArquivo) { setNegocios(doArquivo); setFonte("arquivo"); setTentouCarregarInicial(true); return; }
-      }
-      if (ligacao.pronto) { await carregar(); setTentouCarregarInicial(true); }
-    })();
-  }, [ligacaoPasta.pronto, ligacao.pronto, tentouCarregarInicial]);
+    if (tentouCarregarInicial || !ligacao.pronto) return;
+    (async () => { await carregar(); setTentouCarregarInicial(true); })();
+  }, [ligacao.pronto, tentouCarregarInicial]);
 
   const continuar = async () => { const ok = await ligacao.continuar(); if (ok) await carregar(); return ok; };
   const ligar = async () => { const ok = await ligacao.ligar(); if (ok) await carregar(); return ok; };
@@ -4555,7 +4411,7 @@ function useNegocios(ligacaoPasta) {
   // Passo 2 (2026-09-19) — cloud-aware, mesmo padrão de useClientesNovos/
   // useProspetosNovos: só troca de fonte depois do próprio utilizador confirmar a
   // migração (nunca sozinho, nunca automático). Até lá, tudo continua exatamente
-  // como antes (Excel ligado ou snapshot local em dados-privados/).
+  // como antes (Excel ligado).
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("negocios", firebaseUser);
   const nuvemAtiva = !!firebaseUser && nuvemMigrada;
@@ -4576,8 +4432,7 @@ function useNegocios(ligacaoPasta) {
     [nuvemAtiva, nuvem.itens, negocios]
   );
 
-  // Migração única (nunca automática) — copia o snapshot local ATUAL (Excel/
-  // arquivo) para o Firestore, um documento por negócio; nunca apaga nada
+  // Migração única (nunca automática) — copia o snapshot local ATUAL (Excel) para o Firestore, um documento por negócio; nunca apaga nada
   // localmente/no Excel. `enriquecer` opcional (usado por NegociosView para juntar a
   // flag "Campanha", que até à migração vive à parte em useNegociosCampanha — depois
   // da migração passa a viver diretamente no documento, ver campanhaDoNegocio).
@@ -4599,7 +4454,6 @@ function useNegocios(ligacaoPasta) {
   // decisão (if(nuvemAtiva){...}else{...}) estava duplicada em 3 sítios dentro da
   // view (guardar, apagar, aplicar sugestão de NIF) — um erro ao mudar um deles sem
   // mudar os outros já tinha acontecido uma vez (ver histórico de "Campanha").
-  const handleProjeto = ligacaoPasta.pronto ? ligacaoPasta.handle : null;
   const escreverNegocio = async (negocio) => {
     if (nuvemAtiva) {
       // Sem Excel a atribuir um nº de linha — negócio novo recebe um id sintético
@@ -4618,7 +4472,7 @@ function useNegocios(ligacaoPasta) {
         return false;
       }
     }
-    const linhaUsada = await gravarNegocioNoExcel(negocio, negocio.linhaExcel, handleProjeto);
+    const linhaUsada = await gravarNegocioNoExcel(negocio, negocio.linhaExcel);
     // Relê o Excel inteiro em vez de só corrigir o registo em memória (decisão
     // explícita do utilizador, 2026-09-XX) — a tabela ficava só atualizada depois de
     // clicar manualmente em "Atualizar". Na nuvem isto é desnecessário — o onSnapshot
@@ -4630,14 +4484,14 @@ function useNegocios(ligacaoPasta) {
   const apagarNegocioDaFonte = async (linhaExcel) => {
     const ok = nuvemAtiva
       ? await nuvem.remover(linhaExcel).then(() => true).catch((e) => { console.error("Não foi possível apagar o negócio no Firestore:", e); return false; })
-      : await removerNegocioDoExcel(linhaExcel, handleProjeto);
+      : await removerNegocioDoExcel(linhaExcel);
     if (ok && !nuvemAtiva) await recarregar();
     return ok;
   };
 
   return {
     negocios: negociosFinal, fonte, aCarregar: nuvemAtiva ? nuvem.aCarregar : aCarregar,
-    precisaPermissao: ligacao.precisaPermissao, continuar, ligar, recarregar, ligacaoPasta, wbAtual,
+    precisaPermissao: ligacao.precisaPermissao, continuar, ligar, recarregar, wbAtual,
     firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar: negocios.length,
     escreverNegocio, apagarNegocioDaFonte,
   };
@@ -4863,13 +4717,13 @@ function Icone({ nome, className = "w-[18px] h-[18px]" }) {
 // Um NIF com leitura falhada fica fora, para ser tentado outra vez na próxima abertura.
 const CACHE_EXTRAS_NUVEM = new Map();
 
-function useClientesNovos(ligacaoPasta) {
+function useClientesNovos() {
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("clientes", firebaseUser);
   const nuvemAtiva = !!firebaseUser && nuvemMigrada;
   const nuvem = useColecaoFirestore("clientes", nuvemAtiva);
 
-  const { dados: clientesExcel, fonte, aCarregar, precisaPermissao, continuar, ligar, recarregar } = useDadosLigados("clientes", mapearLinhaCliente, CLIENTES_BASE, ligacaoPasta, "clientes.json");
+  const { dados: clientesExcel, fonte, aCarregar, precisaPermissao, continuar, ligar, recarregar } = useDadosLigados("clientes", mapearLinhaCliente, CLIENTES_BASE);
   const [clientesNovos, setClientesNovos] = useState(() => {
     try { return JSON.parse(localStorage.getItem("clientes-novos") || "[]"); } catch { return []; }
   });
@@ -5229,14 +5083,14 @@ function useClientesNovos(ligacaoPasta) {
 // por NIF, com migração única e explícita para o Firestore). Ao contrário de Clientes/
 // Prospetos, nunca teve fase "só local" — é um separador novo, decisão explícita do
 // utilizador de já nascer preparado para a nuvem, "acessível de qualquer computador".
-function useCarteiraFidelizar(ligacaoPasta) {
+function useCarteiraFidelizar() {
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("carteira_fidelizar", firebaseUser);
   const nuvemAtiva = !!firebaseUser && nuvemMigrada;
   const nuvem = useColecaoFirestore("carteira_fidelizar", nuvemAtiva);
 
-  const servicos = useDadosLigados("carteira-servicos", mapearLinhaCarteiraServicos, [], ligacaoPasta, "carteira-servicos.json");
-  const livres = useDadosLigados("carteira-livres", mapearLinhaCarteiraLivres, [], ligacaoPasta, "carteira-livres.json");
+  const servicos = useDadosLigados("carteira-servicos", mapearLinhaCarteiraServicos, []);
+  const livres = useDadosLigados("carteira-livres", mapearLinhaCarteiraLivres, []);
 
   // "Serviços ativos na carteira.xlsx" é a base (todos os 728) — "Dados Clientes
   // desprotegido.xlsx" (109, sempre subconjunto do primeiro) só sobrepõe as 4 colunas
@@ -5305,7 +5159,15 @@ function useCarteiraFidelizar(ligacaoPasta) {
   };
 }
 
-const FIDELIZACAO_TRIMESTRE_FICHEIRO = "carteira-fidelizacao.json";
+// Modo local (sem login): localStorage, mesmo padrão de useObjetivosTrimestrais.
+const FIDELIZACAO_TRIMESTRE_LOCAL = "carteira-fidelizacao";
+function lerFidelizacaoLocal() {
+  try { return JSON.parse(localStorage.getItem(FIDELIZACAO_TRIMESTRE_LOCAL) || "null") || { lista: [], atualizadoEm: null }; }
+  catch { return { lista: [], atualizadoEm: null }; }
+}
+function gravarFidelizacaoLocal(atualizadoEm, lista) {
+  try { localStorage.setItem(FIDELIZACAO_TRIMESTRE_LOCAL, JSON.stringify({ atualizadoEm, lista })); } catch {}
+}
 
 // "Fidelização por trimestre" (2026-09-21) — fonte independente de useCarteiraFidelizar
 // (acima): upload trimestral manual (não uma ligação Excel persistente), com fusão
@@ -5315,15 +5177,15 @@ const FIDELIZACAO_TRIMESTRE_FICHEIRO = "carteira-fidelizacao.json";
 // "só local por agora"): mesmo padrão de Clientes/Negócios — coleção
 // "carteira_fidelizacao_trimestre" (useColecaoFirestore, doc id = NIF), mais um
 // documento pequeno meta/carteira_fidelizacao_trimestre só para o "atualizadoEm" (não
-// faz sentido repetir esse campo em todos os registos). Local (dados-privados/)
+// faz sentido repetir esse campo em todos os registos). Local (localStorage)
 // mantém-se intocado como fallback/origem da migração — só troca de fonte depois do
 // próprio utilizador confirmar (<MigracaoNuvemBanner> em SecaoFidelizacaoTrimestre).
-function useFidelizacaoTrimestre(ligacaoPasta) {
-  const { negocios } = useNegocios(ligacaoPasta);
+function useFidelizacaoTrimestre() {
+  const { negocios } = useNegocios();
   // Só para saber se um NIF já é Cliente e para criar a ficha quando o estado passa a
   // "Fechado" (ver definirEstado abaixo) — mesmo padrão de sincronizarComClientes em
   // useClientesNovos (Negócios → Clientes), reaproveitado aqui.
-  const { todosClientes, adicionar: adicionarCliente, adicionarNotaFidelizacao, removerUltimaNotaFidelizacao, obterNotasFidelizacao } = useClientesNovos(ligacaoPasta);
+  const { todosClientes, adicionar: adicionarCliente, adicionarNotaFidelizacao, removerUltimaNotaFidelizacao, obterNotasFidelizacao } = useClientesNovos();
 
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("carteira_fidelizacao_trimestre", firebaseUser);
@@ -5339,37 +5201,20 @@ function useFidelizacaoTrimestre(ligacaoPasta) {
     return unsub;
   }, [nuvemAtiva]);
 
-  const [listaLocal, setListaLocal] = useState([]);
-  const [atualizadoEmLocal, setAtualizadoEmLocal] = useState(null);
+  const [listaLocal, setListaLocal] = useState(() => { const g = lerFidelizacaoLocal(); return Array.isArray(g.lista) ? g.lista : []; });
+  const [atualizadoEmLocal, setAtualizadoEmLocal] = useState(() => lerFidelizacaoLocal().atualizadoEm || null);
   const [aProcessar, setAProcessar] = useState(false);
-  const [carregado, setCarregado] = useState(false);
-
-  useEffect(() => {
-    if (carregado) return;
-    (async () => {
-      if (ligacaoPasta.pronto) {
-        const guardado = await lerJsonDadosPrivados(ligacaoPasta.handle, FIDELIZACAO_TRIMESTRE_FICHEIRO);
-        if (guardado) {
-          setListaLocal(Array.isArray(guardado.lista) ? guardado.lista : []);
-          setAtualizadoEmLocal(guardado.atualizadoEm || null);
-        }
-      }
-      setCarregado(true);
-    })();
-  }, [ligacaoPasta.pronto, carregado]);
 
   const lista = nuvemAtiva ? nuvem.itens : listaLocal;
   const atualizadoEm = nuvemAtiva ? atualizadoEmNuvem : atualizadoEmLocal;
 
   const [aMigrar, setAMigrar] = useState(false);
   // 🐛→✅ Corrigido (2026-09-28, achado real de Augusto) — mesmas 2 proteções de
-  // useObjetivosTrimestrais: espera pelo carregamento local antes de migrar, e
-  // nunca sobrescreve se a nuvem já tiver algum registo (verificação direta à
+  // useObjetivosTrimestrais: nunca sobrescreve se a nuvem já tiver algum registo (verificação direta à
   // coleção, nunca ao cache local `nuvem.itens` — este só teria dados depois de
   // `nuvemAtiva` já ser true, o que nunca acontece antes de migrar).
   const migrarParaNuvem = async () => {
     if (!firebaseUser || nuvemAtiva) return { ok: false };
-    if (!carregado) return { ok: false, motivo: "Ainda a carregar os dados locais — espera um instante e tenta outra vez." };
     setAMigrar(true);
     const existente = await firebaseDb.collection("carteira_fidelizacao_trimestre").limit(1).get();
     if (!existente.empty) {
@@ -5407,9 +5252,7 @@ function useFidelizacaoTrimestre(ligacaoPasta) {
     } else {
       setListaLocal(resultado);
       setAtualizadoEmLocal(agora);
-      if (ligacaoPasta.pronto) {
-        await guardarJsonDadosPrivados(ligacaoPasta.handle, FIDELIZACAO_TRIMESTRE_FICHEIRO, { atualizadoEm: agora, lista: resultado });
-      }
+      gravarFidelizacaoLocal(agora, resultado);
     }
     setAProcessar(false);
     return { ok: true, nAtualizados, nMantidos, removidos };
@@ -5432,9 +5275,7 @@ function useFidelizacaoTrimestre(ligacaoPasta) {
     }
     const nova = listaLocal.map((c) => (c.n === nif ? { ...c, estado, dataFechado } : c));
     setListaLocal(nova);
-    if (ligacaoPasta.pronto) {
-      await guardarJsonDadosPrivados(ligacaoPasta.handle, FIDELIZACAO_TRIMESTRE_FICHEIRO, { atualizadoEm: atualizadoEmLocal, lista: nova });
-    }
+    gravarFidelizacaoLocal(atualizadoEmLocal, nova);
     return nova.find((c) => c.n === nif);
   };
 
@@ -6061,11 +5902,11 @@ function PainelCampanhaEmail({ destinatarios }) {
 
 /* ================= PONTO: CLIENTES ================= */
 
-function ClientesView({ ligacaoPasta }) {
+function ClientesView() {
   const { todosClientes, clientesSemNif, adicionar, fonteExcel, aCarregarExcel, precisaPermissaoExcel, continuarExcel, ligarExcel, recarregarExcel,
-    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, obterExtras, definirExtras, obterNotasFidelizacao, removerNotaFidelizacaoNoIndice, obterTodosExtras } = useClientesNovos(ligacaoPasta);
-  const { todosProspetos } = useProspetosNovos(ligacaoPasta);
-  const { todos: todaCarteira } = useCarteiraFidelizar(ligacaoPasta);
+    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, obterExtras, definirExtras, obterNotasFidelizacao, removerNotaFidelizacaoNoIndice, obterTodosExtras } = useClientesNovos();
+  const { todosProspetos } = useProspetosNovos();
+  const { todos: todaCarteira } = useCarteiraFidelizar();
   const [nifSelecionado, setNifSelecionado] = useState("");
   const [ehNovo, setEhNovo] = useState(false);
   const [novoBase, setNovoBase] = useState({ e: "", n: "", t: "Convergente Móvel + Fixo" });
@@ -6501,8 +6342,8 @@ function BarrasEvolucao({ pontos }) {
   );
 }
 
-function AnaliseFaturasView({ ligacaoPasta }) {
-  const { todosClientes, obterExtras } = useClientesNovos(ligacaoPasta);
+function AnaliseFaturasView() {
+  const { todosClientes, obterExtras } = useClientesNovos();
   // Fase 3, Passo 2 (2026-09-20) — migração completa para a nuvem (Storage + cache em
   // Firestore), mesmo padrão de confirmação explícita já usado em Clientes/Prospetos/
   // Negócios. ⚠️ Dados sensíveis de clientes — só depois de login + confirmação.
@@ -6584,7 +6425,7 @@ function AnaliseFaturasView({ ligacaoPasta }) {
   const carregarAnalisePersistida = async (nif) => {
     const cliente = todosClientes.find((c) => c.n === nif);
     if (!cliente) return;
-    const guardado = nuvemAtivaAnalise ? await lerAnaliseFaturasCacheNuvem(nif) : (ligacaoPasta.pronto ? await lerJsonDadosPrivados(ligacaoPasta.handle, nomeFicheiroAnaliseFaturas(cliente.e)) : null);
+    const guardado = nuvemAtivaAnalise ? await lerAnaliseFaturasCacheNuvem(nif) : null;
     if (guardado && guardado.resumo) {
       if (guardado.versaoLogica === VERSAO_LOGICA_ANALISE_FATURAS) {
         setResumo(guardado.resumo);
@@ -6625,7 +6466,6 @@ function AnaliseFaturasView({ ligacaoPasta }) {
         if (!guardadoNaNuvem) falhas++;
       }
       if (!guardadoNaNuvem) await guardarFaturaAnaliseAnexada(nifSelecionado, f);
-      if (ligacaoPasta.pronto && clienteAtual) await guardarPdfNaPastaCliente(ligacaoPasta.handle, clienteAtual.e, f);
     }
     if (falhas > 0) {
       setAvisoNuvemFalhou(`⚠ Não foi possível gravar ${falhas} ficheiro(s) na nuvem — gravado(s) só neste browser (disco local) em vez disso. Confirma a ligação à internet ou a configuração do Storage; enquanto isso não for resolvido, este(s) ficheiro(s) não aparecem nos teus outros computadores.`);
@@ -6697,17 +6537,14 @@ function AnaliseFaturasView({ ligacaoPasta }) {
     setResumo(novoResumo);
     setAnaliseVersaoAntiga(false); // acabou de recalcular com a lógica atual — já não é "antiga"
     // Fase E — grava logo a seguir a analisar, para a próxima vez que o cliente for
-    // reaberto não ter de reprocessar os PDFs (ver carregarAnalisePersistida). Best-effort:
-    // sem pasta do projeto ligada, guardarJsonDadosPrivados só devolve false, nunca bloqueia
-    // o resumo já calculado em ecrã. versaoLogica identifica QUAL versão da lógica de
+    // reaberto não ter de reprocessar os PDFs (ver carregarAnalisePersistida). Só com a
+    // nuvem ativa — sem login, o resumo fica só em ecrã. versaoLogica identifica QUAL versão da lógica de
     // análise gerou este resumo — controlo de versão de cache (2026-09-17), ver
     // VERSAO_LOGICA_ANALISE_FATURAS.
     const agora = new Date().toISOString();
     const cacheParaGravar = { analisadoEm: agora, versaoLogica: VERSAO_LOGICA_ANALISE_FATURAS, resumo: novoResumo };
     if (nuvemAtivaAnalise && nifSelecionado) {
       await guardarAnaliseFaturasCacheNuvem(nifSelecionado, cacheParaGravar);
-    } else if (ligacaoPasta.pronto && clienteAtual) {
-      await guardarJsonDadosPrivados(ligacaoPasta.handle, nomeFicheiroAnaliseFaturas(clienteAtual.e), cacheParaGravar);
     }
     setAnalisadoEm(agora);
     setAAnalisar(false);
@@ -6753,11 +6590,10 @@ function AnaliseFaturasView({ ligacaoPasta }) {
   // (2026-09-17, SUBSTITUI a decisão anterior de que as faturas anexadas deviam
   // persistir sempre independentemente da análise): clicar em QUALQUER UM dos 2
   // botões de exportação limpa as faturas anexadas deste cliente (repositório
-  // faturasAnalise, só este NIF — nunca outros clientes) E a análise gravada em
-  // dados-privados/, deixando a vista pronta para um ciclo novo (ex. mês seguinte).
+  // faturasAnalise, só este NIF — nunca outros clientes) E a análise gravada
+  // (nuvem), deixando a vista pronta para um ciclo novo (ex. mês seguinte).
   // Idempotente por construção — nunca precisa de um "já limpei, não repetir": apagar
-  // um registo já apagado ou um ficheiro já inexistente é sempre um no-op seguro
-  // (removerJsonDadosPrivados já ignora ficheiro em falta), por isso clicar os 2
+  // um registo já apagado é sempre um no-op seguro, por isso clicar os 2
   // botões em sequência (ex. Imprimir depois Argumentos) nunca dá erro na 2ª limpeza.
   const finalizarAposExportar = async () => {
     const nif = nifSelecionado;
@@ -6768,9 +6604,6 @@ function AnaliseFaturasView({ ligacaoPasta }) {
     } else {
       const faturasDoCliente = await listarFaturasAnaliseDoCliente(nif);
       for (const f of faturasDoCliente) await removerFaturaAnaliseAnexada(f.id);
-      if (ligacaoPasta.pronto && clienteAtual) {
-        await removerJsonDadosPrivados(ligacaoPasta.handle, nomeFicheiroAnaliseFaturas(clienteAtual.e));
-      }
     }
     setFaturas([]);
     setResumo(null);
@@ -6791,11 +6624,8 @@ function AnaliseFaturasView({ ligacaoPasta }) {
         ? `Painel gravado na nuvem (${nomeFicheiroHtml}) — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`
         : `Não foi possível gravar o painel na nuvem — faturas e análise deste cliente limpas na mesma.`;
     } else {
-      const handleProjeto = ligacaoPasta.pronto ? ligacaoPasta.handle : null;
-      const r = await guardarFicheiroTexto(handleProjeto, nomeCliente, nomeFicheiroHtml, htmlPainel, "text/html");
-      aviso = r.gravadoNaPasta
-        ? `Painel gravado em 03_Analise Faturas/${nomeCliente}/Analise/${r.nomeFicheiro} — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`
-        : `Painel descarregado: ${r.nomeFicheiro} — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`;
+      const r = descarregarFicheiroTexto(nomeFicheiroHtml, htmlPainel, "text/html");
+      aviso = `Painel descarregado: ${r.nomeFicheiro} — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`;
     }
     setAvisoSucesso(aviso);
     setAImprimir(false);
@@ -6830,11 +6660,8 @@ function AnaliseFaturasView({ ligacaoPasta }) {
         ? `Argumentos gravados na nuvem (${nomeFicheiroMd}) — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`
         : `Não foi possível gravar os argumentos na nuvem — faturas e análise deste cliente limpas na mesma.`;
     } else {
-      const handleProjeto = ligacaoPasta.pronto ? ligacaoPasta.handle : null;
-      const r = await guardarFicheiroTexto(handleProjeto, nomeCliente, nomeFicheiroMd, md, "text/markdown");
-      aviso = r.gravadoNaPasta
-        ? `Argumentos gravados em 03_Analise Faturas/${nomeCliente}/Analise/${r.nomeFicheiro} — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`
-        : `Argumentos descarregados: ${r.nomeFicheiro} — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`;
+      const r = descarregarFicheiroTexto(nomeFicheiroMd, md, "text/markdown");
+      aviso = `Argumentos descarregados: ${r.nomeFicheiro} — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`;
     }
     setAvisoSucesso(aviso);
     setTimeout(() => setAvisoSucesso(""), 8000);
@@ -6913,7 +6740,6 @@ function AnaliseFaturasView({ ligacaoPasta }) {
           <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="text-xs font-medium text-neutral-400">FATURAS DESTE CLIENTE</div>
-              {!ligacaoPasta.pronto && <div className="text-[11px] text-neutral-400">liga a pasta do projeto no aviso do topo para guardar cópias aqui</div>}
             </div>
             <DropzoneFaturas onFicheiros={anexarFicheiros}
               titulo="Arrasta faturas para aqui, ou clica para escolher"
@@ -7350,8 +7176,8 @@ function AnaliseRapidaForm({ analise, mudarAnalise, toggleServicoAtual }) {
 }
 
 function PropostasView({ ligacaoPasta }) {
-  const { todosClientes, adicionar } = useClientesNovos(ligacaoPasta);
-  const { todosProspetos } = useProspetosNovos(ligacaoPasta);
+  const { todosClientes, adicionar } = useClientesNovos();
+  const { todosProspetos } = useProspetosNovos();
   // Fase 3, Passo 3 (2026-09-20) — só o Excel de decisão ("Novos Tarifários") passa a
   // gravar/ler da nuvem quando ativo; os PDFs/Word finais da proposta continuam só
   // locais, sem alteração nenhuma (decisão explícita do utilizador). Sem "migração"
@@ -8057,13 +7883,13 @@ const PROSPETOS_EXTRA_FIELDS = [
 ];
 
 // Fase 1 (2026-09-18) — mesmo padrão cloud-aware de useClientesNovos, ver comentário lá.
-function useProspetosNovos(ligacaoPasta) {
+function useProspetosNovos() {
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("prospetos", firebaseUser);
   const nuvemAtiva = !!firebaseUser && nuvemMigrada;
   const nuvem = useColecaoFirestore("prospetos", nuvemAtiva);
 
-  const { dados: prospetosExcel, fonte, aCarregar, precisaPermissao, continuar, ligar, recarregar } = useDadosLigados("prospetos", mapearLinhaProspect, PROSPETOS_BASE, ligacaoPasta, "prospetos.json");
+  const { dados: prospetosExcel, fonte, aCarregar, precisaPermissao, continuar, ligar, recarregar } = useDadosLigados("prospetos", mapearLinhaProspect, PROSPETOS_BASE);
   const [prospetosNovos, setProspetosNovos] = useState(() => {
     try { return JSON.parse(localStorage.getItem("prospetos-novos") || "[]"); } catch { return []; }
   });
@@ -8185,9 +8011,9 @@ function adicionarClienteLocal(nif, nome) {
   }
 }
 
-function ProspetosView({ ligacaoPasta }) {
+function ProspetosView() {
   const { todosProspetos, prospetosSemNif, adicionar, definirContactoOverride, fonteExcel, aCarregarExcel, precisaPermissaoExcel, continuarExcel, ligarExcel, recarregarExcel,
-    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, prepararUploadProspetos, confirmarUploadProspetos } = useProspetosNovos(ligacaoPasta);
+    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, prepararUploadProspetos, confirmarUploadProspetos } = useProspetosNovos();
   const [pendenteUploadProspetos, setPendenteUploadProspetos] = useState(null);
   const [aGravarUploadProspetos, setAGravarUploadProspetos] = useState(false);
   const [avisoUploadProspetos, setAvisoUploadProspetos] = useState("");
@@ -8200,8 +8026,8 @@ function ProspetosView({ ligacaoPasta }) {
     setAGravarUploadProspetos(false);
     setTimeout(() => setAvisoUploadProspetos(""), 8000);
   };
-  const { todosClientes, adicionar: adicionarClienteNuvem, fonteExcel: fonteExcelClientes, aCarregarExcel: aCarregarExcelClientes, precisaPermissaoExcel: precisaPermissaoClientes, continuarExcel: continuarClientes, ligarExcel: ligarClientes, recarregarExcel: recarregarExcelClientes, nuvemAtiva: nuvemAtivaClientes } = useClientesNovos(ligacaoPasta);
-  const { todos: todaCarteira } = useCarteiraFidelizar(ligacaoPasta);
+  const { todosClientes, adicionar: adicionarClienteNuvem, fonteExcel: fonteExcelClientes, aCarregarExcel: aCarregarExcelClientes, precisaPermissaoExcel: precisaPermissaoClientes, continuarExcel: continuarClientes, ligarExcel: ligarClientes, recarregarExcel: recarregarExcelClientes, nuvemAtiva: nuvemAtivaClientes } = useClientesNovos();
+  const { todos: todaCarteira } = useCarteiraFidelizar();
   const [filtroDistrito, setFiltroDistrito] = useState("");
   const [filtroSegmento, setFiltroSegmento] = useState("");
   const [filtroContacto, setFiltroContacto] = useState("");
@@ -8619,26 +8445,13 @@ const NEGOCIO_VAZIO = {
 // muda ao editar um negócio já existente) — mesmo padrão já usado para
 // "prospetos-fechados"/"cliente-extra:" (persistência dupla localStorage + dados-
 // privados/, quando a pasta estiver ligada).
-const NEGOCIOS_CAMPANHA_FICHEIRO = "negocios-campanha.json";
-function useNegociosCampanha(ligacaoPasta) {
+function useNegociosCampanha() {
   const [campanha, setCampanha] = useState(() => {
     try { return JSON.parse(localStorage.getItem("negocios-campanha") || "{}"); } catch { return {}; }
   });
-  const [carregadoDoFicheiro, setCarregadoDoFicheiro] = useState(false);
-
-  useEffect(() => {
-    if (!ligacaoPasta.pronto || carregadoDoFicheiro) return;
-    (async () => {
-      const doFicheiro = await lerJsonDadosPrivados(ligacaoPasta.handle, NEGOCIOS_CAMPANHA_FICHEIRO);
-      if (doFicheiro) setCampanha(doFicheiro);
-      else if (Object.keys(campanha).length > 0) await guardarJsonDadosPrivados(ligacaoPasta.handle, NEGOCIOS_CAMPANHA_FICHEIRO, campanha);
-      setCarregadoDoFicheiro(true);
-    })();
-  }, [ligacaoPasta.pronto]);
 
   useEffect(() => {
     try { localStorage.setItem("negocios-campanha", JSON.stringify(campanha)); } catch {}
-    if (ligacaoPasta.pronto && carregadoDoFicheiro) guardarJsonDadosPrivados(ligacaoPasta.handle, NEGOCIOS_CAMPANHA_FICHEIRO, campanha);
   }, [campanha]);
 
   const definir = (linhaExcel, valor) => setCampanha((prev) => ({ ...prev, [linhaExcel]: valor }));
@@ -8990,17 +8803,17 @@ function PainelValidacaoPipe({ negocios, wbAtual, nuvemAtiva }) {
   );
 }
 
-function NegociosView({ ligacaoPasta }) {
+function NegociosView() {
   const {
     negocios, fonte, aCarregar, precisaPermissao, continuar, ligar, recarregar, wbAtual,
     firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, escreverNegocio, apagarNegocioDaFonte,
-  } = useNegocios(ligacaoPasta);
+  } = useNegocios();
   // sincronizarComClientes/removerNegocioDeTodosOsClientes/reverterClienteAutoCriadoSeVazio
   // vivem em useClientesNovos desde o Passo 3 do refactor (2026-09-19) — mexem em dados
   // de Clientes (incl. na nuvem, se migrado), nunca em Negócios.
-  const { todosClientes, sincronizarComClientes, removerNegocioDeTodosOsClientes, reverterClienteAutoCriadoSeVazio } = useClientesNovos(ligacaoPasta);
-  const { todosProspetos } = useProspetosNovos(ligacaoPasta);
-  const { ehCampanha, definir: definirCampanha } = useNegociosCampanha(ligacaoPasta);
+  const { todosClientes, sincronizarComClientes, removerNegocioDeTodosOsClientes, reverterClienteAutoCriadoSeVazio } = useClientesNovos();
+  const { todosProspetos } = useProspetosNovos();
+  const { ehCampanha, definir: definirCampanha } = useNegociosCampanha();
   // "Campanha" depois de Negócios migrar para a nuvem (Passo 2, 2026-09-19): passa a
   // viver diretamente no próprio documento (negocio.campanha) — deixa de precisar do
   // armazenamento à parte (só usado enquanto a fonte é o Excel/local, ver
@@ -9073,8 +8886,6 @@ function NegociosView({ ligacaoPasta }) {
   const abrirNovo = () => { setAvisoNegocio(""); setConfirmarApagar(false); setForm({ ...NEGOCIO_VAZIO }); irParaTopo(); };
   const fecharEdicao = () => setForm(null);
   const mudarCampo = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
-
-  const handleProjeto = ligacaoPasta.pronto ? ligacaoPasta.handle : null;
 
   const guardarNegocio = async () => {
     if (!form.empresa || !form.dataInicio) return;
@@ -9163,8 +8974,8 @@ function NegociosView({ ligacaoPasta }) {
     setATransicionar(true);
     const { nif, nome, prospect } = transicaoPendente;
     marcarProspectFechado(nif);
-    const excelP = await removerProspectDoExcel(nif, handleProjeto).catch(() => false);
-    const excelC = await adicionarClienteAoExcel(prospect, "", handleProjeto).catch(() => false);
+    const excelP = await removerProspectDoExcel(nif).catch(() => false);
+    const excelC = await adicionarClienteAoExcel(prospect, "").catch(() => false);
     setAvisoNegocio(
       `"${nome}" movido de Prospetos para Clientes` +
       (excelP && excelC ? " — Excel atualizados ✓" : " — liga os ficheiros Excel de Prospetos/Clientes acima para atualização automática")
@@ -9209,7 +9020,7 @@ function NegociosView({ ligacaoPasta }) {
         <div className="border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-400">
           Liga o "Mapa Trimestral_Abril_Maio_2026.xlsx" acima para veres os teus negócios do trimestre.
           <br />Por serem dados sensíveis (incluem as tuas comissões), nada fica guardado neste ficheiro — só aparece depois de ligares o Excel, e fica só neste browser.
-          <br />Se já tiveres ligado a pasta do projeto (aviso no topo do dashboard) e os dados já lá tiverem chegado via iCloud, os dados aparecem aqui diretamente, sem precisar de ligar o Excel outra vez.
+          <br />Com login feito, os negócios vêm da nuvem e aparecem aqui sem precisar do Excel.
         </div>
       </div>
     );
@@ -9739,12 +9550,11 @@ function lerLinhasComissaoReal(wb) {
 // nunca apagado entre importações (cumulativo) — é o que permite a uma folha de
 // chargeback FUTURA saber se aquele negócio já recebeu comissão antes. Indexado por
 // categoria (Fixo/Móvel/ICT nunca se misturam) + chaveNegocioReal.
-const COMISSOES_REAIS_HISTORICO_FICHEIRO = "comissoes-reais-historico.json";
 // Nuvem (2026-09-28, pedido explícito do utilizador) — mesmo padrão e mesma coleção
 // de useObjetivosTrimestrais (comissoes_config), documento próprio
 // "historico_reais". Local (localStorage + dados-privados/) mantém-se como
 // fallback/origem da migração.
-function useHistoricoComissoesReais(ligacaoPasta) {
+function useHistoricoComissoesReais() {
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("historico_comissoes_reais", firebaseUser);
   const nuvemAtiva = !!firebaseUser && nuvemMigrada;
@@ -9762,32 +9572,18 @@ function useHistoricoComissoesReais(ligacaoPasta) {
   const [historicoLocal, setHistoricoLocal] = useState(() => {
     try { return JSON.parse(localStorage.getItem("comissoes-reais-historico") || "{}"); } catch { return {}; }
   });
-  const [carregadoDoFicheiro, setCarregadoDoFicheiro] = useState(false);
-
-  useEffect(() => {
-    if (!ligacaoPasta.pronto || carregadoDoFicheiro) return;
-    (async () => {
-      const doFicheiro = await lerJsonDadosPrivados(ligacaoPasta.handle, COMISSOES_REAIS_HISTORICO_FICHEIRO);
-      if (doFicheiro) setHistoricoLocal(doFicheiro);
-      else if (Object.keys(historicoLocal).length > 0) await guardarJsonDadosPrivados(ligacaoPasta.handle, COMISSOES_REAIS_HISTORICO_FICHEIRO, historicoLocal);
-      setCarregadoDoFicheiro(true);
-    })();
-  }, [ligacaoPasta.pronto]);
 
   useEffect(() => {
     try { localStorage.setItem("comissoes-reais-historico", JSON.stringify(historicoLocal)); } catch {}
-    if (ligacaoPasta.pronto && carregadoDoFicheiro) guardarJsonDadosPrivados(ligacaoPasta.handle, COMISSOES_REAIS_HISTORICO_FICHEIRO, historicoLocal);
   }, [historicoLocal]);
 
   const historico = nuvemAtiva ? (historicoNuvem || {}) : historicoLocal;
 
   const [aMigrar, setAMigrar] = useState(false);
   // 🐛→✅ Corrigido (2026-09-28, achado real de Augusto) — mesmas 2 proteções de
-  // useObjetivosTrimestrais: espera pelo carregamento local antes de migrar, e
-  // nunca sobrescreve se a nuvem já tiver histórico.
+  // useObjetivosTrimestrais: nunca sobrescreve se a nuvem já tiver histórico.
   const migrarParaNuvem = async () => {
     if (!firebaseUser || nuvemAtiva) return { ok: false };
-    if (!carregadoDoFicheiro) return { ok: false, motivo: "Ainda a carregar os dados locais — espera um instante e tenta outra vez." };
     setAMigrar(true);
     const existente = await firebaseDb.collection("comissoes_config").doc("historico_reais").get();
     if (existente.exists && Object.keys(existente.data() || {}).length > 0) {
@@ -10034,9 +9830,9 @@ function EditorTabelaXP({ tabela, onGuardar, aGuardar }) {
   );
 }
 
-function ComissoesView({ ligacaoPasta }) {
-  const { negocios, fonte, aCarregar, precisaPermissao, continuar, ligar, recarregar, wbAtual, nuvemAtiva } = useNegocios(ligacaoPasta);
-  const { ehCampanha } = useNegociosCampanha(ligacaoPasta);
+function ComissoesView() {
+  const { negocios, fonte, aCarregar, precisaPermissao, continuar, ligar, recarregar, wbAtual, nuvemAtiva } = useNegocios();
+  const { ehCampanha } = useNegociosCampanha();
   // Ver mesma nota em NegociosView — depois da migração, "Campanha" vive diretamente
   // no documento (negocio.campanha), nunca no armazenamento à parte.
   const campanhaDoNegocio = (n) => (nuvemAtiva ? !!n.campanha : ehCampanha(n.linhaExcel));
@@ -10044,7 +9840,7 @@ function ComissoesView({ ligacaoPasta }) {
     definirCampo, objetivosCategoriaDoTrimestre, objetivoCampanhaDoTrimestre,
     firebaseUser: firebaseUserObjetivos, nuvemAtiva: nuvemAtivaObjetivos,
     migrarParaNuvem: migrarObjetivos, aMigrar: aMigrarObjetivos, nParaMigrar: nParaMigrarObjetivos,
-  } = useObjetivosTrimestrais(ligacaoPasta);
+  } = useObjetivosTrimestrais();
   const {
     tabela: tabelaXPAtual, firebaseUser: firebaseUserXP, nuvemAtiva: nuvemAtivaXP,
     migrarParaNuvem: migrarTabelaXP, aMigrar: aMigrarXP, definir: definirTabelaXP, temFonteExcel: temExcelParaXP,
@@ -10070,7 +9866,7 @@ function ComissoesView({ ligacaoPasta }) {
     registarLinhas: registarLinhasComissaoReal, procurarHistorico: procurarHistoricoComissaoReal,
     firebaseUser: firebaseUserHistorico, nuvemAtiva: nuvemAtivaHistorico,
     migrarParaNuvem: migrarHistorico, aMigrar: aMigrarHistorico, nParaMigrar: nParaMigrarHistorico,
-  } = useHistoricoComissoesReais(ligacaoPasta);
+  } = useHistoricoComissoesReais();
 
   const negociosDoTrimestre = useMemo(
     () => negocios.filter((n) => n.estado === "IMPLEMENTADO" && trimestreChaveDeDataInicio(n.dataInicio) === trimestreChaveAtual),
@@ -10304,7 +10100,6 @@ const ASSUNTO_IMPORTANCIA_ESTILO = {
 };
 const ASSUNTO_VAZIO = { cliente: "", estado: "Em aberto", importancia: "Média", comentario: "", dataPedido: new Date().toISOString().slice(0, 10), dataPrevista: "" };
 
-const ASSUNTOS_FICHEIRO = "assuntos-em-progresso.json";
 
 // Fonte de dados LOCAL: dados-privados/assuntos-em-progresso.json (dentro da pasta do
 // projeto, via File System Access API) — sincroniza entre Macs via iCloud Drive,
@@ -10316,30 +10111,13 @@ const ASSUNTOS_FICHEIRO = "assuntos-em-progresso.json";
 // ficar ligada, se o ficheiro ainda não existir mas já houver dados no localStorage
 // (versão anterior a esta pasta existir), esses dados são gravados no ficheiro novo
 // automaticamente, uma única vez, antes de continuar — nunca perde o que já lá estava.
-function useAssuntosLocal(ligacaoPasta) {
+function useAssuntosLocal() {
   const [assuntos, setAssuntos] = useState(() => {
     try { return JSON.parse(localStorage.getItem("assuntos-em-progresso") || "[]"); } catch { return []; }
   });
-  const [carregadoDoFicheiro, setCarregadoDoFicheiro] = useState(false);
-
-  useEffect(() => {
-    if (!ligacaoPasta.pronto || carregadoDoFicheiro) return;
-    (async () => {
-      const doFicheiro = await lerJsonDadosPrivados(ligacaoPasta.handle, ASSUNTOS_FICHEIRO);
-      if (doFicheiro) {
-        setAssuntos(doFicheiro);
-      } else if (assuntos.length > 0) {
-        await guardarJsonDadosPrivados(ligacaoPasta.handle, ASSUNTOS_FICHEIRO, assuntos);
-      }
-      setCarregadoDoFicheiro(true);
-    })();
-  }, [ligacaoPasta.pronto]);
 
   useEffect(() => {
     try { localStorage.setItem("assuntos-em-progresso", JSON.stringify(assuntos)); } catch {}
-    if (ligacaoPasta.pronto && carregadoDoFicheiro) {
-      guardarJsonDadosPrivados(ligacaoPasta.handle, ASSUNTOS_FICHEIRO, assuntos);
-    }
   }, [assuntos]);
 
   const adicionar = (a) => setAssuntos((prev) => [...prev, { ...a, id: a.id || `assunto-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` }]);
@@ -10380,8 +10158,8 @@ function useAssuntosFirestore(ativo) {
 // confirmar (erradamente lido como "arquivado") que a importação tinha corrido bem —
 // nunca mais visível em lado nenhum. Mesmo padrão de useClientesNovos: local por
 // omissão, migração única e explícita para a nuvem, nunca automática.
-function useAssuntos(ligacaoPasta) {
-  const local = useAssuntosLocal(ligacaoPasta);
+function useAssuntos() {
+  const local = useAssuntosLocal();
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("assuntos", firebaseUser);
   const nuvemAtiva = !!firebaseUser && nuvemMigrada;
@@ -10444,7 +10222,7 @@ function useAssuntos(ligacaoPasta) {
   };
 
   return {
-    assuntos, adicionar, atualizar, remover: removerComLimpezaInbox, ligacaoPasta,
+    assuntos, adicionar, atualizar, remover: removerComLimpezaInbox,
     firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar: local.assuntos.length,
     aCarregarNuvem: nuvem.aCarregar,
     sincronizarLocalEmFaltaParaNuvem, aSincronizarFaltantes, nLocalTotal: local.assuntos.length,
@@ -10581,9 +10359,9 @@ function CartaoAssunto({ a, arquivado, atualizar, remover }) {
   );
 }
 
-function AssuntosView({ ligacaoPasta }) {
+function AssuntosView() {
   const { assuntos, adicionar, atualizar, remover, firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, aCarregarNuvem,
-    sincronizarLocalEmFaltaParaNuvem, aSincronizarFaltantes, nLocalTotal } = useAssuntos(ligacaoPasta);
+    sincronizarLocalEmFaltaParaNuvem, aSincronizarFaltantes, nLocalTotal } = useAssuntos();
   const [resultadoSincFaltantes, setResultadoSincFaltantes] = useState(null);
   const sincronizarFaltantesClick = async () => {
     const { n } = await sincronizarLocalEmFaltaParaNuvem();
@@ -11504,31 +11282,13 @@ function ProdutosVodafoneView({ ligacaoPasta }) {
 // explícita do utilizador (2026-09-08): antes cada separador (Assuntos, Negócios,
 // Propostas) pedia esta ligação separadamente; o handle já era o mesmo por trás
 // (mesma chave "pastaProjeto" no IndexedDB partilhado), só faltava um único ponto de
-// entrada em vez de repetir o botão em cada vista. Ligar aqui serve todo o dashboard.
-// Lista de tudo o que, uma vez migrado (com login), deixa de precisar da pasta do
-// projeto — pedido explícito do utilizador, 2026-09-28: "a barra só aparece se, com
-// login feito, ainda houver algum separador que precise da pasta". Fica de fora
-// "tabela_xp" (Painel de Validação de Comissões, ComissoesView) — nunca é fonte
-// primária de nada, só uma comparação informativa (ver useTabelaXP) — não vale a
-// pena obrigar a migrar isso só para esconder a barra. Também fica de fora Propostas
-// (Excel de decisão já é manual/arrastar-largar, nunca precisou da pasta) e a
-// geração de Word/PDF (precisa do Claude Code local, não da pasta — limitação à
-// parte, confirmada com o utilizador).
-const CHAVES_MIGRACAO_TUDO_NUVEM = [
-  "clientes", "prospetos", "negocios", "assuntos", "analise_faturas",
-  "produtos_vodafone", "carteira_fidelizar", "carteira_fidelizacao_trimestre",
-  "objetivos_trimestrais", "historico_comissoes_reais",
-];
-function useTudoNaNuvem(firebaseUser) {
-  // Chamar useMigracaoNuvem em loop é seguro aqui — CHAVES_MIGRACAO_TUDO_NUVEM é uma
-  // constante fixa do módulo, o nº e a ordem de hooks nunca muda entre renders.
-  const flags = CHAVES_MIGRACAO_TUDO_NUVEM.map((chave) => useMigracaoNuvem(chave, firebaseUser).feita);
-  return !!firebaseUser && flags.every(Boolean);
-}
+// entrada em vez de repetir o botão em cada vista.
 
-function AvisoPastaProjeto({ ligacaoPasta, tudoNaNuvem }) {
+// Pasta do projeto (2026-09-28, Passo 3): só Propostas (Word/PDF, Excel de decisão com
+// autonomias-comerciais.json) e Produtos Vodafone (extração dos PDFs pelo Claude Code)
+// ainda a usam — o aviso só aparece nesses 2 separadores. Tudo o resto vive na nuvem.
+function AvisoPastaProjeto({ ligacaoPasta }) {
   if (ligacaoPasta.pronto) return null;
-  if (tudoNaNuvem) return null;
   return (
     <div className={`flex items-center gap-2 text-xs mb-4 px-3 py-2 rounded-lg border ${ligacaoPasta.precisaPermissao ? "border-amber-300 bg-amber-50" : "border-neutral-200 bg-white"}`}>
       <button onClick={ligacaoPasta.precisaPermissao ? ligacaoPasta.continuar : ligacaoPasta.ligar}
@@ -11539,7 +11299,7 @@ function AvisoPastaProjeto({ ligacaoPasta, tudoNaNuvem }) {
       <span className="text-neutral-500">
         {ligacaoPasta.precisaPermissao
           ? "o browser esqueceu a autorização (normal depois de fechar) — a pasta já está escolhida"
-          : "para sincronizar Assuntos, Negócios, Clientes, Prospetos e Faturas entre os teus Macs via iCloud"}
+          : "só no Mac — para gerar o Word/PDF das Propostas e atualizar o catálogo de Produtos a partir dos PDFs"}
       </span>
     </div>
   );
@@ -11629,11 +11389,11 @@ function CartaoClienteFidelizacao({ c, valor, tom, ehCliente, onMudarEstado }) {
 // diferente — proximidade do FIM de fidelização, não upsell). Auto-contida (chama o
 // próprio hook), para poder viver dentro de CarteiraFidelizarView sem alterar a
 // assinatura dela.
-function SecaoFidelizacaoTrimestre({ ligacaoPasta, nCarteira }) {
+function SecaoFidelizacaoTrimestre({ nCarteira }) {
   const {
     lista, atualizadoEm, aProcessar, processarUpload, definirEstado, criarClienteSeNaoExistir, registarFechoFidelizacao, anularFechoFidelizacao, todosClientes, obterNotasFidelizacao,
     firebaseUser: firebaseUserTrimestre, nuvemAtiva: nuvemAtivaTrimestre, migrarParaNuvem: migrarTrimestre, aMigrar: aMigrarTrimestre, nParaMigrar: nParaMigrarTrimestre,
-  } = useFidelizacaoTrimestre(ligacaoPasta);
+  } = useFidelizacaoTrimestre();
   const [aviso, setAviso] = useState("");
   const inputRef = React.useRef(null);
   // Cliente pendente de confirmação para criar em "Clientes" — só quando o estado passa
@@ -11831,11 +11591,11 @@ function SecaoFidelizacaoTrimestre({ ligacaoPasta, nCarteira }) {
   );
 }
 
-function CarteiraFidelizarView({ ligacaoPasta }) {
+function CarteiraFidelizarView() {
   const {
     todos, firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, servicosExcel, livresExcel,
     prepararUploadServicos, confirmarUploadServicos, prepararUploadLivres, confirmarUploadLivres,
-  } = useCarteiraFidelizar(ligacaoPasta);
+  } = useCarteiraFidelizar();
 
   // Upload de atualização com a nuvem ativa (2026-09-28) — "resumo antes de gravar",
   // 1 pendente de cada vez por ficheiro (nunca os 2 em simultâneo, para nunca
@@ -11867,7 +11627,7 @@ function CarteiraFidelizarView({ ligacaoPasta }) {
 
   return (
     <div className="space-y-3">
-      <SecaoFidelizacaoTrimestre ligacaoPasta={ligacaoPasta} nCarteira={todos.length} />
+      <SecaoFidelizacaoTrimestre nCarteira={todos.length} />
 
       <MigracaoNuvemBanner nome="Carteira a Fidelizar" firebaseUser={firebaseUser} nuvemAtiva={nuvemAtiva}
         migrarParaNuvem={migrarParaNuvem} aMigrar={aMigrar} nParaMigrar={nParaMigrar} />
@@ -11919,7 +11679,6 @@ function App() {
   const [pontoAtivo, setPontoAtivo] = useState("assuntos");
   const ligacaoPasta = useLigacaoExcel("pastaProjeto", true);
   const firebaseUser = useFirebaseAuthUser();
-  const tudoNaNuvem = useTudoNaNuvem(firebaseUser);
   const ponto = PONTOS.find((p) => p.id === pontoAtivo);
 
   return (
@@ -11964,18 +11723,18 @@ function App() {
             <div id="vf-acoes-cabecalho" className="flex items-center gap-2 flex-wrap" />
           </header>
 
-        <AvisoPastaProjeto ligacaoPasta={ligacaoPasta} tudoNaNuvem={tudoNaNuvem} />
+        {(pontoAtivo === "propostas" || pontoAtivo === "produtos") && <AvisoPastaProjeto ligacaoPasta={ligacaoPasta} />}
 
         <ErrorBoundary key={pontoAtivo}>
-          {pontoAtivo === "assuntos" && <AssuntosView ligacaoPasta={ligacaoPasta} />}
-          {pontoAtivo === "negocios" && <NegociosView ligacaoPasta={ligacaoPasta} />}
-          {pontoAtivo === "comissoes" && <ComissoesView ligacaoPasta={ligacaoPasta} />}
-          {pontoAtivo === "clientes" && <ClientesView ligacaoPasta={ligacaoPasta} />}
-          {pontoAtivo === "prospetos" && <ProspetosView ligacaoPasta={ligacaoPasta} />}
+          {pontoAtivo === "assuntos" && <AssuntosView />}
+          {pontoAtivo === "negocios" && <NegociosView />}
+          {pontoAtivo === "comissoes" && <ComissoesView />}
+          {pontoAtivo === "clientes" && <ClientesView />}
+          {pontoAtivo === "prospetos" && <ProspetosView />}
           {pontoAtivo === "propostas" && <PropostasView ligacaoPasta={ligacaoPasta} />}
           {pontoAtivo === "produtos" && <ProdutosVodafoneView ligacaoPasta={ligacaoPasta} />}
-          {pontoAtivo === "faturas" && <AnaliseFaturasView ligacaoPasta={ligacaoPasta} />}
-          {pontoAtivo === "carteira" && <CarteiraFidelizarView ligacaoPasta={ligacaoPasta} />}
+          {pontoAtivo === "faturas" && <AnaliseFaturasView />}
+          {pontoAtivo === "carteira" && <CarteiraFidelizarView />}
         </ErrorBoundary>
         {!PONTOS.find((p) => p.id === pontoAtivo).ready && (
           <div className="border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
