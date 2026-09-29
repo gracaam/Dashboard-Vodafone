@@ -14,6 +14,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-functions-compat.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -99,6 +100,11 @@ const firebaseDb = firebase.firestore();
 // foram feitos para blobs grandes. Mesma proteção de sempre: só utilizador
 // autenticado lê/escreve (ver storage.rules), nunca acesso público.
 const firebaseStorage = firebase.storage();
+// Fase 3 (2026-09-28) — Firebase Functions, só para chamar a Cloud Function
+// recomendarProdutos (proxy seguro para o TypeSafe/Jev, ver functions/index.js).
+// Região tem de ser explícita: a function está deployed em europe-west1, não na
+// região por omissão (us-central1) do SDK.
+const firebaseFunctions = firebase.app().functions("europe-west1");
 
 // Sessão do Firebase Auth persiste sozinha neste browser depois do 1º login — nunca
 // pede login outra vez, igual à página mobile.
@@ -3316,6 +3322,232 @@ function mesclarCarteiraFidelizacao(anteriorLista, novaLista, nifsComNegocioImpl
   return { resultado, removidos, nAtualizados: novaListaComEstado.length, nMantidos: mantidos.length };
 }
 
+/* ================= MOTOR "PRÓXIMA OFERTA" (2026-09-28, Fase 2 — só código, sem Jev) =================
+   Proposta aprovada por Augusto: a elegibilidade entra como PARTE da pontuação (peso
+   ajustável), nunca como filtro — todos os clientes são pontuados, mesmo sem estarem
+   na Carteira a Fidelizar. Prospetos não têm sinal de elegibilidade nem de faturas
+   (0 em ambos) — a pontuação deles vem sobretudo do Jev (Fase 3, adequação). */
+
+// Sinal de elegibilidade (0-1) a partir da lista de "Fidelização por trimestre"
+// (useFidelizacaoTrimestre) — 1.0 "Elegível agora" (servico6M>0), 0.6 "A aproximar-se"
+// (servico12M>0), 0 nos restantes casos (incluindo prospetos, que nunca aparecem
+// nesta lista — mesma função serve para todos, devolve 0 sozinha quando não encontra).
+function calcularSinalElegibilidade(nif, fidelizacaoLista) {
+  const c = (fidelizacaoLista || []).find((x) => x.n === nif);
+  if (!c) return 0;
+  if (c.servico6M > 0) return 1;
+  if (c.servico12M > 0) return 0.6;
+  return 0;
+}
+
+// Sinal de faturas (0-1) — código, independente do que a Fase 3 envia ao Jev como
+// contexto da pergunta de necessidade (decisão explícita: os valores/indicadores
+// passam a ir ao Jev também, mas este sinal de código mantém-se à parte, com peso 0
+// por defeito na pontuação final — para não contar duas vezes — só para comparação
+// futura se Augusto quiser). Metade do peso vem de quanto do custo é variável (mais
+// variável = mais espaço para um tarifário/produto que estabilize o custo), metade de
+// haver algum acesso a esgotar plafond de dados no mês mais recente.
+function calcularSinalFaturas(kpis) {
+  if (!kpis || kpis.custoFixoPercent === null) return 0;
+  const percentVariavel = (100 - kpis.custoFixoPercent) / 100;
+  const temEsgotados = (kpis.insights || []).some((i) => i.rotulo === "Atenção");
+  return Math.min(1, percentVariavel * 0.6 + (temEsgotados ? 0.4 : 0));
+}
+
+/* ================= MOTOR "PRÓXIMA OFERTA" (2026-09-28, Fase 3 — chamada ao Jev) =================
+   Dados autorizados por Augusto para saírem para o TypeSafe (correção #8 da proposta):
+   nome da empresa, setor/CAE/atividade, tipos de serviço já contratados, valores e
+   indicadores das faturas, descrição do produto do catálogo. NUNCA o NIF, NUNCA
+   contactos (telefone/email) — esta função é o único sítio a montar o `state`, para
+   haver um único ponto a auditar o que sai (ver comentário em functions/index.js). */
+
+// `cliente` no formato de useClientesNovos()/carteira ({ e, cae, caeDesc,
+// atividadeEconomica, seg, ... }) — nunca passar o objeto de fidelização (tem `n`=NIF).
+// `kpisFaturas` é o que calcularKpisEInsights() devolve, ou null se não houver faturas
+// carregadas para este cliente/prospeto.
+// `cliente` pode vir de useClientesNovos() ({ setor: atividade económica, ver
+// mapearLinhaCliente) ou de Prospetos ({ seg, cae, caeDesc }, ver mapearLinhaProspect)
+// — as duas formas têm campos de setor diferentes, por isso lê-se com fallback.
+// `produto` (opcional) — { nome, descricao, caracteristicas: string[] }, ver
+// montarProdutoParaState — entra no `state` como campo próprio (2026-09-28, correção
+// de Augusto: antes ia escrito dentro do texto da própria pergunta; assim fica
+// referenciável como `produto` nas instruções, igual ao resto do state).
+function montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto) {
+  return {
+    empresa: cliente.e || "",
+    setor: {
+      segmento: cliente.seg || null,
+      cae: cliente.cae || null,
+      caeDescricao: cliente.caeDesc || null,
+      atividadeEconomica: cliente.setor || cliente.atividadeEconomica || null,
+    },
+    servicosContratados: servicosContratados || [],
+    faturas: kpisFaturas
+      ? {
+          valorMensalRecenteEuros: kpisFaturas.gastoMesRecente,
+          percentConsumoVariavel: kpisFaturas.custoVariavelPercent,
+          numeroAcessos: kpisFaturas.nLinhasRecente,
+          plafondEsgotado: (kpisFaturas.insights || []).some((i) => i.rotulo === "Atenção"),
+        }
+      : null,
+    ...(produto ? { produto } : {}),
+  };
+}
+
+// Um produto do catálogo (dados.produtos, ver lerProdutosCaracteristicasNuvem) →
+// descrição textual (inclui `nota` — em tarifários genéricos é o único campo
+// distintivo além do nome).
+function descreverProdutoCatalogo(produto) {
+  const caracteristicas = (produto.caracteristicas || [])
+    .map((c) => `${c.etiqueta}: ${c.valor}`)
+    .join("; ");
+  return [produto.subtitulo, caracteristicas, produto.nota].filter(Boolean).join(". ");
+}
+
+// Normaliza um produto do catálogo OU uma descrição de campanha em texto livre para o
+// formato usado em `state.produto` (ver montarStateRecomendacao).
+function montarProdutoParaState(produtoCatalogoOuTexto) {
+  if (typeof produtoCatalogoOuTexto === "string") {
+    return { nome: produtoCatalogoOuTexto, descricao: produtoCatalogoOuTexto, caracteristicas: [] };
+  }
+  const p = produtoCatalogoOuTexto;
+  return {
+    nome: p.nome,
+    descricao: descreverProdutoCatalogo(p),
+    caracteristicas: (p.caracteristicas || []).map((c) => `${c.etiqueta}: ${c.valor}`),
+  };
+}
+
+// Critérios concretos por pergunta (2026-09-28, correção de Augusto — os níveis
+// genéricos "nada/pouco/moderadamente/bastante/totalmente adequado" davam pontuações
+// todas parecidas, sem informação suficiente para o Jev distinguir; estes descrevem
+// situações concretas). Adequação e necessidade são perguntas distintas, com critérios
+// próprios — nunca partilham a mesma lista.
+const NIVEIS_ADEQUACAO_CAMPANHA = [
+  "Sem relação percetível com a atividade da empresa",
+  "Relação indireta, aplicável a muitos setores sem ligação específica",
+  "Aplicação plausível, usado por empresas deste tipo sem ser central",
+  "Boa adequação, resolve uma necessidade comum e reconhecível neste setor",
+  "Adequação clara e direta, central à forma como empresas deste setor operam",
+];
+const NIVEIS_NECESSIDADE_CAMPANHA = [
+  "Já bem servida nesta área, produto redundante",
+  "Parcialmente coberta, ganho marginal",
+  "Sem sinal claro a favor ou contra",
+  "Lacuna visível que os serviços atuais não resolvem",
+  "Lacuna clara e específica, confirmada pelos dados",
+];
+
+function montarPerguntasCampanha() {
+  return {
+    adequacao: {
+      type: "score",
+      instructions: "Com base no setor e na atividade da empresa (em `setor`) e no produto/campanha (em `produto`), quão adequado é este produto a este tipo de negócio?",
+      criteria: NIVEIS_ADEQUACAO_CAMPANHA,
+    },
+    necessidade: {
+      type: "score",
+      instructions: "Dados os serviços já contratados, se existirem (em `servicosContratados`), e os indicadores de faturação, se disponíveis (em `faturas`), quão provável é que esta empresa precise deste produto/campanha (em `produto`)?",
+      criteria: NIVEIS_NECESSIDADE_CAMPANHA,
+    },
+  };
+}
+
+// Chama a Cloud Function recomendarProdutos (proxy para o TypeSafe/Jev). Só funciona
+// com o Augusto autenticado (a function recusa qualquer outro UID) — ver
+// functions/index.js. Nunca chamar diretamente a API do TypeSafe a partir do browser.
+async function chamarRecomendarProdutos(state, questions) {
+  const chamar = firebaseFunctions.httpsCallable("recomendarProdutos");
+  const resposta = await chamar({ state, questions });
+  return resposta.data;
+}
+
+// `cliente` no formato de useClientesNovos() ({ v, d, f, i, ... }, ver mapearLinhaCliente)
+// → lista de tipos de serviço já contratados, em texto simples (nunca valores/contactos).
+function servicosContratadosDoCliente(cliente) {
+  const lista = [];
+  if (cliente.v && cliente.v[0] > 0) lista.push("Voz móvel");
+  if (cliente.d && cliente.d[0] > 0) lista.push("Dados móveis");
+  if (cliente.f && cliente.f[0] > 0) lista.push("Fixo");
+  if (cliente.i > 0) lista.push("IoT");
+  return lista;
+}
+
+/* ================= CAMPANHA POR PRODUTO (2026-09-28) =================
+   Pedido explícito de Augusto: em vez de "Produtos recomendados" na ficha (adiado),
+   pontuar TODOS os clientes e prospetos contra 1 campanha (produto do catálogo ou
+   descrição livre) e devolver a lista ordenada por adequação, para escolher a quem
+   mandar. 1 pedido ao Jev por destinatário (não há como juntar destinatários
+   diferentes num único pedido — cada um tem um `state` próprio) — corridos em
+   paralelo com um limite de concorrência, nunca todos de uma vez. */
+
+// `produtoOuTexto` — produto do catálogo ou descrição livre (ver montarProdutoParaState).
+// Pede adequação e necessidade num único pedido (composite scoring — nunca 2 chamadas).
+// Devolve { adequacao, necessidade }, cada uma 0-4 ou null se a resposta não vier.
+async function pontuarClienteParaCampanha(cliente, kpisFaturas, servicosContratados, produtoOuTexto) {
+  const produto = montarProdutoParaState(produtoOuTexto);
+  const state = montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto);
+  const questions = montarPerguntasCampanha();
+  const resultado = await chamarRecomendarProdutos(state, questions);
+  const respostas = (resultado && resultado.answers) || {};
+  return {
+    adequacao: respostas.adequacao ? respostas.adequacao.score : null,
+    necessidade: respostas.necessidade ? respostas.necessidade.score : null,
+  };
+}
+
+// Corre `worker` sobre `itens`, no máximo `concorrencia` em simultâneo (nunca todos de
+// uma vez — evita rajadas grandes para a Cloud Function/TypeSafe), chamando
+// `onProgresso(feitos, total)` a cada item concluído. Devolve os resultados na mesma
+// ordem de `itens`, mesmo com conclusões fora de ordem.
+async function executarEmLotes(itens, worker, concorrencia, onProgresso) {
+  const resultados = new Array(itens.length);
+  let proximo = 0, feitos = 0;
+  async function trabalhador() {
+    while (proximo < itens.length) {
+      const i = proximo++;
+      resultados[i] = await worker(itens[i], i);
+      feitos++;
+      if (onProgresso) onProgresso(feitos, itens.length);
+    }
+  }
+  await Promise.all(new Array(Math.min(concorrencia, itens.length)).fill(0).map(trabalhador));
+  return resultados;
+}
+
+// Combina adequação+necessidade (0-4 cada, normalizadas para 0-1, pesoAdequacao
+// ajustável — por omissão 70/30 a favor da adequação, pedido de Augusto) com o sinal
+// de elegibilidade de código (0-1, ver calcularSinalElegibilidade) num único score
+// final (0-1). Tudo ajustável em código sem voltar a chamar o Jev (correção #2 da
+// proposta original).
+function calcularScoreFinalCampanha(adequacao0a4, necessidade0a4, elegibilidade0a1, pesoElegibilidade, pesoAdequacao = 0.7) {
+  const adequacaoNorm = adequacao0a4 === null ? 0 : adequacao0a4 / 4;
+  const necessidadeNorm = necessidade0a4 === null ? 0 : necessidade0a4 / 4;
+  const jevCombinado = adequacaoNorm * pesoAdequacao + necessidadeNorm * (1 - pesoAdequacao);
+  return jevCombinado * (1 - pesoElegibilidade) + elegibilidade0a1 * pesoElegibilidade;
+}
+
+// Guarda as pontuações de uma campanha no Firestore, para reabrir sem gastar novos
+// pedidos ao Jev (pedido explícito de Augusto). Um documento por campanha, id = slug
+// da descrição + timestamp (nunca colide, nunca precisa de escolher um id à mão).
+function slugCampanha(descricao) {
+  return String(descricao || "campanha").toLowerCase()
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+}
+async function guardarCampanhaPontuada(descricao, pesoElegibilidade, pesoAdequacao, linhas) {
+  const id = `${slugCampanha(descricao)}-${Date.now()}`;
+  await firebaseDb.collection("campanhas_pontuacao").doc(id).set({
+    descricao, pesoElegibilidade, pesoAdequacao, criadoEm: new Date().toISOString(),
+    linhas: linhas.map((l) => ({ n: l.n, e: l.e, tipo: l.tipo, temEmail: !!l.email, adequacao: l.adequacao, necessidade: l.necessidade, elegibilidade: l.elegibilidade, final: l.final })),
+  });
+  return id;
+}
+async function listarCampanhasPontuadas() {
+  const snap = await firebaseDb.collection("campanhas_pontuacao").orderBy("criadoEm", "desc").limit(20).get();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
 // Hook genérico: usa os dados fixos de referência até haver um Excel ligado; a partir
 // daí, se o browser já se lembra da permissão, lê sozinho ao abrir a página — caso
 // contrário fica à espera de 1 clique em "Continuar" (não abre o seletor de ficheiro,
@@ -4587,7 +4819,25 @@ const EXTRA_FIELDS = [
   { key: "oportunidades", label: "Oportunidades identificadas", type: "textarea", group: "Comercial" },
   { key: "proximaAcao", label: "Próxima ação", type: "text", group: "Comercial" },
   { key: "dataUltimoContacto", label: "Data último contacto", type: "date", group: "Comercial" },
+  // Motor de "Próxima Oferta" (2026-09-28, Fase 2) — marcação manual, pedido explícito
+  // do utilizador: o mapeamento automático categoria-do-catálogo → serviço-já-
+  // contratado é só aproximado (nunca 1:1), por isso a exclusão real de produtos que o
+  // cliente já tem é esta lista à mão, não um cálculo. Um produto por linha (nome
+  // exatamente como aparece no catálogo Produtos Vodafone) — ver
+  // produtosJaTemComoLista/calcularSinaisRecomendacao.
+  { key: "produtosJaTem", label: "Produtos já contratados (um por linha, nome exato do catálogo)", type: "textarea", group: "Comercial" },
 ];
+
+// Converte o texto multi-linha de "Produtos já contratados" numa lista normalizada
+// (minúsculas, sem espaços a mais) para comparar contra o catálogo sem exigir
+// maiúsculas/minúsculas exatas. Linhas vazias ignoradas.
+function produtosJaTemComoLista(textoMultiLinha) {
+  return String(textoMultiLinha || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => l.toLowerCase());
+}
 const GROUPS = ["Identificação", "Contacto", "Comercial"];
 
 // Taxonomia real de Portfolio_Vodafone
@@ -4646,6 +4896,7 @@ const PONTOS = [
   { id: "produtos", label: "Produtos Vodafone", eyebrow: "Catálogo", icone: "caixa", ready: true },
   { id: "faturas", label: "Análise de Faturas", eyebrow: "Faturação do cliente", icone: "fatura", ready: true },
   { id: "carteira", label: "Carteira a Fidelizar", eyebrow: "Renovações", icone: "renovar", ready: true },
+  { id: "campanha-produto", label: "Campanha por Produto", eyebrow: "Próxima Oferta (Jev)", icone: "alvo", ready: true },
 ];
 
 // Ícones de traço simples (redesign 2026-09-26) — sem emojis em botões/títulos.
@@ -11591,6 +11842,271 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
   );
 }
 
+// Painel de teste, temporário (Fase 3, 2026-09-28) — pedido explícito de Augusto:
+// pontuar um lote pequeno (5-10 clientes reais) contra 2-3 produtos do catálogo e
+// mostrar os resultados ANTES de correr para todos. Fica visível só dentro de
+// "Carteira a Fidelizar" (secção de trabalho interno), não faz parte do fluxo normal
+// de nenhuma ficha — para ser removido/promovido a funcionalidade definitiva depois
+// da revisão conjunta.
+// Pedido explícito de Augusto (2026-09-28) — em vez de "Produtos recomendados" na
+// ficha (adiado), vista dedicada: escolhe 1 campanha (produto do catálogo ou
+// descrição livre), pontua clientes+prospetos reais contra ela, e gera o .eml a
+// partir dos melhores. Vista própria (não dentro de Clientes/Prospetos) porque
+// combina as duas listas, coisa que BlocoCampanha/PainelCampanhaEmail (por página)
+// não fazem hoje sem um refactor maior — decisão registada aqui para ser revista se
+// Augusto preferir integrar diretamente nas páginas existentes.
+function CampanhaPorProdutoView() {
+  const { todosClientes, firebaseUser, nuvemAtiva, obterTodosExtras } = useClientesNovos();
+  const { todosProspetos } = useProspetosNovos();
+  const { lista: fidelizacaoLista } = useFidelizacaoTrimestre();
+
+  const [catalogo, setCatalogo] = useState(null);
+  const [produtoEscolhido, setProdutoEscolhido] = useState("");
+  const [descricaoLivre, setDescricaoLivre] = useState("");
+  const [nRegistos, setNRegistos] = useState(20);
+  // Pesos por omissão (2026-09-28, pedido de Augusto): elegibilidade 10% — a maior
+  // parte do peso fica no Jev — e adequação/necessidade 90/10 (era 70/30, ajustado
+  // depois do 1º teste real).
+  const [pesoElegibilidade, setPesoElegibilidade] = useState(0.1);
+  const [pesoAdequacao, setPesoAdequacao] = useState(0.9);
+  const [aCorrer, setACorrer] = useState(false);
+  const [progresso, setProgresso] = useState(null);
+  const [resultados, setResultados] = useState(null);
+  const [erro, setErro] = useState("");
+  const [pedidoExemplo, setPedidoExemplo] = useState(null);
+  const [filtros, setFiltros] = useState({ clientes: true, prospetos: true, soElegiveis: false, comEmail: false });
+  const [nSelecionar, setNSelecionar] = useState(10);
+  const [selecionados, setSelecionados] = useState(() => new Set());
+  const [campanhasGuardadas, setCampanhasGuardadas] = useState(null);
+  // Emails de Clientes vêm de "extras" (ficha), nunca do objeto base — mesma fonte que
+  // PainelCampanhaEmail já usa em Clientes (obterTodosExtras), para as duas vistas
+  // darem sempre o mesmo resultado (achado de Augusto: a Bobadela tinha email na ficha
+  // mas aparecia "sem email" aqui, porque esta vista nunca tinha ido buscar os extras).
+  const [extrasClientes, setExtrasClientes] = useState(null);
+
+  useEffect(() => {
+    (async () => setCatalogo(((await lerProdutosCaracteristicasNuvem()) || {}).produtos || []))();
+    listarCampanhasPontuadas().then(setCampanhasGuardadas).catch(() => setCampanhasGuardadas([]));
+  }, []);
+  useEffect(() => {
+    if (!todosClientes.length) return;
+    let cancelado = false;
+    obterTodosExtras().then((mapa) => { if (!cancelado) setExtrasClientes(mapa); });
+    return () => { cancelado = true; };
+  }, [todosClientes.length, nuvemAtiva]);
+
+  // Devolve o produto do catálogo (objeto) ou a descrição livre (texto) — o que for
+  // passado ao Jev entra no `state.produto`, nunca escrito dentro do texto da pergunta
+  // (ver montarProdutoParaState/montarStateRecomendacao). Tira aspas do início/fim do
+  // texto livre (retas ou curvas) — achado de Augusto: colar um texto já entre aspas
+  // ia parar a `state.produto.nome`/`descricao` tal e qual, aspas incluídas.
+  const produtoParaCampanha = () => {
+    if (produtoEscolhido) return (catalogo || []).find((x) => x.nome === produtoEscolhido) || null;
+    const texto = descricaoLivre.trim().replace(/^["'“”«»]+/, "").replace(/["'“”«»]+$/, "").trim();
+    return texto || null;
+  };
+
+  // Universo combinado — respeita os filtros ativos ANTES de pontuar (2026-09-28,
+  // pedido de Augusto): desligar "Só clientes"/"Só prospetos" tira esse grupo da
+  // amostra, e "Só elegíveis"/"Com email" descartam candidatos antes de gastar pedidos
+  // ao Jev com gente que ia ficar de fora de qualquer forma. Sem filtros, metade de
+  // cada grupo, até `nRegistos` no total.
+  const montarUniverso = () => {
+    const nCada = Math.ceil(nRegistos / 2);
+    let clientes = !filtros.clientes ? [] : todosClientes.map((c) => ({
+      n: c.n, e: c.e, email: (extrasClientes && extrasClientes[c.n] && extrasClientes[c.n].email) || null,
+      tipo: "cliente", cliente: c,
+      servicos: servicosContratadosDoCliente(c),
+      elegibilidade: calcularSinalElegibilidade(c.n, fidelizacaoLista),
+    }));
+    let prospetos = !filtros.prospetos ? [] : todosProspetos.map((p) => ({
+      n: p.n, e: p.e, email: p.email || null, tipo: "prospeto", cliente: p,
+      servicos: [],
+      elegibilidade: 0,
+    }));
+    if (filtros.soElegiveis) clientes = clientes.filter((c) => c.elegibilidade > 0);
+    if (filtros.comEmail) { clientes = clientes.filter((c) => c.email); prospetos = prospetos.filter((p) => p.email); }
+    const limiteClientes = !filtros.prospetos ? nRegistos : Math.min(clientes.length, nCada);
+    const restoParaProspetos = nRegistos - Math.min(clientes.length, limiteClientes);
+    return [...clientes.slice(0, limiteClientes), ...prospetos.slice(0, restoParaProspetos)].slice(0, nRegistos);
+  };
+
+  const verPedidoExemplo = () => {
+    const produto = produtoParaCampanha();
+    const universo = montarUniverso();
+    if (!produto || universo.length === 0) { setPedidoExemplo(null); return; }
+    const alvo = universo[0];
+    setPedidoExemplo({
+      state: montarStateRecomendacao(alvo.cliente, null, alvo.servicos, montarProdutoParaState(produto)),
+      questions: montarPerguntasCampanha(),
+    });
+  };
+
+  const correr = async () => {
+    const produto = produtoParaCampanha();
+    if (!produto) { setErro("Escolhe um produto do catálogo ou escreve uma descrição de campanha."); return; }
+    setACorrer(true);
+    setErro("");
+    setResultados(null);
+    setProgresso({ feitos: 0, total: 0 });
+    setSelecionados(new Set());
+    try {
+      const universo = montarUniverso();
+      setProgresso({ feitos: 0, total: universo.length });
+      const linhas = await executarEmLotes(
+        universo,
+        async (item) => {
+          const jev = await pontuarClienteParaCampanha(item.cliente, null, item.servicos, produto);
+          return {
+            n: item.n, e: item.e, email: item.email, tipo: item.tipo,
+            adequacao: jev.adequacao, necessidade: jev.necessidade, elegibilidade: item.elegibilidade,
+            final: calcularScoreFinalCampanha(jev.adequacao, jev.necessidade, item.elegibilidade, pesoElegibilidade, pesoAdequacao),
+          };
+        },
+        4,
+        (feitos, total) => setProgresso({ feitos, total })
+      );
+      linhas.sort((a, b) => b.final - a.final);
+      setResultados(linhas);
+      const descricaoGuardada = typeof produto === "string" ? produto : produto.nome;
+      await guardarCampanhaPontuada(descricaoGuardada, pesoElegibilidade, pesoAdequacao, linhas);
+      listarCampanhasPontuadas().then(setCampanhasGuardadas).catch(() => {});
+    } catch (e) {
+      setErro(e.message || String(e));
+    } finally {
+      setACorrer(false);
+    }
+  };
+
+  const resultadosFiltrados = (resultados || []).filter((r) => {
+    if (r.tipo === "cliente" && !filtros.clientes) return false;
+    if (r.tipo === "prospeto" && !filtros.prospetos) return false;
+    if (filtros.soElegiveis && r.elegibilidade === 0) return false;
+    if (filtros.comEmail && !r.email) return false;
+    return true;
+  });
+
+  const alternarSelecionado = (n) => setSelecionados((prev) => {
+    const novo = new Set(prev);
+    novo.has(n) ? novo.delete(n) : novo.add(n);
+    return novo;
+  });
+  const selecionarPrimeirosN = () => setSelecionados(new Set(resultadosFiltrados.slice(0, nSelecionar).map((r) => r.n)));
+
+  const destinatariosSelecionados = resultadosFiltrados
+    .filter((r) => selecionados.has(r.n))
+    .map((r) => ({ n: r.n, e: r.e, email: r.email }));
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="text-sm text-neutral-500">Pontua clientes e prospetos reais contra uma campanha (produto do catálogo ou descrição livre) e gera o .eml a partir dos melhores.</p>
+      </div>
+
+      <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-3">
+        <p className="text-sm font-medium">Campanha / produto</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-neutral-500">Produto do catálogo</label>
+            <select value={produtoEscolhido} onChange={(e) => { setProdutoEscolhido(e.target.value); if (e.target.value) setDescricaoLivre(""); }}
+              className="w-full px-3 py-2 rounded-md border border-neutral-300 text-sm">
+              <option value="">— nenhum —</option>
+              {(catalogo || []).map((p) => <option key={p.nome} value={p.nome}>{p.nome}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-neutral-500">— ou descrição livre da campanha —</label>
+            <textarea value={descricaoLivre} onChange={(e) => { setDescricaoLivre(e.target.value); if (e.target.value) setProdutoEscolhido(""); }}
+              rows={2} placeholder="Ex.: Alarme e videovigilância Prosegur com internet Vodafone, para lojas, restaurantes, armazéns e espaços com público"
+              className="w-full px-3 py-2 rounded-md border border-neutral-300 text-sm" />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 flex-wrap text-sm">
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-neutral-500">Nº de registos a testar:</label>
+            <input type="number" min="1" max="700" value={nRegistos} onChange={(e) => setNRegistos(Number(e.target.value))}
+              className="w-20 px-2 py-1 rounded border border-neutral-300 text-sm" />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-neutral-500">Peso elegibilidade ({Math.round(pesoElegibilidade * 100)}%):</label>
+            <input type="range" min="0" max="1" step="0.05" value={pesoElegibilidade} onChange={(e) => setPesoElegibilidade(Number(e.target.value))} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-neutral-500">Peso adequação vs. necessidade ({Math.round(pesoAdequacao * 100)}/{Math.round((1 - pesoAdequacao) * 100)}):</label>
+            <input type="range" min="0" max="1" step="0.05" value={pesoAdequacao} onChange={(e) => setPesoAdequacao(Number(e.target.value))} />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={verPedidoExemplo} className="text-xs px-3 py-1.5 rounded-md border border-neutral-400 text-neutral-700 hover:bg-neutral-50">
+            Ver pedido exemplo (1 registo)
+          </button>
+          <button onClick={correr} disabled={aCorrer}
+            className="text-xs px-3 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40">
+            {aCorrer ? "A pontuar…" : "Encontrar os melhores clientes"}
+          </button>
+          {aCorrer && progresso && progresso.total > 0 && (
+            <div className="flex items-center gap-2 text-xs text-neutral-500">
+              <div className="w-40 h-2 bg-neutral-200 rounded-full overflow-hidden">
+                <div className="h-full bg-red-600" style={{ width: `${(progresso.feitos / progresso.total) * 100}%` }} />
+              </div>
+              {progresso.feitos}/{progresso.total}
+            </div>
+          )}
+        </div>
+
+        {pedidoExemplo && (
+          <pre className="text-[10px] bg-neutral-900 text-neutral-100 rounded p-2 overflow-x-auto max-h-64 overflow-y-auto">{JSON.stringify(pedidoExemplo, null, 2)}</pre>
+        )}
+        {erro && <div className="text-xs text-red-700">{erro}</div>}
+      </div>
+
+      {resultados && (
+        <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-4 flex-wrap text-xs">
+            <label className="flex items-center gap-1"><input type="checkbox" checked={filtros.clientes} onChange={(e) => setFiltros((f) => ({ ...f, clientes: e.target.checked }))} /> Só clientes</label>
+            <label className="flex items-center gap-1"><input type="checkbox" checked={filtros.prospetos} onChange={(e) => setFiltros((f) => ({ ...f, prospetos: e.target.checked }))} /> Só prospetos</label>
+            <label className="flex items-center gap-1"><input type="checkbox" checked={filtros.soElegiveis} onChange={(e) => setFiltros((f) => ({ ...f, soElegiveis: e.target.checked }))} /> Só elegíveis</label>
+            <label className="flex items-center gap-1"><input type="checkbox" checked={filtros.comEmail} onChange={(e) => setFiltros((f) => ({ ...f, comEmail: e.target.checked }))} /> Com email</label>
+            <span className="text-neutral-400">
+              {resultadosFiltrados.length} resultado(s) — {resultadosFiltrados.filter((r) => r.email).length} com email
+              {selecionados.size > 0 && ` · ${destinatariosSelecionados.length} selecionado(s), ${destinatariosSelecionados.filter((d) => d.email).length} com email`}
+            </span>
+            <div className="flex items-center gap-2 ml-auto">
+              <input type="number" min="1" value={nSelecionar} onChange={(e) => setNSelecionar(Number(e.target.value))} className="w-16 px-2 py-1 rounded border border-neutral-300 text-xs" />
+              <button onClick={selecionarPrimeirosN} className="text-xs px-2.5 py-1.5 rounded-md bg-neutral-900 text-white hover:bg-neutral-800">Selecionar os N primeiros</button>
+            </div>
+          </div>
+
+          <div className="max-h-[420px] overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="text-neutral-400 text-left sticky top-0 bg-white">
+                <tr><th className="p-1"></th><th className="p-1">Empresa</th><th className="p-1">Tipo</th><th className="p-1">Adequação (0-4)</th><th className="p-1">Necessidade (0-4)</th><th className="p-1">Elegibilidade</th><th className="p-1">Final</th></tr>
+              </thead>
+              <tbody>
+                {resultadosFiltrados.map((r) => (
+                  <tr key={r.n} className="border-t border-neutral-100">
+                    <td className="p-1"><input type="checkbox" checked={selecionados.has(r.n)} onChange={() => alternarSelecionado(r.n)} /></td>
+                    <td className="p-1 font-medium">{r.e} {!r.email && <span className="text-amber-600">(sem email)</span>}</td>
+                    <td className="p-1 text-neutral-500">{r.tipo}</td>
+                    <td className="p-1">{r.adequacao !== null ? r.adequacao.toFixed(2) : "—"}</td>
+                    <td className="p-1">{r.necessidade !== null ? r.necessidade.toFixed(2) : "—"}</td>
+                    <td className="p-1">{r.elegibilidade.toFixed(1)}</td>
+                    <td className="p-1 font-semibold">{r.final.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {destinatariosSelecionados.length > 0 && <PainelCampanhaEmail destinatarios={destinatariosSelecionados} />}
+    </div>
+  );
+}
+
 function CarteiraFidelizarView() {
   const {
     todos, firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, servicosExcel, livresExcel,
@@ -11671,6 +12187,7 @@ function CarteiraFidelizarView() {
           ? `${todos.length} registo(s) ${nuvemAtiva ? "na nuvem" : "ligado(s)"} — usados para preencher automaticamente Telefone/Email em "Clientes" e "Prospetos".`
           : 'Liga os 2 ficheiros acima para os dados de contacto ficarem disponíveis a preencher automaticamente em "Clientes" e "Prospetos".'}
       </div>
+
     </div>
   );
 }
@@ -11735,6 +12252,7 @@ function App() {
           {pontoAtivo === "produtos" && <ProdutosVodafoneView ligacaoPasta={ligacaoPasta} />}
           {pontoAtivo === "faturas" && <AnaliseFaturasView />}
           {pontoAtivo === "carteira" && <CarteiraFidelizarView />}
+          {pontoAtivo === "campanha-produto" && <CampanhaPorProdutoView />}
         </ErrorBoundary>
         {!PONTOS.find((p) => p.id === pontoAtivo).ready && (
           <div className="border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
