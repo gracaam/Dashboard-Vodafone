@@ -542,7 +542,11 @@ async function lerTodasAsAnalisesFaturasCacheNuvem() {
     const mapa = new Map();
     snap.forEach((doc) => {
       const dados = doc.data();
-      if (dados && dados.resumo && Array.isArray(dados.resumo.contas)) mapa.set(doc.id, dados.resumo.contas);
+      if (dados && dados.resumo && Array.isArray(dados.resumo.contas)) {
+        // B8 (2026-09-29) — guarda também de quando é a análise, para a UI poder mostrar
+        // a idade das faturas que estão a alimentar a campanha (nunca esconder isto).
+        mapa.set(doc.id, { contas: dados.resumo.contas, analisadoEm: dados.analisadoEm || null, finalizado: !!dados.finalizado });
+      }
     });
     return mapa;
   } catch (e) {
@@ -3543,6 +3547,13 @@ function calcularSinalElegibilidade(nif, fidelizacaoLista) {
 // futura se Augusto quiser). Metade do peso vem de quanto do custo é variável (mais
 // variável = mais espaço para um tarifário/produto que estabilize o custo), metade de
 // haver algum acesso a esgotar plafond de dados no mês mais recente.
+//
+// D15 (2026-09-29) — DECISÃO EXPLÍCITA DE MANTENÇA: esta função está hoje DEFINIDA mas
+// NÃO é chamada por nenhum sítio (confirmado por grep) — as faturas já entram no pedido
+// ao Jev como contexto (`state.faturas`, ver montarStateRecomendacao), e este sinal de
+// código tem peso 0 por omissão para não contar duas vezes. Ligá-lo mudaria a ordem de
+// TODAS as campanhas, por isso fica deliberadamente desligado até Augusto pedir. Se um
+// dia for ligado, é via `calcularScoreFinalCampanha` (novo peso), nunca chamado daqui.
 function calcularSinalFaturas(kpis) {
   if (!kpis || kpis.custoFixoPercent === null) return 0;
   const percentVariavel = (100 - kpis.custoFixoPercent) / 100;
@@ -3672,10 +3683,18 @@ function montarPerguntasCampanha() {
 // Chama a Cloud Function recomendarProdutos (proxy para o TypeSafe/Jev). Só funciona
 // com o Augusto autenticado (a function recusa qualquer outro UID) — ver
 // functions/index.js. Nunca chamar diretamente a API do TypeSafe a partir do browser.
+// B5 (2026-09-29) — 1 retry com espera curta em falhas transitórias (rede/429/5xx):
+// sem isto, um soluço passageiro perdia o cliente na campanha (antes ia para o "erro").
 async function chamarRecomendarProdutos(state, questions) {
   const chamar = firebaseFunctions.httpsCallable("recomendarProdutos");
-  const resposta = await chamar({ state, questions });
-  return resposta.data;
+  try {
+    const resposta = await chamar({ state, questions });
+    return resposta.data;
+  } catch (e) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const resposta = await chamar({ state, questions });
+    return resposta.data;
+  }
 }
 
 // `cliente` no formato de useClientesNovos() ({ v, d, f, i, ... }, ver mapearLinhaCliente)
@@ -3702,16 +3721,48 @@ function servicosContratadosDoCliente(cliente) {
 // Devolve { adequacao, necessidade }, cada uma 0-4 ou null se a resposta não vier.
 // `respostasChave` (opcional, 2026-09-29) — extras deste cliente/prospeto, filtrados
 // por montarRespostasChaveParaState antes de entrar no state (nunca o objeto todo).
+//
+// A2 (2026-09-29) — cache de pontuações em memória (por sessão/aba), com chave que
+// inclui TODOS os inputs que afetam a resposta (nif, produto, serviços, faturas,
+// respostas-chave). Se um input mudar, a chave muda e o cliente é repontuado; se nada
+// mudou, reaproveita a pontuação já obtida nesta sessão (nunca uma resposta obsoleta).
+// 100% em memória: nunca é gravada (nem Firestore nem localStorage), por isso nunca
+// persiste dados entre sessões/computadores — só evita repetir pedidos ao Jev durante
+// a mesma utilização.
+const CACHE_PONTUACOES_MEM = new Map();
+function chaveCachePontuacao(cliente, kpisFaturas, servicosContratados, produto, respostasChave) {
+  return JSON.stringify([
+    cliente && cliente.n, typeof produto === "string" ? produto : (produto && produto.nome),
+    servicosContratados || [], kpisFaturas || null, respostasChave || {},
+  ]);
+}
 async function pontuarClienteParaCampanha(cliente, kpisFaturas, servicosContratados, produtoOuTexto, respostasChave) {
   const produto = montarProdutoParaState(produtoOuTexto);
+  const chave = chaveCachePontuacao(cliente, kpisFaturas, servicosContratados, produto, respostasChave);
+  if (CACHE_PONTUACOES_MEM.has(chave)) return CACHE_PONTUACOES_MEM.get(chave);
   const state = montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto, montarRespostasChaveParaState(respostasChave));
   const questions = montarPerguntasCampanha();
-  const resultado = await chamarRecomendarProdutos(state, questions);
-  const respostas = (resultado && resultado.answers) || {};
-  return {
-    adequacao: respostas.adequacao ? respostas.adequacao.score : null,
-    necessidade: respostas.necessidade ? respostas.necessidade.score : null,
+  const lerResposta = (r) => {
+    const respostas = (r && r.answers) || {};
+    return {
+      adequacao: respostas.adequacao ? respostas.adequacao.score : null,
+      necessidade: respostas.necessidade ? respostas.necessidade.score : null,
+    };
   };
+  const primeiro = lerResposta(await chamarRecomendarProdutos(state, questions));
+  // B7 (2026-09-29) — o Jev às vezes devolve uma das perguntas sem score (resposta
+  // malformada/falta de resposta). Nesse caso repete 1 vez, em vez de deixar um "—"
+  // silencioso na tabela.
+  let resultado = primeiro;
+  if (primeiro.adequacao === null || primeiro.necessidade === null) {
+    const segundo = lerResposta(await chamarRecomendarProdutos(state, questions));
+    resultado = {
+      adequacao: segundo.adequacao !== null ? segundo.adequacao : primeiro.adequacao,
+      necessidade: segundo.necessidade !== null ? segundo.necessidade : primeiro.necessidade,
+    };
+  }
+  CACHE_PONTUACOES_MEM.set(chave, resultado);
+  return resultado;
 }
 
 // Corre `worker` sobre `itens`, no máximo `concorrencia` em simultâneo (nunca todos de
@@ -3734,11 +3785,11 @@ async function executarEmLotes(itens, worker, concorrencia, onProgresso) {
 }
 
 // Combina adequação+necessidade (0-4 cada, normalizadas para 0-1, pesoAdequacao
-// ajustável — por omissão 70/30 a favor da adequação, pedido de Augusto) com o sinal
-// de elegibilidade de código (0-1, ver calcularSinalElegibilidade) num único score
-// final (0-1). Tudo ajustável em código sem voltar a chamar o Jev (correção #2 da
-// proposta original).
-function calcularScoreFinalCampanha(adequacao0a4, necessidade0a4, elegibilidade0a1, pesoElegibilidade, pesoAdequacao = 0.7) {
+// ajustável — por omissão 90/10 a favor da adequação, o mesmo valor por defeito da
+// vista Campanha por Produto) com o sinal de elegibilidade de código (0-1, ver
+// calcularSinalElegibilidade) num único score final (0-1). Tudo ajustável em código
+// sem voltar a chamar o Jev (correção #2 da proposta original).
+function calcularScoreFinalCampanha(adequacao0a4, necessidade0a4, elegibilidade0a1, pesoElegibilidade, pesoAdequacao = 0.9) {
   const adequacaoNorm = adequacao0a4 === null ? 0 : adequacao0a4 / 4;
   const necessidadeNorm = necessidade0a4 === null ? 0 : necessidade0a4 / 4;
   const jevCombinado = adequacaoNorm * pesoAdequacao + necessidadeNorm * (1 - pesoAdequacao);
@@ -3761,13 +3812,16 @@ function slugCampanha(descricao) {
 // documento gravado ANTES desta versão (sem o campo, ou com um valor menor) foi
 // calculado sem faturas reais — nunca apagado, só sinalizado como desatualizado se
 // uma futura UI de reabrir campanhas antigas vier a ser construída.
-const VERSAO_PONTUACAO_CAMPANHA = 2;
+const VERSAO_PONTUACAO_CAMPANHA = 3;
 async function guardarCampanhaPontuada(descricao, pesoElegibilidade, pesoAdequacao, linhas) {
   const id = `${slugCampanha(descricao)}-${Date.now()}`;
   await firebaseDb.collection("campanhas_pontuacao").doc(id).set({
     descricao, pesoElegibilidade, pesoAdequacao, criadoEm: new Date().toISOString(),
     versaoPontuacao: VERSAO_PONTUACAO_CAMPANHA,
-    linhas: linhas.map((l) => ({ n: l.n, e: l.e, tipo: l.tipo, temEmail: !!l.email, adequacao: l.adequacao, necessidade: l.necessidade, elegibilidade: l.elegibilidade, final: l.final })),
+    // `diasPermanencia` (2026-09-29, A5): passou também a ser gravado para uma campanha
+    // reaberta da cache (A3) mostrar a coluna "Permanência (dias)" preenchida — antes só
+    // existia em corridas ao vivo, e reabrir mostrava sempre "—".
+    linhas: linhas.map((l) => ({ n: l.n, e: l.e, tipo: l.tipo, temEmail: !!l.email, adequacao: l.adequacao, necessidade: l.necessidade, elegibilidade: l.elegibilidade, diasPermanencia: l.diasPermanencia === undefined ? null : l.diasPermanencia, final: l.final })),
   });
   return id;
 }
@@ -3779,11 +3833,15 @@ async function listarCampanhasPontuadas() {
 // Invalidação das pontuações antigas (2026-09-29, pedido explícito de Augusto) —
 // qualquer campanha gravada ANTES da correção do kpisFaturas (versaoPontuacao
 // ausente ou < VERSAO_PONTUACAO_CAMPANHA) foi calculada com faturas sempre `null`.
-// Nunca apaga nada, só marca `desatualizadoSemFaturas:true` — idempotente (corre
-// sempre que a vista abre, sem custo extra se já não houver nada por marcar). Sem
+// Nunca apaga nada, só marca `desatualizadoSemFaturas:true` — idempotente. Sem
 // limite de 20 (ao contrário de listarCampanhasPontuadas), mesmo padrão de
 // marcarProdutosDesatualizados.
+// B9 (2026-09-29) — corre 1× por sessão (flag de módulo), não a cada montagem da vista:
+// antes lia a coleção inteira sempre que se abria/voltava ao separador.
+let _marcouPontuacoesAntigas = false;
 async function marcarPontuacoesAntigasSemFaturas() {
+  if (_marcouPontuacoesAntigas) return;
+  _marcouPontuacoesAntigas = true;
   const snap = await firebaseDb.collection("campanhas_pontuacao").get();
   const escritas = [];
   snap.forEach((doc) => {
@@ -7165,6 +7223,16 @@ function ClientesView() {
                 Pontua as categorias do catálogo que este cliente ainda não tem (ver "Produtos já contratados" acima), ordenadas por probabilidade de fecho.
                 As perguntas-chave respondidas acima entram nesta pontuação.
               </div>
+              {extras.produtosPontuados && (
+                <details className="text-[11px] text-neutral-400">
+                  <summary className="cursor-pointer">Como ler as notas (0 a 4)</summary>
+                  <div className="mt-1 space-y-0.5">
+                    <div><b>Adequação</b> — serve este tipo de negócio? 0 sem relação · 2 aplicação plausível · 4 central à forma como o setor opera.</div>
+                    <div><b>Necessidade</b> — este cliente precisa? 0 já bem servida · 2 sem sinal claro · 4 lacuna clara confirmada pelos dados.</div>
+                    <div>As duas altas = melhor oportunidade. Adequação alta com necessidade baixa = produto certo mas cliente já servido.</div>
+                  </div>
+                </details>
+              )}
               {erroProdutos && <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-2.5 py-2">{erroProdutos}</div>}
               {extras.produtosPontuados && (
                 <>
@@ -12801,6 +12869,9 @@ function CampanhaPorProdutoView() {
   const [produtoEscolhido, setProdutoEscolhido] = useState("");
   const [descricaoLivre, setDescricaoLivre] = useState("");
   const [nRegistos, setNRegistos] = useState(20);
+  // C12 (2026-09-29) — nº de pedidos ao Jev em simultâneo. 4 por omissão (o valor que
+  // sempre foi usado, seguro para a Cloud Function/TypeSafe).
+  const [concorrencia, setConcorrencia] = useState(4);
   // Pesos por omissão (2026-09-28, pedido de Augusto): elegibilidade 10% — a maior
   // parte do peso fica no Jev — e adequação/necessidade 90/10 (era 70/30, ajustado
   // depois do 1º teste real).
@@ -12879,8 +12950,15 @@ function CampanhaPorProdutoView() {
   // internamente); `null` quando não há nenhuma análise em cache para este NIF
   // (comportamento já existente, montarStateRecomendacao já sabe lidar com `null`).
   const kpisFaturasDoNif = (nif) => {
-    const contas = analiseFaturasPorNif.get(nif);
-    return contas ? calcularKpisEInsights(contas) : null;
+    const entrada = analiseFaturasPorNif.get(nif);
+    return entrada && entrada.contas ? calcularKpisEInsights(entrada.contas) : null;
+  };
+
+  // B8 (2026-09-29) — data da análise de faturas em cache para um NIF (para mostrar a
+  // idade das faturas que alimentam a campanha). "" quando não há análise.
+  const analiseFaturasEm = (nif) => {
+    const entrada = analiseFaturasPorNif.get(nif);
+    return entrada && entrada.analisadoEm ? new Date(entrada.analisadoEm).toLocaleDateString("pt-PT") : "";
   };
 
   const montarUniverso = () => {
@@ -12976,7 +13054,7 @@ function CampanhaPorProdutoView() {
             };
           }
         },
-        4,
+        concorrencia,
         (feitos, total) => setProgresso({ feitos, total })
       );
       setFalhas(nFalhas);
@@ -13067,6 +13145,11 @@ function CampanhaPorProdutoView() {
               className="w-20 px-2 py-1 rounded border border-neutral-300 text-sm" />
           </div>
           <div className="flex items-center gap-2">
+            <label className="text-xs text-neutral-500">Pedidos ao Jev em simultâneo:</label>
+            <input type="number" min="1" max="8" value={concorrencia} onChange={(e) => setConcorrencia(Math.max(1, Math.min(8, Number(e.target.value) || 4)))}
+              className="w-16 px-2 py-1 rounded border border-neutral-300 text-sm" />
+          </div>
+          <div className="flex items-center gap-2">
             <label className="text-xs text-neutral-500">Peso elegibilidade ({Math.round(pesoElegibilidade * 100)}%):</label>
             <input type="range" min="0" max="1" step="0.05" value={pesoElegibilidade} onChange={(e) => setPesoElegibilidade(Number(e.target.value))} />
           </div>
@@ -13086,7 +13169,8 @@ function CampanhaPorProdutoView() {
                 {[...analiseFaturasPorNif.keys()].map((nif) => {
                   const c = todosClientes.find((x) => x.n === nif);
                   const p = c ? null : todosProspetos.find((x) => x.n === nif);
-                  return <option key={nif} value={nif}>{c ? c.e : p ? `${p.e} (prospeto)` : nif}</option>;
+                  const em = analiseFaturasEm(nif);
+                  return <option key={nif} value={nif}>{(c ? c.e : p ? `${p.e} (prospeto)` : nif) + (em ? ` — faturas de ${em}` : "")}</option>;
                 })}
               </select>
             </div>
