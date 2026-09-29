@@ -3870,7 +3870,7 @@ async function calcularProdutosParaCliente(cliente, servicosContratados, catalog
   const jaTem = categoriasQueClienteJaTem(servicosContratados, (respostasExistentes || {}).produtosJaTem, catalogo);
   const categoriasAPontuar = CATEGORIAS_PRODUTOS_VODAFONE.filter((c) => !jaTem.has(c.id));
   const questions = montarPerguntasCampanha();
-  const categorias = await Promise.all(categoriasAPontuar.map(async (c) => {
+  const categorias = await executarEmLotes(categoriasAPontuar, async (c) => {
     const produto = descreverCategoriaProdutos(c, catalogo);
     const state = montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto, montarRespostasChaveParaState(respostasExistentes));
     const resultado = await chamarRecomendarProdutos(state, questions);
@@ -3878,7 +3878,7 @@ async function calcularProdutosParaCliente(cliente, servicosContratados, catalog
     const adequacao = respostas.adequacao ? respostas.adequacao.score : null;
     const necessidade = respostas.necessidade ? respostas.necessidade.score : null;
     return { id: c.id, label: c.label, adequacao, necessidade, final: (adequacao ?? 0) + (necessidade ?? 0) };
-  }));
+  }, 4);
   categorias.sort((a, b) => b.final - a.final);
   return { perguntasRelevantes, categorias, calculadoEm: new Date().toISOString() };
 }
@@ -12810,6 +12810,9 @@ function CampanhaPorProdutoView() {
   const [progresso, setProgresso] = useState(null);
   const [resultados, setResultados] = useState(null);
   const [erro, setErro] = useState("");
+  // Nº de clientes cujo pedido ao Jev falhou na última corrida (2026-09-29, A4) — uma
+  // falha isolada já não aborta a campanha toda; fica registada e mostrada na tabela.
+  const [falhas, setFalhas] = useState(0);
   const [pedidoExemplo, setPedidoExemplo] = useState(null);
   // Cliente do "Ver pedido exemplo" (2026-09-29) — por omissão o 1.º da amostra, mas pode
   // ser escolhido um cliente com faturas na lista (ver render abaixo), para confirmar que
@@ -12819,6 +12822,10 @@ function CampanhaPorProdutoView() {
   const [nSelecionar, setNSelecionar] = useState(10);
   const [selecionados, setSelecionados] = useState(() => new Set());
   const [campanhasGuardadas, setCampanhasGuardadas] = useState(null);
+  // Campanha reaberta da cache (2026-09-29, A3) — id do documento aberto, só para
+  // mostrar qual está em ecrã. Reabrir NUNCA faz novos pedidos ao Jev (usa as
+  // pontuações já gravadas em campanhas_pontuacao).
+  const [campanhaAbertaId, setCampanhaAbertaId] = useState(null);
   // Emails de Clientes vêm de "extras" (ficha), nunca do objeto base — mesma fonte que
   // PainelCampanhaEmail já usa em Clientes (obterTodosExtras), para as duas vistas
   // darem sempre o mesmo resultado (achado de Augusto: a Bobadela tinha email na ficha
@@ -12940,25 +12947,42 @@ function CampanhaPorProdutoView() {
     setResultados(null);
     setProgresso({ feitos: 0, total: 0 });
     setSelecionados(new Set());
+    setFalhas(0);
     try {
       const universo = montarUniverso();
       setProgresso({ feitos: 0, total: universo.length });
+      let nFalhas = 0;
       const linhas = await executarEmLotes(
         universo,
         async (item) => {
-          const jev = await pontuarClienteParaCampanha(item.cliente, item.kpisFaturas, item.servicos, produto, item.respostasChave);
-          return {
-            n: item.n, e: item.e, email: item.email, tipo: item.tipo,
-            adequacao: jev.adequacao, necessidade: jev.necessidade, elegibilidade: item.elegibilidade,
-            diasPermanencia: item.diasPermanencia,
-            final: calcularScoreFinalCampanha(jev.adequacao, jev.necessidade, item.elegibilidade, pesoElegibilidade, pesoAdequacao),
-          };
+          // A4 (2026-09-29): 1 falha (rede, Jev, rate-limit) não deve abortar a campanha
+          // toda — este cliente fica marcado como erro e a corrida continua.
+          try {
+            const jev = await pontuarClienteParaCampanha(item.cliente, item.kpisFaturas, item.servicos, produto, item.respostasChave);
+            return {
+              n: item.n, e: item.e, email: item.email, tipo: item.tipo,
+              adequacao: jev.adequacao, necessidade: jev.necessidade, elegibilidade: item.elegibilidade,
+              diasPermanencia: item.diasPermanencia,
+              final: calcularScoreFinalCampanha(jev.adequacao, jev.necessidade, item.elegibilidade, pesoElegibilidade, pesoAdequacao),
+            };
+          } catch (eItem) {
+            nFalhas++;
+            console.warn(`Campanha: falhou o pedido ao Jev para ${item.e}:`, eItem.message || eItem);
+            return {
+              n: item.n, e: item.e, email: item.email, tipo: item.tipo,
+              erro: eItem.message || String(eItem),
+              adequacao: null, necessidade: null, elegibilidade: item.elegibilidade,
+              diasPermanencia: item.diasPermanencia, final: 0,
+            };
+          }
         },
         4,
         (feitos, total) => setProgresso({ feitos, total })
       );
+      setFalhas(nFalhas);
       linhas.sort((a, b) => b.final - a.final);
       setResultados(linhas);
+      setCampanhaAbertaId(null);
       const descricaoGuardada = typeof produto === "string" ? produto : produto.nome;
       await guardarCampanhaPontuada(descricaoGuardada, pesoElegibilidade, pesoAdequacao, linhas);
       listarCampanhasPontuadas().then(setCampanhasGuardadas).catch(() => {});
@@ -12967,6 +12991,29 @@ function CampanhaPorProdutoView() {
     } finally {
       setACorrer(false);
     }
+  };
+
+  // A3 (2026-09-29) — reabrir uma campanha já gravada em `campanhas_pontuacao`, sem
+  // gastar NENHUM pedido novo ao Jev. As linhas guardadas não têm o campo `email`
+  // (só `temEmail`), por isso volta a cruzar com `extrasClientes`/prospetos para
+  // preencher o email — sem isto, os clientes reabertos apareceriam "sem email".
+  const abrirCampanhaGuardada = (campanha) => {
+    const emailDoNif = (nif, tipo) => {
+      if (tipo === "cliente") return (extrasClientes && extrasClientes[nif] && extrasClientes[nif].email) || null;
+      const p = todosProspetos.find((x) => x.n === nif);
+      return (p && p.email) || null;
+    };
+    const linhas = (campanha.linhas || []).map((l) => {
+      const email = l.email || emailDoNif(l.n, l.tipo);
+      return { ...l, email, temEmail: !!email };
+    });
+    linhas.sort((a, b) => b.final - a.final);
+    setResultados(linhas);
+    setFiltros({ clientes: true, prospetos: true, soElegiveis: false, comEmail: false });
+    setSelecionados(new Set());
+    setFalhas(0);
+    setErro("");
+    setCampanhaAbertaId(campanha.id);
   };
 
   const resultadosFiltrados = (resultados || []).filter((r) => {
@@ -13059,7 +13106,33 @@ function CampanhaPorProdutoView() {
               {progresso.feitos}/{progresso.total}
             </div>
           )}
+          {!aCorrer && falhas > 0 && (
+            <span className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+              ⚠ {falhas} pedido(s) ao Jev falharam nesta corrida — aparecem marcados como "erro" na lista. Corre de novo para os tentar outra vez.
+            </span>
+          )}
         </div>
+
+        {campanhasGuardadas && campanhasGuardadas.length > 0 && (
+          <div className="space-y-1.5">
+            <label className="text-xs text-neutral-500">Reabrir campanha guardada (sem repetir pedidos ao Jev):</label>
+            <div className="flex flex-wrap gap-1.5">
+              {campanhasGuardadas.map((c) => (
+                <button key={c.id} onClick={() => abrirCampanhaGuardada(c)}
+                  title={c.desatualizadoSemFaturas ? "Calculada antes de as faturas entrarem no pedido — reabrir só mostra o ranking antigo." : "Reabrir sem gastar pedidos ao Jev"}
+                  className={`text-xs px-2 py-1 rounded-md border ${campanhaAbertaId === c.id ? "border-red-400 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"}`}>
+                  {c.descricao} · {new Date(c.criadoEm).toLocaleString("pt-PT")}
+                  {c.desatualizadoSemFaturas && <span className="text-amber-700"> ⚠ sem faturas</span>}
+                </button>
+              ))}
+            </div>
+            {campanhaAbertaId && (
+              <div className="text-[11px] text-neutral-400">
+                A mostrar a campanha reaberta — as pontuações são as que ficaram gravadas nessa altura.
+              </div>
+            )}
+          </div>
+        )}
 
         {pedidoExemplo && (
           <pre className="text-[10px] bg-neutral-900 text-neutral-100 rounded p-2 overflow-x-auto max-h-64 overflow-y-auto">{JSON.stringify(pedidoExemplo, null, 2)}</pre>
@@ -13069,6 +13142,11 @@ function CampanhaPorProdutoView() {
 
       {resultados && (
         <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-3">
+          {campanhaAbertaId && (
+            <div className="text-xs text-neutral-600 bg-neutral-50 border border-neutral-200 rounded-md px-2.5 py-2">
+              Campanha reaberta da cache — sem novos pedidos ao Jev. Para recalcular com os dados atuais, corre de novo.
+            </div>
+          )}
           <div className="flex items-center gap-4 flex-wrap text-xs">
             <label className="flex items-center gap-1"><input type="checkbox" checked={filtros.clientes} onChange={(e) => setFiltros((f) => ({ ...f, clientes: e.target.checked }))} /> Só clientes</label>
             <label className="flex items-center gap-1"><input type="checkbox" checked={filtros.prospetos} onChange={(e) => setFiltros((f) => ({ ...f, prospetos: e.target.checked }))} /> Só prospetos</label>
@@ -13099,7 +13177,7 @@ function CampanhaPorProdutoView() {
                     <td className="p-1">{r.necessidade !== null ? r.necessidade.toFixed(2) : "—"}</td>
                     <td className="p-1">{r.elegibilidade.toFixed(1)}</td>
                     <td className="p-1 text-neutral-500">{r.diasPermanencia === null || r.diasPermanencia === undefined ? "—" : r.diasPermanencia < 0 ? `terminou há ${-r.diasPermanencia}` : r.diasPermanencia}</td>
-                    <td className="p-1 font-semibold">{r.final.toFixed(2)}</td>
+                    <td className="p-1 font-semibold">{r.erro ? <span className="text-amber-700" title={r.erro}>erro</span> : r.final.toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>
