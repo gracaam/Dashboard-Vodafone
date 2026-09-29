@@ -532,6 +532,24 @@ async function guardarAnaliseFaturasCacheNuvem(nif, dados) {
 async function removerAnaliseFaturasCacheNuvem(nif) {
   try { await firebaseDb.collection("analise_faturas_cache").doc(nif).delete(); } catch {}
 }
+// Lê a coleção inteira de uma vez (2026-09-29, Campanha por Produto) — 1 pedido em
+// vez de 1 por cliente/prospeto, para não multiplicar leituras ao pontuar uma
+// campanha inteira. Devolve um Map NIF → contas (nunca o documento todo — só o que
+// calcularKpisEInsights precisa).
+async function lerTodasAsAnalisesFaturasCacheNuvem() {
+  try {
+    const snap = await firebaseDb.collection("analise_faturas_cache").get();
+    const mapa = new Map();
+    snap.forEach((doc) => {
+      const dados = doc.data();
+      if (dados && dados.resumo && Array.isArray(dados.resumo.contas)) mapa.set(doc.id, dados.resumo.contas);
+    });
+    return mapa;
+  } catch (e) {
+    console.warn("Não foi possível ler analise_faturas_cache em lote:", e.message);
+    return new Map();
+  }
+}
 
 // Migração única (Passo 2, botão "Migrar Análise de Faturas para a nuvem") — copia
 // tudo o que estiver ATUALMENTE pendente no IndexedDB "faturasAnalise" (faturas
@@ -3322,6 +3340,184 @@ function mesclarCarteiraFidelizacao(anteriorLista, novaLista, nifsComNegocioImpl
   return { resultado, removidos, nAtualizados: novaListaComEstado.length, nMantidos: mantidos.length };
 }
 
+/* ================= CONTRATOS DE PERMANÊNCIA (2026-09-29) =================
+   Importação por conta de ficheiros exportados da Vodafone. Coleção Firestore
+   `contratos_permanencia`, 1 documento por NIF (doc id = NIF):
+     { n: NIF, contas: { "<nºconta>": { contratos: [...], atualizadoEm: ISO } } }
+   Os dados ficam SÓ no Firestore (nunca localStorage/Excel/ficheiros) e os contratos
+   NUNCA entram no `state` enviado ao TypeSafe — só o sinal numérico de elegibilidade
+   (calcularSinalPermanencia) alimenta a pontuação, calculada localmente.
+   O NIF vem sempre da ficha onde o ficheiro é carregado; o ficheiro só traz a conta. */
+
+const COLECAO_CONTRATOS = "contratos_permanencia";
+const DIAS_CONTRATOS_DESATUALIZADOS = 30;
+// Campos comparados entre importações. `duracao` ("Duração e Remanescente") fica de
+// fora de propósito: o remanescente muda todos os meses sozinho, e marcaria todos os
+// contratos como "alterados" em cada importação.
+const CAMPOS_COMPARADOS_CONTRATO = ["servico", "blocos", "inicio", "fim", "tipo", "multa", "descricao", "codigo"];
+
+function normalizarTextoContrato(s) {
+  return String(s === null || s === undefined ? "" : s)
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+// Converte uma célula de data (serial do Excel, Date, "dd/mm/aaaa" ou "aaaa-mm-dd")
+// em "aaaa-mm-dd"; null se não for reconhecível.
+function paraDataIsoContrato(v) {
+  if (v === null || v === undefined || v === "") return null;
+  if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+  if (typeof v === "number" && Number.isFinite(v) && v > 20000 && v < 80000) {
+    return new Date(Math.round((v - 25569) * 86400000)).toISOString().slice(0, 10);
+  }
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})/);
+  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  return null;
+}
+
+// 1ª linha do ficheiro: só o nº de conta. Aceita "Conta"/"Nº Conta"/"Número de conta"
+// seguido do número (na mesma célula ou na célula seguinte), ou só o número em A1.
+// Devolve "" se não encontrar (o ecrã pede-a ao utilizador).
+function extrairContaPrimeiraLinha(linha) {
+  const celulas = (linha || []).map((c) => (c === null || c === undefined ? "" : String(c).trim()));
+  const rotulo = /^(?:n[uú]mero\s+de\s+conta|n[º°o]\.?\s*(?:de\s+)?conta|conta)\s*[:\-]?\s*(\d[\d\s]*)?$/i;
+  for (let i = 0; i < celulas.length; i++) {
+    const m = celulas[i].match(rotulo);
+    if (!m) continue;
+    let digitos = (m[1] || "").replace(/\D/g, "");
+    if (!digitos) {
+      const seguinte = celulas.slice(i + 1).find((c) => c !== "");
+      digitos = seguinte ? seguinte.replace(/\D/g, "") : "";
+    }
+    if (digitos) return digitos;
+  }
+  const primeira = celulas[0] || "";
+  if (/^\d[\d\s]*$/.test(primeira)) return primeira.replace(/\D/g, "");
+  return "";
+}
+
+const CABECALHOS_CONTRATO = [
+  ["id", (h) => h === "id contrato"],
+  ["servico", (h) => h === "servico"],
+  ["blocos", (h) => /\bblocos\b/.test(h)],
+  ["inicio", (h) => h === "data de inicio"],
+  ["fim", (h) => h === "data de fim"],
+  ["duracao", (h) => h.startsWith("duracao")],
+  ["tipo", (h) => h === "tipo produto"],
+  ["multa", (h) => h.startsWith("multa")],
+  ["descricao", (h) => h === "descricao"],
+  ["codigo", (h) => h === "codigo"],
+];
+
+// Lê 1 ficheiro (workbook SheetJS) → { conta, contratos, avisos, erro }. O cabeçalho
+// encontra-se pela linha onde aparece "ID Contrato" (nunca por posição fixa).
+function lerContratosPermanenciaDeWorkbook(wb) {
+  for (const nomeFolha of wb.SheetNames) {
+    const sheet = wb.Sheets[nomeFolha];
+    if (!sheet || !sheet["!ref"]) continue;
+    const linhas = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true, blankrows: true });
+    const idxCab = linhas.findIndex((l) => (l || []).some((c) => normalizarTextoContrato(c) === "id contrato"));
+    if (idxCab < 0) continue;
+    const conta = extrairContaPrimeiraLinha(linhas[0]);
+    const colunas = {};
+    (linhas[idxCab] || []).forEach((c, i) => {
+      const h = normalizarTextoContrato(c);
+      for (const [chave, teste] of CABECALHOS_CONTRATO) if (!(chave in colunas) && teste(h)) colunas[chave] = i;
+    });
+    const avisos = [];
+    const contratos = [];
+    const vistos = new Set();
+    for (let i = idxCab + 1; i < linhas.length; i++) {
+      const l = linhas[i] || [];
+      const cel = (k) => (k in colunas ? l[colunas[k]] : null);
+      const id = String(cel("id") === null || cel("id") === undefined ? "" : cel("id")).trim();
+      if (!id) continue;
+      if (vistos.has(id)) { avisos.push(`ID Contrato repetido no ficheiro: ${id} (mantida a última linha)`); }
+      vistos.add(id);
+      const blocos = cel("blocos");
+      const texto = (k) => { const v = cel(k); return v === null || v === undefined || String(v).trim() === "" ? null : String(v).trim(); };
+      const contrato = {
+        id,
+        servico: texto("servico"),
+        blocos: typeof blocos === "number" ? blocos : (parseNumeroPT(blocos)),
+        inicio: paraDataIsoContrato(cel("inicio")),
+        fim: paraDataIsoContrato(cel("fim")),
+        duracao: texto("duracao"),
+        tipo: texto("tipo"),
+        multa: typeof cel("multa") === "number" ? cel("multa") : parseNumeroPT(cel("multa")),
+        descricao: texto("descricao"),
+        codigo: texto("codigo"),
+      };
+      if (!contrato.fim) avisos.push(`Contrato ${id} sem Data de Fim válida`);
+      const pos = contratos.findIndex((c) => c.id === id);
+      if (pos >= 0) contratos[pos] = contrato; else contratos.push(contrato);
+    }
+    const faltam = CABECALHOS_CONTRATO.filter(([k]) => !(k in colunas)).map(([k]) => k);
+    if (faltam.length) avisos.push(`Colunas não encontradas: ${faltam.join(", ")}`);
+    return { conta, contratos, avisos, erro: null };
+  }
+  return { conta: "", contratos: [], avisos: [], erro: 'Não encontrei a linha de cabeçalho com "ID Contrato".' };
+}
+
+// Diferenças entre o que está guardado numa conta e o ficheiro novo (chave: ID Contrato).
+function compararContratosConta(anteriores, novos) {
+  const antes = new Map((anteriores || []).map((c) => [c.id, c]));
+  const agora = new Map((novos || []).map((c) => [c.id, c]));
+  const adicionados = [], alterados = [], desaparecidos = [];
+  let iguais = 0;
+  for (const [id, c] of agora) {
+    const a = antes.get(id);
+    if (!a) { adicionados.push(c); continue; }
+    const campos = CAMPOS_COMPARADOS_CONTRATO.filter((k) => (a[k] ?? null) !== (c[k] ?? null));
+    if (campos.length) alterados.push({ antes: a, depois: c, campos }); else iguais++;
+  }
+  for (const [id, c] of antes) if (!agora.has(id)) desaparecidos.push(c);
+  return { adicionados, alterados, desaparecidos, iguais };
+}
+
+function diasEntreDatasIso(deIso, paraIso) {
+  return Math.round((Date.parse(paraIso + "T00:00:00Z") - Date.parse(deIso + "T00:00:00Z")) / 86400000);
+}
+
+// Data de fim mais próxima entre TODAS as contas do cliente: o contrato que termina
+// mais cedo a partir de hoje; se todos já terminaram, o que terminou há menos tempo
+// (dias negativos, terminado=true). null se não houver contratos com data.
+function calcularFimMaisProximo(docCliente, hoje = new Date()) {
+  const hojeIso = hoje.toISOString().slice(0, 10);
+  const todos = [];
+  Object.entries((docCliente && docCliente.contas) || {}).forEach(([conta, dados]) => {
+    ((dados && dados.contratos) || []).forEach((c) => { if (c.fim) todos.push({ ...c, conta }); });
+  });
+  if (!todos.length) return null;
+  const futuros = todos.filter((c) => c.fim >= hojeIso).sort((a, b) => a.fim.localeCompare(b.fim));
+  const escolhido = futuros.length ? futuros[0] : todos.sort((a, b) => b.fim.localeCompare(a.fim))[0];
+  const dias = diasEntreDatasIso(hojeIso, escolhido.fim);
+  return { fim: escolhido.fim, dias, conta: escolhido.conta, contratoId: escolhido.id, terminado: futuros.length === 0 };
+}
+
+// Sinal de elegibilidade (0-1) pela permanência — mesmos limiares de
+// calcularSinalElegibilidade (6 meses = 1.0, 12 meses = 0.6), aplicados aos dias até
+// ao fim da permanência mais próxima. Sem contratos importados → sinal 0, dias null.
+function calcularSinalPermanencia(docCliente, hoje = new Date()) {
+  const f = calcularFimMaisProximo(docCliente, hoje);
+  if (!f) return { sinal: 0, dias: null, fim: null };
+  const sinal = f.dias <= 183 ? 1 : f.dias <= 365 ? 0.6 : 0;
+  return { sinal, dias: f.dias, fim: f.fim };
+}
+
+function diasDesdeIso(iso, agora = new Date()) {
+  return Math.floor((agora.getTime() - Date.parse(iso)) / 86400000);
+}
+
+function formatarDataIsoPT(iso) {
+  if (!iso) return "—";
+  const [a, m, d] = iso.slice(0, 10).split("-");
+  return `${d}/${m}/${a}`;
+}
+
 /* ================= MOTOR "PRÓXIMA OFERTA" (2026-09-28, Fase 2 — só código, sem Jev) =================
    Proposta aprovada por Augusto: a elegibilidade entra como PARTE da pontuação (peso
    ajustável), nunca como filtro — todos os clientes são pontuados, mesmo sem estarem
@@ -3372,7 +3568,11 @@ function calcularSinalFaturas(kpis) {
 // montarProdutoParaState — entra no `state` como campo próprio (2026-09-28, correção
 // de Augusto: antes ia escrito dentro do texto da própria pergunta; assim fica
 // referenciável como `produto` nas instruções, igual ao resto do state).
-function montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto) {
+// `respostasChave` (opcional, 2026-09-29, "Produtos para este cliente") — respostas
+// às perguntas-chave (PERGUNTAS_CHAVE_PRODUTOS), já convertidas para valores legíveis
+// (ver montarRespostasChaveParaState) — nunca o objeto de extras cru (esse pode ter
+// outros campos, ex. telefone/email, que nunca podem sair para o TypeSafe).
+function montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto, respostasChave) {
   return {
     empresa: cliente.e || "",
     setor: {
@@ -3391,7 +3591,23 @@ function montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, prod
         }
       : null,
     ...(produto ? { produto } : {}),
+    ...(respostasChave && Object.keys(respostasChave).length ? { respostasChave } : {}),
   };
+}
+
+// Extrai só os campos de PERGUNTAS_CHAVE_PRODUTOS de um objeto de extras (nunca o
+// objeto inteiro — pode ter telefone/email/etc.), convertendo "sim"/"nao" para
+// texto legível pelo Jev. Campos não respondidos ficam de fora (nunca `null`
+// explícito — um campo ausente é mais claro para o Jev do que "null" repetido).
+function montarRespostasChaveParaState(extras) {
+  if (!extras) return {};
+  const resultado = {};
+  PERGUNTAS_CHAVE_PRODUTOS.forEach((p) => {
+    const valor = extras[p.key];
+    if (valor === undefined || valor === null || valor === "") return;
+    resultado[p.label] = p.type === "bool" ? (valor === "sim" ? "Sim" : "Não") : valor;
+  });
+  return resultado;
 }
 
 // Um produto do catálogo (dados.produtos, ver lerProdutosCaracteristicasNuvem) →
@@ -3484,9 +3700,11 @@ function servicosContratadosDoCliente(cliente) {
 // `produtoOuTexto` — produto do catálogo ou descrição livre (ver montarProdutoParaState).
 // Pede adequação e necessidade num único pedido (composite scoring — nunca 2 chamadas).
 // Devolve { adequacao, necessidade }, cada uma 0-4 ou null se a resposta não vier.
-async function pontuarClienteParaCampanha(cliente, kpisFaturas, servicosContratados, produtoOuTexto) {
+// `respostasChave` (opcional, 2026-09-29) — extras deste cliente/prospeto, filtrados
+// por montarRespostasChaveParaState antes de entrar no state (nunca o objeto todo).
+async function pontuarClienteParaCampanha(cliente, kpisFaturas, servicosContratados, produtoOuTexto, respostasChave) {
   const produto = montarProdutoParaState(produtoOuTexto);
-  const state = montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto);
+  const state = montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto, montarRespostasChaveParaState(respostasChave));
   const questions = montarPerguntasCampanha();
   const resultado = await chamarRecomendarProdutos(state, questions);
   const respostas = (resultado && resultado.answers) || {};
@@ -3535,10 +3753,20 @@ function slugCampanha(descricao) {
     .normalize("NFD").replace(/[̀-ͯ]/g, "")
     .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
 }
+// Controlo de versão da pontuação (2026-09-29, achado real de Augusto): até agora
+// `kpisFaturas` chegava sempre `null` a montarStateRecomendacao — a "necessidade"
+// nunca via valores/indicadores de faturação nenhuns, apesar do state estar
+// preparado para os receber. Corrigido (ver pontuarClienteParaCampanha/
+// CampanhaPorProdutoView). Mesmo padrão de VERSAO_LOGICA_ANALISE_FATURAS: qualquer
+// documento gravado ANTES desta versão (sem o campo, ou com um valor menor) foi
+// calculado sem faturas reais — nunca apagado, só sinalizado como desatualizado se
+// uma futura UI de reabrir campanhas antigas vier a ser construída.
+const VERSAO_PONTUACAO_CAMPANHA = 2;
 async function guardarCampanhaPontuada(descricao, pesoElegibilidade, pesoAdequacao, linhas) {
   const id = `${slugCampanha(descricao)}-${Date.now()}`;
   await firebaseDb.collection("campanhas_pontuacao").doc(id).set({
     descricao, pesoElegibilidade, pesoAdequacao, criadoEm: new Date().toISOString(),
+    versaoPontuacao: VERSAO_PONTUACAO_CAMPANHA,
     linhas: linhas.map((l) => ({ n: l.n, e: l.e, tipo: l.tipo, temEmail: !!l.email, adequacao: l.adequacao, necessidade: l.necessidade, elegibilidade: l.elegibilidade, final: l.final })),
   });
   return id;
@@ -3546,6 +3774,135 @@ async function guardarCampanhaPontuada(descricao, pesoElegibilidade, pesoAdequac
 async function listarCampanhasPontuadas() {
   const snap = await firebaseDb.collection("campanhas_pontuacao").orderBy("criadoEm", "desc").limit(20).get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// Invalidação das pontuações antigas (2026-09-29, pedido explícito de Augusto) —
+// qualquer campanha gravada ANTES da correção do kpisFaturas (versaoPontuacao
+// ausente ou < VERSAO_PONTUACAO_CAMPANHA) foi calculada com faturas sempre `null`.
+// Nunca apaga nada, só marca `desatualizadoSemFaturas:true` — idempotente (corre
+// sempre que a vista abre, sem custo extra se já não houver nada por marcar). Sem
+// limite de 20 (ao contrário de listarCampanhasPontuadas), mesmo padrão de
+// marcarProdutosDesatualizados.
+async function marcarPontuacoesAntigasSemFaturas() {
+  const snap = await firebaseDb.collection("campanhas_pontuacao").get();
+  const escritas = [];
+  snap.forEach((doc) => {
+    const dados = doc.data();
+    if ((dados.versaoPontuacao || 1) < VERSAO_PONTUACAO_CAMPANHA && !dados.desatualizadoSemFaturas) {
+      escritas.push(doc.ref.update({ desatualizadoSemFaturas: true }));
+    }
+  });
+  await Promise.all(escritas);
+}
+
+/* ================= PRODUTOS PARA ESTE CLIENTE (2026-09-29) =================
+   Pedido explícito de Augusto, o INVERSO da Campanha por Produto: em vez de 1
+   produto vs. N clientes, N categorias do catálogo vs. 1 cliente — ranking de
+   categorias por probabilidade de fecho, na própria ficha. Ronda 1 (1 pedido):
+   o Jev decide quais das 7 perguntas-chave (PERGUNTAS_CHAVE_PRODUTOS) vale a pena
+   perguntar a ESTE cliente. Ronda 2 (1 pedido por categoria que o cliente AINDA NÃO
+   TEM — nunca todas as 10, para poupar pedidos): adequação/necessidade, reaproveita
+   montarPerguntasCampanha(), agora com as respostas às perguntas-chave no `state`.
+   Fica só em Clientes (Prospetos não têm ranking, só as perguntas/respostas, que
+   entram na Campanha por Produto — decisão explícita de Augusto). */
+
+// Ronda 1 — 1 pedido só, com as 7 perguntas-chave como "noul" (yes/no, ver docs
+// TypeSafe) bundladas — nunca 7 pedidos separados. Cada pergunta responde "vale a
+// pena PERGUNTAR isto ao comercial", nunca a resposta em si (essa só Augusto sabe).
+function montarPerguntasRelevancia() {
+  const perguntas = {};
+  PERGUNTAS_CHAVE_PRODUTOS.forEach((p) => {
+    perguntas[p.key] = { type: "noul", instructions: p.perguntaRelevancia };
+  });
+  return perguntas;
+}
+
+// Categorias que o cliente/prospeto plausivelmente já tem — nunca pontuadas de novo
+// (poupa pedidos ao Jev, pedido explícito de Augusto). Combina 2 fontes: os serviços
+// contratados (sempre certos, vêm dos totais reais v/d/f/i) e "Produtos já
+// contratados" (texto à mão, cruzado pelo nome exato com o catálogo — aproximado,
+// mesma limitação já documentada em produtosJaTemComoLista). Nunca esconde nada do
+// utilizador — é só sobre que pedidos se fazem ao Jev, a lista completa continua
+// sempre visível/editável na ficha (`produtosJaTem`).
+function categoriasQueClienteJaTem(servicosContratados, produtosJaTemTexto, catalogo) {
+  const categorias = new Set();
+  const servicos = servicosContratados || [];
+  if (servicos.includes("Voz móvel")) { categorias.add("movel-voz"); categorias.add("aditivos-voz-movel"); }
+  if (servicos.includes("Dados móveis")) categorias.add("banda-larga-movel");
+  if (servicos.includes("Fixo")) categorias.add("fixo");
+  if (servicos.includes("IoT")) categorias.add("smart-solutions-iot");
+  const jaTemLista = produtosJaTemComoLista(produtosJaTemTexto);
+  (catalogo || []).forEach((p) => {
+    if (p.categoriaId && jaTemLista.includes(String(p.nome || "").toLowerCase())) categorias.add(p.categoriaId);
+  });
+  return categorias;
+}
+
+// Uma categoria do catálogo → { nome, descricao, caracteristicas } (mesmo formato de
+// montarProdutoParaState) — usa até 5 nomes de produtos dessa categoria como exemplo,
+// nunca a lista toda (o "produto" aqui é a categoria, não cada brochura).
+function descreverCategoriaProdutos(categoria, catalogo) {
+  const produtosDaCategoria = (catalogo || []).filter((p) => p.categoriaId === categoria.id).map((p) => p.nome).slice(0, 5);
+  return {
+    nome: categoria.label,
+    descricao: `Categoria de produtos Vodafone Business: ${categoria.label}.`,
+    caracteristicas: produtosDaCategoria,
+  };
+}
+
+// Orquestra as 2 rondas para 1 cliente/prospeto. `respostasExistentes` (extras já
+// guardados) alimenta a Ronda 2 desde já — nunca espera pela Ronda 1 para usar
+// respostas que Augusto já tinha preenchido à mão antes de calcular pela 1ª vez.
+// Devolve { perguntasRelevantes: [key,...], categorias: [{id,label,adequacao,
+// necessidade,final}], calculadoEm }.
+// `kpisFaturas` (opcional, 2026-09-29) — resultado de calcularKpisEInsights(contas)
+// já agregado entre todas as contas do cliente (ver lerAnaliseFaturasCacheNuvem +
+// calcularKpisEInsights, mesmo padrão de CampanhaPorProdutoView); `null` se não
+// houver nenhuma análise em cache para este NIF.
+async function calcularProdutosParaCliente(cliente, servicosContratados, catalogo, respostasExistentes, kpisFaturas) {
+  const stateBase = montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, null, montarRespostasChaveParaState(respostasExistentes));
+  const ronda1 = await chamarRecomendarProdutos(stateBase, montarPerguntasRelevancia());
+  const respostasRonda1 = (ronda1 && ronda1.answers) || {};
+  const perguntasRelevantes = PERGUNTAS_CHAVE_PRODUTOS
+    .filter((p) => respostasRonda1[p.key] && respostasRonda1[p.key].noul > 0.5)
+    .map((p) => p.key);
+
+  const jaTem = categoriasQueClienteJaTem(servicosContratados, (respostasExistentes || {}).produtosJaTem, catalogo);
+  const categoriasAPontuar = CATEGORIAS_PRODUTOS_VODAFONE.filter((c) => !jaTem.has(c.id));
+  const questions = montarPerguntasCampanha();
+  const categorias = await Promise.all(categoriasAPontuar.map(async (c) => {
+    const produto = descreverCategoriaProdutos(c, catalogo);
+    const state = montarStateRecomendacao(cliente, kpisFaturas, servicosContratados, produto, montarRespostasChaveParaState(respostasExistentes));
+    const resultado = await chamarRecomendarProdutos(state, questions);
+    const respostas = (resultado && resultado.answers) || {};
+    const adequacao = respostas.adequacao ? respostas.adequacao.score : null;
+    const necessidade = respostas.necessidade ? respostas.necessidade.score : null;
+    return { id: c.id, label: c.label, adequacao, necessidade, final: (adequacao ?? 0) + (necessidade ?? 0) };
+  }));
+  categorias.sort((a, b) => b.final - a.final);
+  return { perguntasRelevantes, categorias, calculadoEm: new Date().toISOString() };
+}
+
+// Marca como desatualizadas (NUNCA apaga) as entradas deste NIF em qualquer
+// campanha já pontuada — pedido explícito de Augusto: se uma resposta às
+// perguntas-chave muda depois de uma campanha já ter corrido, essa pontuação antiga
+// fica sinalizada em vez de continuar a ser usada como se nada tivesse mudado. Só
+// escreve nos documentos que realmente têm uma linha deste NIF (nunca reescreve os
+// outros) — sem limite de 20 (ao contrário de listarCampanhasPontuadas), para nunca
+// deixar uma campanha antiga por marcar só por já não aparecer na lista recente.
+async function marcarProdutosDesatualizados(nif) {
+  const snap = await firebaseDb.collection("campanhas_pontuacao").get();
+  const escritas = [];
+  snap.forEach((doc) => {
+    const linhas = doc.data().linhas || [];
+    let mudou = false;
+    const novasLinhas = linhas.map((l) => {
+      if (l.n === nif && !l.desatualizado) { mudou = true; return { ...l, desatualizado: true }; }
+      return l;
+    });
+    if (mudou) escritas.push(doc.ref.update({ linhas: novasLinhas }));
+  });
+  await Promise.all(escritas);
 }
 
 // Hook genérico: usa os dados fixos de referência até haver um Excel ligado; a partir
@@ -3627,6 +3984,24 @@ function LigacaoExcel({ itens }) {
 // conservador de mesclarCarteiraFidelizacao, só que aqui não há sequer um sinal
 // explícito (tipo "negócio implementado") para decidir remover, por isso a decisão
 // segura é nunca remover.
+// Aviso preventivo de NIFs repetidos (2026-09-29, pedido explícito do utilizador) —
+// verificação de sábado a Clientes/Carteira não encontrou nenhum repetido nos
+// ficheiros reais, mas o risco continua real se um export futuro vier diferente
+// (2 linhas com o mesmo NIF sobrescrevem-se silenciosamente na nuvem, ver
+// investigação de 2026-09-29). Nunca funde as linhas — só conta e avisa, para
+// Augusto decidir. Devolve só contagens (nunca nomes/NIFs — quem chama decide se
+// mostra mais detalhe).
+function contarNifsRepetidos(lista) {
+  const porNif = new Map();
+  (lista || []).forEach((r) => {
+    if (!r || !r.n) return;
+    porNif.set(r.n, (porNif.get(r.n) || 0) + 1);
+  });
+  let nNifsRepetidos = 0, nLinhasAfetadas = 0;
+  porNif.forEach((n) => { if (n > 1) { nNifsRepetidos++; nLinhasAfetadas += n; } });
+  return { nNifsRepetidos, nLinhasAfetadas };
+}
+
 function construirPreviewUpload(novaLista, existentesLista, normalizar) {
   const existentesPorNif = new Map(existentesLista.map((r) => [r.n, r]));
   const linhas = novaLista.filter((r) => r && r.n).map((registo) => {
@@ -3647,12 +4022,21 @@ function construirPreviewUpload(novaLista, existentesLista, normalizar) {
 // direto, mostrar sempre o resumo e pedir confirmação. Componente a nível de módulo
 // (mesma razão de sempre — nunca declarar dentro doutro componente).
 function ResumoUploadPendente({ titulo, preview, aGravar, onConfirmar, onCancelar }) {
+  // Aviso preventivo de NIFs repetidos (2026-09-29) — quando presente, bloqueia o
+  // "Confirmar e gravar" (nunca funde/decide sozinho qual conta manter): o único
+  // caminho é cancelar e corrigir o ficheiro de origem.
+  const temDuplicados = preview.duplicados && preview.duplicados.nNifsRepetidos > 0;
   return (
     <div className="border rounded-lg p-3 text-sm space-y-2" style={{ background: "#DBEAFE", borderColor: "#BFDBFE" }}>
       <div className="font-medium text-blue-900">{titulo}</div>
       <div className="text-blue-800">{preview.nNovos} novo(s) · {preview.nAtualizados} atualizado(s) · {preview.nSemAlteracao} sem alteração</div>
+      {temDuplicados && (
+        <div className="text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5">
+          ⚠ {preview.duplicados.nNifsRepetidos} NIF(s) repetido(s) neste ficheiro ({preview.duplicados.nLinhasAfetadas} linha(s) ao todo) — corrige o Excel antes de gravar, para não perderes nenhuma conta.
+        </div>
+      )}
       <div className="flex items-center gap-2">
-        <button onClick={onConfirmar} disabled={aGravar}
+        <button onClick={onConfirmar} disabled={aGravar || temDuplicados}
           className="text-sm px-3 py-1.5 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50">
           {aGravar ? "A gravar…" : "Confirmar e gravar na nuvem"}
         </button>
@@ -4805,6 +5189,33 @@ const SETORES_LISTA = [
   "Viticultura",
 ];
 
+// "Produtos para este cliente" (2026-09-29) — pedido explícito do utilizador, o
+// inverso da Campanha por Produto: em vez de 1 produto vs. N clientes, N categorias
+// de produto vs. 1 cliente. Lista FIXA de perguntas-chave (não editável pelo
+// utilizador nesta versão) — existem para melhorar a "necessidade", que hoje quase
+// não distingue clientes (só tem setor/CAE genéricos). O Jev decide (Ronda 1, ver
+// montarPerguntasRelevancia) QUAIS destas vale a pena perguntar a um cliente
+// concreto; Augusto responde só a essas — mas pode preencher/editar QUALQUER uma à
+// mão a qualquer momento, sem correr o Jev (decisão explícita do utilizador).
+// `type` decide o input: "bool" (sim/não), "number", ou "choice" (lista fechada,
+// ver `opcoes`). Declarada ANTES de EXTRA_FIELDS, que a reaproveita.
+const PERGUNTAS_CHAVE_PRODUTOS = [
+  { key: "frota", label: "Frota de viaturas (nº aproximado)", type: "number",
+    perguntaRelevancia: "Faz sentido perguntar ao comercial se esta empresa tem uma frota de viaturas relevante para a sua atividade?" },
+  { key: "numLocais", label: "Nº de locais/lojas físicos", type: "number",
+    perguntaRelevancia: "Faz sentido perguntar ao comercial se esta empresa opera a partir de vários locais/lojas fisicamente separados?" },
+  { key: "atendimentoTelefonico", label: "Atendimento telefónico a clientes", type: "bool",
+    perguntaRelevancia: "Faz sentido perguntar ao comercial se esta empresa faz atendimento telefónico relevante a clientes (linha de apoio, call center, marcações por telefone, etc.)?" },
+  { key: "pagamentosCartao", label: "Recebe pagamentos com cartão no local", type: "bool",
+    perguntaRelevancia: "Faz sentido perguntar ao comercial se esta empresa recebe pagamentos com cartão presencialmente (loja, balcão, terminal móvel)?" },
+  { key: "trabalhoRemoto", label: "Tem colaboradores em trabalho remoto/híbrido", type: "bool",
+    perguntaRelevancia: "Faz sentido perguntar ao comercial se esta empresa tem colaboradores em trabalho remoto ou híbrido?" },
+  { key: "seguranca", label: "Valoriza segurança física/videovigilância", type: "bool",
+    perguntaRelevancia: "Faz sentido perguntar ao comercial se esta empresa valoriza segurança física ou videovigilância nas suas instalações?" },
+  { key: "cloudEmail", label: "Uso de email/cloud profissional", type: "choice", opcoes: ["Nenhum", "Básico (email só)", "Avançado (cloud + email)"],
+    perguntaRelevancia: "Faz sentido perguntar ao comercial que nível de email/cloud profissional esta empresa já usa?" },
+];
+
 const EXTRA_FIELDS = [
   { key: "setor", label: "Setor de Atividade", type: "text", group: "Identificação" },
   { key: "colaboradores", label: "Nº de Colaboradores", type: "number", group: "Identificação" },
@@ -4826,6 +5237,7 @@ const EXTRA_FIELDS = [
   // exatamente como aparece no catálogo Produtos Vodafone) — ver
   // produtosJaTemComoLista/calcularSinaisRecomendacao.
   { key: "produtosJaTem", label: "Produtos já contratados (um por linha, nome exato do catálogo)", type: "textarea", group: "Comercial" },
+  ...PERGUNTAS_CHAVE_PRODUTOS.map((p) => ({ key: p.key, label: p.label, type: p.type, opcoes: p.opcoes, group: "Produtos" })),
 ];
 
 // Converte o texto multi-linha de "Produtos já contratados" numa lista normalizada
@@ -4838,7 +5250,7 @@ function produtosJaTemComoLista(textoMultiLinha) {
     .filter(Boolean)
     .map((l) => l.toLowerCase());
 }
-const GROUPS = ["Identificação", "Contacto", "Comercial"];
+const GROUPS = ["Identificação", "Contacto", "Comercial", "Produtos"];
 
 // Taxonomia real de Portfolio_Vodafone
 const CATEGORIAS = [
@@ -4967,6 +5379,10 @@ function Icone({ nome, className = "w-[18px] h-[18px]" }) {
 // durante a sessão (até recarregar a página) — ver obterTodosExtras/definirExtras.
 // Um NIF com leitura falhada fica fora, para ser tentado outra vez na próxima abertura.
 const CACHE_EXTRAS_NUVEM = new Map();
+// Cache própria de Prospetos (2026-09-29) — nunca partilhada com CACHE_EXTRAS_NUVEM
+// de Clientes, mesmo os dois indexados por NIF: um NIF pode transitar de Prospeto
+// para Cliente, e misturar as duas caches podia mostrar extras da coleção errada.
+const CACHE_EXTRAS_NUVEM_PROSPETOS = new Map();
 
 function useClientesNovos() {
   const firebaseUser = useFirebaseAuthUser();
@@ -5025,8 +5441,14 @@ function useClientesNovos() {
   const [aMigrar, setAMigrar] = useState(false);
   const migrarParaNuvem = async () => {
     if (!firebaseUser || nuvemAtiva) return { ok: false };
-    setAMigrar(true);
     const atuais = todosClientesLocal;
+    // Aviso preventivo de NIFs repetidos (2026-09-29) — nunca funde, só avisa e
+    // recusa migrar; Augusto corrige o Excel de origem e tenta de novo.
+    const { nNifsRepetidos, nLinhasAfetadas } = contarNifsRepetidos(atuais);
+    if (nNifsRepetidos > 0) {
+      return { ok: false, motivo: `Encontrei ${nNifsRepetidos} NIF(s) repetido(s) no Excel de Clientes (${nLinhasAfetadas} linha(s) ao todo) — corrige o ficheiro antes de migrar, para não perderes nenhuma conta.` };
+    }
+    setAMigrar(true);
     for (const c of atuais) await nuvem.definir(c);
     await marcarMigrado();
     setAMigrar(false);
@@ -5359,6 +5781,12 @@ function useCarteiraFidelizar() {
   const [aMigrar, setAMigrar] = useState(false);
   const migrarParaNuvem = async () => {
     if (!firebaseUser || nuvemAtiva) return { ok: false };
+    // Aviso preventivo de NIFs repetidos (2026-09-29) — mesmo princípio de
+    // useClientesNovos: nunca funde, só avisa e recusa migrar.
+    const { nNifsRepetidos, nLinhasAfetadas } = contarNifsRepetidos(todosLocal);
+    if (nNifsRepetidos > 0) {
+      return { ok: false, motivo: `Encontrei ${nNifsRepetidos} NIF(s) repetido(s) no Excel da Carteira (${nLinhasAfetadas} linha(s) ao todo) — corrige o ficheiro antes de migrar, para não perderes nenhuma conta.` };
+    }
     setAMigrar(true);
     for (const c of todosLocal) await nuvem.definir(c);
     await marcarMigrado();
@@ -5379,9 +5807,16 @@ function useCarteiraFidelizar() {
   const prepararUploadServicos = async (file) => {
     const novaLista = await lerLinhasDeFicheiroExcel(file, mapearLinhaCarteiraServicos);
     if (!novaLista) return null;
-    return construirPreviewUpload(novaLista, nuvem.itens, normalizarServicos);
+    const preview = construirPreviewUpload(novaLista, nuvem.itens, normalizarServicos);
+    // Aviso preventivo de NIFs repetidos (2026-09-29) — no PRÓPRIO ficheiro novo,
+    // não contra o que já está na nuvem. Anexado ao preview para
+    // ResumoUploadPendente mostrar antes do clique em "Confirmar e gravar".
+    return { ...preview, duplicados: contarNifsRepetidos(novaLista) };
   };
   const confirmarUploadServicos = async (preview) => {
+    if (preview.duplicados && preview.duplicados.nNifsRepetidos > 0) {
+      throw new Error(`${preview.duplicados.nNifsRepetidos} NIF(s) repetido(s) no ficheiro — corrige antes de gravar.`);
+    }
     for (const item of preview.linhas) {
       if (item.estado === "semAlteracao") continue;
       const { linhaExcel, ...dados } = item.registo;
@@ -5393,9 +5828,13 @@ function useCarteiraFidelizar() {
     if (!novaLista) return null;
     const existentesPorNif = new Map(nuvem.itens.map((r) => [r.n, r]));
     const apenasExistentes = novaLista.filter((r) => existentesPorNif.has(r.n));
-    return construirPreviewUpload(apenasExistentes, nuvem.itens, normalizarLivres);
+    const preview = construirPreviewUpload(apenasExistentes, nuvem.itens, normalizarLivres);
+    return { ...preview, duplicados: contarNifsRepetidos(novaLista) };
   };
   const confirmarUploadLivres = async (preview) => {
+    if (preview.duplicados && preview.duplicados.nNifsRepetidos > 0) {
+      throw new Error(`${preview.duplicados.nNifsRepetidos} NIF(s) repetido(s) no ficheiro — corrige antes de gravar.`);
+    }
     for (const item of preview.linhas) {
       if (item.estado === "semAlteracao") continue;
       await firebaseDb.collection("carteira_fidelizar").doc(String(item.registo.n)).set(normalizarLivres(item.registo), { merge: true });
@@ -5715,6 +6154,22 @@ function Field({ field, value, onChange }) {
             className="w-full px-3 py-2 rounded-md border border-neutral-200 text-sm focus:outline-none focus:border-red-600" />
           <datalist id="setores-dropdown">{SETORES_LISTA.map((s) => <option key={s} value={s} />)}</datalist>
         </>
+      ) : field.type === "bool" ? (
+        // Select de 3 estados (2026-09-29, "Produtos para este cliente") — nunca uma
+        // checkbox: precisa de distinguir "não respondido" de "Não", senão um campo
+        // por preencher parece sempre uma resposta negativa.
+        <select value={value} onChange={(e) => onChange(field.key, e.target.value)}
+          className="w-full px-3 py-2 rounded-md border border-neutral-200 text-sm bg-white focus:outline-none focus:border-red-600">
+          <option value="">— não respondido —</option>
+          <option value="sim">Sim</option>
+          <option value="nao">Não</option>
+        </select>
+      ) : field.type === "choice" ? (
+        <select value={value} onChange={(e) => onChange(field.key, e.target.value)}
+          className="w-full px-3 py-2 rounded-md border border-neutral-200 text-sm bg-white focus:outline-none focus:border-red-600">
+          <option value="">— não respondido —</option>
+          {(field.opcoes || []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
       ) : (
         <input type={field.type} value={value} onChange={(e) => onChange(field.key, e.target.value)}
           className="w-full px-3 py-2 rounded-md border border-neutral-200 text-sm focus:outline-none focus:border-red-600" />
@@ -6153,17 +6608,245 @@ function PainelCampanhaEmail({ destinatarios }) {
 
 /* ================= PONTO: CLIENTES ================= */
 
+// Todos os documentos (1 leitura, em tempo real) → Map NIF → { n, contas }. Só ativo com
+// sessão Firebase iniciada — sem sessão o Map fica vazio (nunca há cópia local).
+function useContratosPermanencia(firebaseUser) {
+  const [mapa, setMapa] = useState(() => new Map());
+  useEffect(() => {
+    if (!firebaseUser) { setMapa(new Map()); return; }
+    return firebaseDb.collection(COLECAO_CONTRATOS).onSnapshot(
+      (snap) => { const m = new Map(); snap.forEach((d) => m.set(d.id, d.data())); setMapa(m); },
+      (e) => console.warn(`Não foi possível ler ${COLECAO_CONTRATOS}:`, e.message)
+    );
+  }, [firebaseUser]);
+  return mapa;
+}
+
+// Merge SÓ na conta carregada (as outras contas do mesmo NIF nunca são tocadas). Se a
+// conta pertencia a outro NIF e o utilizador confirmou, sai do documento antigo.
+async function gravarContratosConta(nif, conta, contratos, removerDeNif) {
+  await firebaseDb.collection(COLECAO_CONTRATOS).doc(nif).set(
+    { n: nif, contas: { [conta]: { contratos, atualizadoEm: new Date().toISOString() } } },
+    { merge: true }
+  );
+  if (removerDeNif && removerDeNif !== nif) {
+    await firebaseDb.collection(COLECAO_CONTRATOS).doc(removerDeNif).update({ [`contas.${conta}`]: firebase.firestore.FieldValue.delete() });
+  }
+}
+
+function LinhaContratoResumo({ c, extra }) {
+  return (
+    <div className="text-[11px] text-neutral-600">
+      {c.id} · {c.servico || "—"} · fim {formatarDataIsoPT(c.fim)}{extra ? ` · ${extra}` : ""}
+    </div>
+  );
+}
+
+function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
+  const [itens, setItens] = useState([]);
+  const [aLer, setALer] = useState(false);
+  const [aGravar, setAGravar] = useState(false);
+  const [aviso, setAviso] = useState("");
+  const [aArrastar, setAArrastar] = useState(false);
+  const inputRef = React.useRef(null);
+
+  useEffect(() => { setItens([]); setAviso(""); }, [nif]);
+
+  const docAtual = mapa.get(nif) || null;
+  const contasAtuais = Object.entries((docAtual && docAtual.contas) || {}).sort((a, b) => a[0].localeCompare(b[0]));
+  const fimProximo = calcularFimMaisProximo(docAtual);
+
+  const lerFicheiros = async (files) => {
+    setALer(true);
+    const lidos = [];
+    for (const f of files) {
+      const base = { chave: `${f.name}-${f.size}-${Math.random()}`, ficheiro: f.name, confirmado: false };
+      try {
+        lidos.push({ ...base, ...lerContratosPermanenciaDeWorkbook(XLSX.read(await f.arrayBuffer(), { type: "array" })) });
+      } catch (e) {
+        lidos.push({ ...base, conta: "", contratos: [], avisos: [], erro: "Não foi possível ler o ficheiro: " + e.message });
+      }
+    }
+    setItens((prev) => [...prev, ...lidos]);
+    setALer(false);
+  };
+  const mudarItem = (chave, patch) => setItens((prev) => prev.map((it) => (it.chave === chave ? { ...it, ...patch } : it)));
+
+  const analisar = (it) => {
+    const conta = String(it.conta || "").replace(/\D/g, "");
+    const outro = conta ? [...mapa.entries()].find(([n, d]) => n !== nif && d && d.contas && d.contas[conta]) : null;
+    const repetida = !!conta && itens.some((o) => o !== it && !o.erro && String(o.conta || "").replace(/\D/g, "") === conta);
+    const existentes = (conta && docAtual && docAtual.contas && docAtual.contas[conta] && docAtual.contas[conta].contratos) || [];
+    const diff = conta ? compararContratosConta(existentes, it.contratos) : null;
+    const apagaTudo = !it.erro && it.contratos.length === 0 && existentes.length > 0;
+    const precisaConfirmar = !!outro || apagaTudo;
+    return { conta, outroNif: outro ? outro[0] : null, repetida, diff, apagaTudo, gravavel: !it.erro && !!conta && !repetida && (!precisaConfirmar || it.confirmado) };
+  };
+  const analises = itens.map((it) => ({ it, a: analisar(it) }));
+  const nGraveis = analises.filter((x) => x.a.gravavel).length;
+
+  const gravar = async () => {
+    setAGravar(true);
+    const feitos = new Set();
+    try {
+      for (const { it, a } of analises) {
+        if (!a.gravavel) continue;
+        await gravarContratosConta(nif, a.conta, it.contratos, a.outroNif);
+        feitos.add(it.chave);
+      }
+      setAviso(`${feitos.size} conta(s) gravada(s) no Firestore.`);
+    } catch (e) {
+      setAviso("Erro ao gravar: " + (e.message || e) + (feitos.size ? ` (${feitos.size} já gravada(s))` : ""));
+    }
+    setItens((prev) => prev.filter((it) => !feitos.has(it.chave)));
+    setAGravar(false);
+    setTimeout(() => setAviso(""), 10000);
+  };
+
+  return (
+    <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
+      <div className="text-xs font-medium text-neutral-400">CONTRATOS DE PERMANÊNCIA</div>
+      {!firebaseUser ? (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2">
+          Inicia sessão no Firebase para ver e importar contratos — ficam guardados só no Firestore.
+        </div>
+      ) : (
+        <>
+          {fimProximo ? (
+            <div className={`text-sm rounded-md px-3 py-2 border ${fimProximo.terminado ? "bg-emerald-50 border-emerald-200 text-emerald-800" : fimProximo.dias <= 183 ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-neutral-50 border-neutral-200 text-neutral-700"}`}>
+              {fimProximo.terminado ? "Todas as permanências terminaram — a mais recente em " : "Fim de permanência mais próximo: "}
+              <b>{formatarDataIsoPT(fimProximo.fim)}</b>
+              {fimProximo.terminado ? ` (há ${-fimProximo.dias} dias)` : ` (em ${fimProximo.dias} dias)`}
+              <span className="text-xs opacity-75"> · conta {fimProximo.conta}, contrato {fimProximo.contratoId}</span>
+            </div>
+          ) : (
+            <div className="text-xs text-neutral-500">Ainda não há contratos importados para este cliente.</div>
+          )}
+
+          {contasAtuais.length > 0 && (
+            <div className="space-y-1.5">
+              {contasAtuais.map(([conta, dados]) => {
+                const dias = dados.atualizadoEm ? diasDesdeIso(dados.atualizadoEm) : null;
+                const desatualizada = dias === null || dias > DIAS_CONTRATOS_DESATUALIZADOS;
+                return (
+                  <details key={conta} className="border border-neutral-100 rounded-md px-2.5 py-1.5">
+                    <summary className="text-sm cursor-pointer flex items-center gap-2 flex-wrap">
+                      <span className="font-medium">Conta {conta}</span>
+                      <span className="text-xs text-neutral-500">{(dados.contratos || []).length} contrato(s) · importado em {dados.atualizadoEm ? new Date(dados.atualizadoEm).toLocaleDateString("pt-PT") : "—"}</span>
+                      {desatualizada && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ desatualizada{dias !== null ? ` (há ${dias} dias)` : ""} — volta a importar</span>}
+                    </summary>
+                    <div className="mt-1.5 space-y-0.5">
+                      {(dados.contratos || []).map((c) => (
+                        <LinhaContratoResumo key={c.id} c={c} extra={[c.tipo, c.multa !== null && c.multa !== undefined ? `multa ${formatEuro(c.multa)}/mês` : null].filter(Boolean).join(" · ")} />
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
+            </div>
+          )}
+
+          <div
+            onClick={() => inputRef.current && inputRef.current.click()}
+            onDragOver={(e) => { e.preventDefault(); setAArrastar(true); }}
+            onDragLeave={() => setAArrastar(false)}
+            onDrop={(e) => { e.preventDefault(); setAArrastar(false); const fs = [...e.dataTransfer.files]; if (fs.length) lerFicheiros(fs); }}
+            className={`border border-dashed rounded-md px-2.5 py-2 cursor-pointer text-center text-xs ${aArrastar ? "border-red-500 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-400 hover:border-neutral-400"}`}>
+            <input ref={inputRef} type="file" accept=".xlsx,.xls" multiple className="hidden"
+              onChange={(e) => { const fs = [...e.target.files]; if (fs.length) lerFicheiros(fs); e.target.value = ""; }} />
+            {aLer ? "A ler…" : "📤 Arrasta um ou vários ficheiros de contratos (um por conta), ou clica para escolher"}
+          </div>
+
+          {aviso && <div className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-2.5 py-2">{aviso}</div>}
+
+          {analises.map(({ it, a }) => (
+            <div key={it.chave} className="border border-neutral-200 rounded-md p-2.5 space-y-1.5 bg-neutral-50">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-neutral-700">{it.ficheiro}</span>
+                <button onClick={() => setItens((prev) => prev.filter((x) => x.chave !== it.chave))} className="ml-auto text-neutral-400 hover:text-red-600 text-xs" title="Descartar este ficheiro">✕</button>
+              </div>
+              {it.erro ? (
+                <div className="text-xs text-red-700">{it.erro}</div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2 text-xs">
+                    <label className="text-neutral-500">Conta:</label>
+                    <input value={it.conta} onChange={(e) => mudarItem(it.chave, { conta: e.target.value, confirmado: false })}
+                      placeholder="Nº de conta (a 1ª linha não tinha)" className={`px-2 py-1 rounded border text-xs w-56 ${a.conta ? "border-neutral-300" : "border-red-400"}`} />
+                  </div>
+                  {!a.conta && <div className="text-xs text-red-700">Falta o nº de conta — escreve-o acima (não é possível gravar sem conta).</div>}
+                  {a.repetida && <div className="text-xs text-red-700">Outro ficheiro deste lote é da mesma conta ({a.conta}) — descarta um deles.</div>}
+                  {a.outroNif && (
+                    <label className="text-xs text-red-800 bg-red-50 border border-red-200 rounded px-2 py-1.5 flex gap-2">
+                      <input type="checkbox" checked={it.confirmado} onChange={(e) => mudarItem(it.chave, { confirmado: e.target.checked })} />
+                      <span>⚠ A conta {a.conta} já está associada a outro cliente (NIF {a.outroNif}). Confirmo que pertence a este cliente — passa a constar só aqui.</span>
+                    </label>
+                  )}
+                  {a.apagaTudo && (
+                    <label className="text-xs text-red-800 bg-red-50 border border-red-200 rounded px-2 py-1.5 flex gap-2">
+                      <input type="checkbox" checked={it.confirmado} onChange={(e) => mudarItem(it.chave, { confirmado: e.target.checked })} />
+                      <span>⚠ Este ficheiro não tem nenhum contrato — gravar remove os {a.diff.desaparecidos.length} contrato(s) atuais da conta. Confirmo.</span>
+                    </label>
+                  )}
+                  {a.diff && (
+                    <div className="text-xs space-y-1">
+                      <div className="flex gap-3 flex-wrap text-neutral-600">
+                        <span className="text-emerald-700">+{a.diff.adicionados.length} novo(s)</span>
+                        <span className="text-amber-700">~{a.diff.alterados.length} alterado(s)</span>
+                        <span className="text-red-700">−{a.diff.desaparecidos.length} desaparecido(s)</span>
+                        <span>{a.diff.iguais} sem alterações</span>
+                      </div>
+                      {a.diff.adicionados.map((c) => <LinhaContratoResumo key={"n" + c.id} c={c} extra="NOVO" />)}
+                      {a.diff.alterados.map((x) => <LinhaContratoResumo key={"a" + x.depois.id} c={x.depois} extra={`ALTERADO (${x.campos.join(", ")})`} />)}
+                      {a.diff.desaparecidos.map((c) => <LinhaContratoResumo key={"d" + c.id} c={c} extra="DESAPARECIDO — será removido" />)}
+                    </div>
+                  )}
+                  {it.avisos.map((av, i) => <div key={i} className="text-[11px] text-amber-700">⚠ {av}</div>)}
+                </>
+              )}
+            </div>
+          ))}
+
+          {itens.length > 0 && (
+            <div className="flex items-center gap-2">
+              <button onClick={gravar} disabled={aGravar || nGraveis === 0}
+                className="text-xs px-3 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40">
+                {aGravar ? "A gravar…" : `Confirmar e gravar ${nGraveis} conta(s)`}
+              </button>
+              <button onClick={() => setItens([])} disabled={aGravar} className="text-xs px-3 py-1.5 rounded-md border border-neutral-300 text-neutral-600 hover:bg-neutral-50">Cancelar tudo</button>
+              {nGraveis < itens.length && <span className="text-xs text-neutral-400">{itens.length - nGraveis} ficheiro(s) por resolver não serão gravados.</span>}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function ClientesView() {
   const { todosClientes, clientesSemNif, adicionar, fonteExcel, aCarregarExcel, precisaPermissaoExcel, continuarExcel, ligarExcel, recarregarExcel,
     firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, obterExtras, definirExtras, obterNotasFidelizacao, removerNotaFidelizacaoNoIndice, obterTodosExtras } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
   const { todos: todaCarteira } = useCarteiraFidelizar();
+  const mapaContratos = useContratosPermanencia(firebaseUser);
   const [nifSelecionado, setNifSelecionado] = useState("");
   const [ehNovo, setEhNovo] = useState(false);
   const [novoBase, setNovoBase] = useState({ e: "", n: "", t: "Convergente Móvel + Fixo" });
   const [extras, setExtras] = useState({});
+  // Snapshot dos extras tal como foram carregados (2026-09-29, "Produtos para este
+  // cliente") — nunca os próprios `extras` (esses mudam a cada tecla) — só para
+  // `guardar()` saber se alguma pergunta-chave mudou de valor, e decidir se marca
+  // `produtosPontuados`/`campanhas_pontuacao` como desatualizados.
+  const [extrasOriginais, setExtrasOriginais] = useState({});
   const [avisoSucesso, setAvisoSucesso] = useState("");
   const [erroNif, setErroNif] = useState("");
+  const [catalogoProdutos, setCatalogoProdutos] = useState(null);
+  const [aCalcularProdutos, setACalcularProdutos] = useState(false);
+  const [erroProdutos, setErroProdutos] = useState("");
+
+  useEffect(() => {
+    (async () => setCatalogoProdutos(((await lerProdutosCaracteristicasNuvem()) || {}).produtos || []))();
+  }, []);
 
   const clienteAtual = useMemo(() => todosClientes.find((c) => c.n === nifSelecionado) || null, [nifSelecionado, todosClientes]);
   const mostraFicha = ehNovo || clienteAtual;
@@ -6178,6 +6861,35 @@ function ClientesView() {
     const notas = await obterNotasFidelizacao(nif);
     guardadas = { ...guardadas, notasFidelizacao: notas || [] };
     setExtras(guardadas);
+    setExtrasOriginais(guardadas);
+    setErroProdutos("");
+  };
+
+  // "Calcular produtos recomendados" (2026-09-29) — grava logo (nunca espera por
+  // "Guardar ficha", mesmo padrão de outras ações computadas na ficha) e nunca marca
+  // como desatualizado a si próprio, já que acabou de ser calculado com as respostas
+  // atuais.
+  const calcularProdutos = async () => {
+    if (!clienteAtual) return;
+    setACalcularProdutos(true);
+    setErroProdutos("");
+    try {
+      const servicos = servicosContratadosDoCliente(clienteAtual);
+      // Faturas reais (2026-09-29, mesma correção da Campanha por Produto) — só
+      // deste cliente, 1 leitura, nunca a coleção inteira (ao contrário da Campanha,
+      // que pontua muitos clientes de uma vez).
+      const cacheAnalise = await lerAnaliseFaturasCacheNuvem(clienteAtual.n);
+      const kpisFaturas = cacheAnalise && cacheAnalise.resumo && Array.isArray(cacheAnalise.resumo.contas)
+        ? calcularKpisEInsights(cacheAnalise.resumo.contas) : null;
+      const resultado = await calcularProdutosParaCliente(clienteAtual, servicos, catalogoProdutos, extras, kpisFaturas);
+      const novosExtras = { ...extras, produtosPontuados: { ...resultado, desatualizado: false } };
+      setExtras(novosExtras);
+      await definirExtras(clienteAtual.n, novosExtras);
+    } catch (e) {
+      setErroProdutos(`Não foi possível calcular: ${e.message}`);
+    } finally {
+      setACalcularProdutos(false);
+    }
   };
 
   // Remoção manual de 1 nota de fidelização (2026-09-26) — para limpar notas órfãs
@@ -6191,8 +6903,8 @@ function ClientesView() {
   };
 
   const selecionarCliente = (nif) => { setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif); if (nif) carregarExtras(nif); else setExtras({}); irParaTopo(); };
-  const abrirNovo = () => { setEhNovo(true); setNifSelecionado(""); setAvisoSucesso(""); setErroNif(""); setNovoBase({ e: "", n: "", t: "Convergente Móvel + Fixo" }); setExtras({}); irParaTopo(); };
-  const limpar = () => { setEhNovo(false); setNifSelecionado(""); setExtras({}); };
+  const abrirNovo = () => { setEhNovo(true); setNifSelecionado(""); setAvisoSucesso(""); setErroNif(""); setNovoBase({ e: "", n: "", t: "Convergente Móvel + Fixo" }); setExtras({}); setExtrasOriginais({}); irParaTopo(); };
+  const limpar = () => { setEhNovo(false); setNifSelecionado(""); setExtras({}); setExtrasOriginais({}); };
   const mudarExtra = (key, value) => setExtras((prev) => ({ ...prev, [key]: value }));
 
   const guardar = async () => {
@@ -6203,7 +6915,17 @@ function ClientesView() {
     setErroNif("");
     const nif = ehNovo ? novoBase.n.trim() : clienteAtual?.n;
     if (!nif) return;
-    await definirExtras(nif, extras);
+    // Invalidação de "Produtos para este cliente" (2026-09-29, pedido explícito de
+    // Augusto): se alguma pergunta-chave mudou de valor face ao que estava carregado,
+    // marca produtosPontuados (deste cliente) e campanhas_pontuacao (onde quer que
+    // este NIF apareça) como desatualizados — nunca apaga, só sinaliza, para a
+    // próxima Campanha por Produto nunca usar pontuações silenciosamente antigas.
+    const perguntaChaveMudou = !ehNovo && PERGUNTAS_CHAVE_PRODUTOS.some((p) => (extras[p.key] || "") !== (extrasOriginais[p.key] || ""));
+    const extrasAGravar = perguntaChaveMudou && extras.produtosPontuados
+      ? { ...extras, produtosPontuados: { ...extras.produtosPontuados, desatualizado: true } }
+      : extras;
+    await definirExtras(nif, extrasAGravar);
+    if (perguntaChaveMudou) await marcarProdutosDesatualizados(nif);
     obterTodosExtras().then(setExtrasCampanha);
     if (ehNovo) {
       adicionar({ n: nif, e: novoBase.e, t: novoBase.t, v: [0, 0], d: [0, 0], i: 0, f: [0, 0], manual: true });
@@ -6211,7 +6933,7 @@ function ClientesView() {
     }
     const nome = ehNovo ? novoBase.e : clienteAtual.e;
     setAvisoSucesso(`"${nome}" guardado`);
-    setEhNovo(false); setNifSelecionado(""); setExtras({});
+    setEhNovo(false); setNifSelecionado(""); setExtras({}); setExtrasOriginais({});
     irParaTopo();
     setTimeout(() => setAvisoSucesso(""), 3000);
   };
@@ -6427,6 +7149,43 @@ function ClientesView() {
               </div>
             </div>
           ))}
+
+          {!ehNovo && clienteAtual && <ContratosPermanenciaCard nif={clienteAtual.n} firebaseUser={firebaseUser} mapa={mapaContratos} />}
+
+          {!ehNovo && clienteAtual && (
+            <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="text-xs font-medium text-neutral-400">PRODUTOS PARA ESTE CLIENTE</div>
+                <button onClick={calcularProdutos} disabled={aCalcularProdutos || !catalogoProdutos}
+                  className="text-xs px-3 py-1.5 rounded-md bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-40">
+                  {aCalcularProdutos ? "A calcular…" : "Calcular produtos recomendados"}
+                </button>
+              </div>
+              <div className="text-[11px] text-neutral-400">
+                Pontua as categorias do catálogo que este cliente ainda não tem (ver "Produtos já contratados" acima), ordenadas por probabilidade de fecho.
+                As perguntas-chave respondidas acima entram nesta pontuação.
+              </div>
+              {erroProdutos && <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-2.5 py-2">{erroProdutos}</div>}
+              {extras.produtosPontuados && (
+                <>
+                  {extras.produtosPontuados.desatualizado && (
+                    <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2">
+                      ⚠ Desatualizado — uma resposta às perguntas-chave mudou desde o último cálculo. Recalcula para atualizar o ranking.
+                    </div>
+                  )}
+                  <div className="text-[11px] text-neutral-400">Calculado em {new Date(extras.produtosPontuados.calculadoEm).toLocaleString("pt-PT")}</div>
+                  <div className="space-y-1.5">
+                    {extras.produtosPontuados.categorias.map((c, i) => (
+                      <div key={c.id} className="flex items-center justify-between gap-2 text-sm border-b border-neutral-100 last:border-0 pb-1.5 last:pb-0">
+                        <span className="text-neutral-700">{i + 1}. {c.label}</span>
+                        <span className="text-xs text-neutral-500">adequação {c.adequacao ?? "—"} · necessidade {c.necessidade ?? "—"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           <div className="flex items-center justify-between border border-neutral-900 rounded-lg bg-neutral-900 text-white p-4">
             <span className="text-xs text-neutral-400">{preenchidos} de {EXTRA_FIELDS.length} campos preenchidos</span>
@@ -6677,7 +7436,10 @@ function AnaliseFaturasView() {
     const cliente = todosClientes.find((c) => c.n === nif);
     if (!cliente) return;
     const guardado = nuvemAtivaAnalise ? await lerAnaliseFaturasCacheNuvem(nif) : null;
-    if (guardado && guardado.resumo) {
+    // `finalizado` (Opção B, 2026-09-29): análise já exportada — fica guardada na nuvem
+    // para alimentar a Campanha por Produto / "Produtos para este cliente", mas nunca é
+    // reapresentada aqui como trabalho em curso (a vista começa limpa, para um ciclo novo).
+    if (guardado && guardado.resumo && !guardado.finalizado) {
       if (guardado.versaoLogica === VERSAO_LOGICA_ANALISE_FATURAS) {
         setResumo(guardado.resumo);
         setAnalisadoEm(guardado.analisadoEm || null);
@@ -6851,7 +7613,16 @@ function AnaliseFaturasView() {
     if (nuvemAtivaAnalise) {
       const faturasDoCliente = await listarFaturasAnaliseNuvem(nif);
       for (const f of faturasDoCliente) await removerFaturaAnaliseAnexadaNuvem(f.id);
-      await removerAnaliseFaturasCacheNuvem(nif);
+      // Opção B (2026-09-29, pedido explícito de Augusto): a análise de faturas feita
+      // tem de continuar a contar para a Campanha por Produto e "Produtos para este
+      // cliente" MESMO depois de exportar (ex.: já deu origem a uma proposta que o
+      // cliente não aceitou) — por isso a cache deixa de ser apagada e passa a ser
+      // marcada `finalizado` (ver carregarAnalisePersistida, que a ignora na vista).
+      // Guarda sempre o `resumo` atual; sem resumo em ecrã não toca na cache (nunca
+      // apaga uma análise finalizada anterior por engano — os 3 botões exigem resumo).
+      if (resumo) await guardarAnaliseFaturasCacheNuvem(nif, {
+        analisadoEm, versaoLogica: VERSAO_LOGICA_ANALISE_FATURAS, resumo, finalizado: true,
+      });
     } else {
       const faturasDoCliente = await listarFaturasAnaliseDoCliente(nif);
       for (const f of faturasDoCliente) await removerFaturaAnaliseAnexada(f.id);
@@ -8207,6 +8978,110 @@ function useProspetosNovos() {
     return { ok: true, n: atuais.length };
   };
 
+  // "extras" de Prospetos na nuvem (2026-09-29, achado real de Augusto: "documentar
+  // não chega" — a ficha completa de Prospetos, incluindo Próxima Ação/Notas/
+  // Simulador/Negócio Fechado e as perguntas-chave de produtos, só vivia em
+  // localStorage["prospect-extra:{nif}"], mesmo com Prospetos já migrado — no
+  // Citrix, cada sessão podia perder o que outra tinha respondido. Mesmo padrão
+  // exato de obterExtras/definirExtras em useClientesNovos, guardado num campo
+  // "extras" próprio do documento (nunca a raiz, para nunca colidir com os campos
+  // base do prospeto).
+  const obterExtras = async (nif) => {
+    if (nuvemAtiva) {
+      try {
+        const doc = await firebaseDb.collection("prospetos").doc(String(nif)).get();
+        return (doc.exists && doc.data().extras && typeof doc.data().extras === "object") ? doc.data().extras : {};
+      } catch {
+        return null;
+      }
+    }
+    try { return JSON.parse(localStorage.getItem(`prospect-extra:${nif}`) || "{}"); } catch { return {}; }
+  };
+  const definirExtras = async (nif, extras) => {
+    if (nuvemAtiva) {
+      await firebaseDb.collection("prospetos").doc(String(nif)).set({ extras }, { merge: true });
+      const k = String(nif);
+      if (CACHE_EXTRAS_NUVEM_PROSPETOS.has(k)) CACHE_EXTRAS_NUVEM_PROSPETOS.set(k, { ...CACHE_EXTRAS_NUVEM_PROSPETOS.get(k), ...extras });
+      return;
+    }
+    let extra = {};
+    try { extra = JSON.parse(localStorage.getItem(`prospect-extra:${nif}`) || "{}"); } catch { extra = {}; }
+    localStorage.setItem(`prospect-extra:${nif}`, JSON.stringify({ ...extra, ...extras }));
+  };
+
+  // Migração dos extras já existentes em localStorage (2026-09-29) — SEPARADA da
+  // migração base (migrarParaNuvem, acima): essa só corre 1 vez, quando "prospetos"
+  // ainda não está migrado; esta corre sempre que a nuvem já está ativa (idempotente
+  // — só escreve o que ainda faltar), porque muitos Prospetos já tinham a base
+  // migrada antes de os extras existirem em Firestore. Nunca sobrescreve extras que
+  // já estejam na nuvem (verifica antes de escrever) e nunca cria um prospeto novo
+  // só por ter um resto de localStorage órfão.
+  const migrarExtrasParaNuvem = async () => {
+    if (!nuvemAtiva) return { ok: false };
+    let migrados = 0;
+    for (const chave of Object.keys(localStorage)) {
+      if (!chave.startsWith("prospect-extra:")) continue;
+      const nif = chave.slice("prospect-extra:".length);
+      let extrasLocais;
+      try { extrasLocais = JSON.parse(localStorage.getItem(chave) || "{}"); } catch { continue; }
+      if (!extrasLocais || Object.keys(extrasLocais).length === 0) continue;
+      try {
+        const doc = await firebaseDb.collection("prospetos").doc(nif).get();
+        if (!doc.exists) continue;
+        const extrasNuvem = (doc.data().extras && typeof doc.data().extras === "object") ? doc.data().extras : {};
+        if (Object.keys(extrasNuvem).length > 0) continue;
+        await firebaseDb.collection("prospetos").doc(nif).set({ extras: extrasLocais }, { merge: true });
+        migrados++;
+      } catch {}
+    }
+    return { ok: true, n: migrados };
+  };
+
+  // Migração de "prospetos-fechados" para a nuvem (2026-09-29) — a marca de "negócio
+  // fechado" só vivia numa lista `localStorage["prospetos-fechados"]`, nunca chegou
+  // ao Firestore mesmo com Prospetos já migrado (achado real de Augusto). Reaproveita
+  // `extras.negocioFechado` — o MESMO campo que já existe na ficha (checkbox "Negócio
+  // Fechado", já gravado por `definirExtras(nif, extras)` no "guardar" normal de
+  // ProspetosView) em vez de um campo novo, para nunca haver duas fontes de verdade
+  // para a mesma coisa. `confirmarTransicaoProspect` em NegociosView (fecho automático
+  // ao passar um negócio a Implementado, sem passar pela ficha) também escreve aqui
+  // diretamente. Idempotente e só ADITIVA: nunca sobrescreve um NIF já marcado
+  // fechado na nuvem, nunca desfaz uma marca — só acrescenta os que ainda faltam
+  // vindos do localStorage.
+  const migrarFechadosParaNuvem = async () => {
+    if (!nuvemAtiva) return { ok: false };
+    let fechadosLocais = [];
+    try { fechadosLocais = JSON.parse(localStorage.getItem("prospetos-fechados") || "[]"); } catch { fechadosLocais = []; }
+    let migrados = 0;
+    for (const nif of fechadosLocais) {
+      try {
+        const doc = await firebaseDb.collection("prospetos").doc(String(nif)).get();
+        if (doc.exists && doc.data().extras && doc.data().extras.negocioFechado) continue;
+        await definirExtras(nif, { negocioFechado: true });
+        migrados++;
+      } catch {}
+    }
+    return { ok: true, n: migrados };
+  };
+
+  const obterTodosExtras = async () => {
+    if (nuvemAtiva) {
+      const emFalta = todosProspetosNuvem.filter((p) => !CACHE_EXTRAS_NUVEM_PROSPETOS.has(String(p.n)));
+      await Promise.all(emFalta.map(async (p) => {
+        try {
+          const doc = await firebaseDb.collection("prospetos").doc(String(p.n)).get();
+          CACHE_EXTRAS_NUVEM_PROSPETOS.set(String(p.n), (doc.exists && doc.data().extras && typeof doc.data().extras === "object") ? doc.data().extras : {});
+        } catch {}
+      }));
+      return Object.fromEntries(todosProspetosNuvem.map((p) => [p.n, CACHE_EXTRAS_NUVEM_PROSPETOS.get(String(p.n)) || {}]));
+    }
+    const mapa = {};
+    todosProspetosLocal.forEach((p) => {
+      try { mapa[p.n] = JSON.parse(localStorage.getItem(`prospect-extra:${p.n}`) || "{}"); } catch { mapa[p.n] = {}; }
+    });
+    return mapa;
+  };
+
   // Upload de atualização "Prospectos.xlsx" já com a nuvem ativa (2026-09-28) —
   // "resumo antes de gravar", nunca apaga um NIF ausente do ficheiro novo (mesmo
   // princípio conservador de sempre), e nunca substitui um tel/email que já veio da
@@ -8240,16 +9115,8 @@ function useProspetosNovos() {
     continuarExcel: continuar, ligarExcel: ligar, recarregarExcel: recarregar,
     firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar: todosProspetosLocal.length,
     prepararUploadProspetos, confirmarUploadProspetos,
+    obterExtras, definirExtras, obterTodosExtras, migrarExtrasParaNuvem, migrarFechadosParaNuvem,
   };
-}
-
-function marcarProspectFechado(nif) {
-  let fechados = [];
-  try { fechados = JSON.parse(localStorage.getItem("prospetos-fechados") || "[]"); } catch { fechados = []; }
-  if (!fechados.includes(nif)) {
-    fechados.push(nif);
-    localStorage.setItem("prospetos-fechados", JSON.stringify(fechados));
-  }
 }
 
 function adicionarClienteLocal(nif, nome) {
@@ -8264,7 +9131,8 @@ function adicionarClienteLocal(nif, nome) {
 
 function ProspetosView() {
   const { todosProspetos, prospetosSemNif, adicionar, definirContactoOverride, fonteExcel, aCarregarExcel, precisaPermissaoExcel, continuarExcel, ligarExcel, recarregarExcel,
-    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, prepararUploadProspetos, confirmarUploadProspetos } = useProspetosNovos();
+    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, prepararUploadProspetos, confirmarUploadProspetos,
+    obterExtras, definirExtras, obterTodosExtras, migrarExtrasParaNuvem, migrarFechadosParaNuvem } = useProspetosNovos();
   const [pendenteUploadProspetos, setPendenteUploadProspetos] = useState(null);
   const [aGravarUploadProspetos, setAGravarUploadProspetos] = useState(false);
   const [avisoUploadProspetos, setAvisoUploadProspetos] = useState("");
@@ -8286,10 +9154,21 @@ function ProspetosView() {
   const [ehNovo, setEhNovo] = useState(false);
   const [novoBase, setNovoBase] = useState({ e: "", n: "" });
   const [extras, setExtras] = useState({});
+  // Snapshot para detetar mudanças nas perguntas-chave de produtos (ver guardar
+  // abaixo) — mesmo padrão de ClientesView.
+  const [extrasOriginais, setExtrasOriginais] = useState({});
   const [avisoSucesso, setAvisoSucesso] = useState("");
   const [erroNif, setErroNif] = useState("");
   const [aGuardar, setAGuardar] = useState(false);
   const [versaoFechados, setVersaoFechados] = useState(0);
+
+  // Backfill dos extras para a nuvem (2026-09-29) — idempotente, corre sempre que a
+  // nuvem de Prospetos está ativa (nunca só na 1ª migração, que já pode ter
+  // acontecido antes de os extras existirem em Firestore). migrarFechadosParaNuvem
+  // é a mesma ideia, só para "prospetos-fechados" (ver useProspetosNovos) — força um
+  // refrescar de "fechados" (abaixo) no fim, para os NIFs recém-migrados aparecerem
+  // logo como fechados.
+  useEffect(() => { migrarExtrasParaNuvem(); migrarFechadosParaNuvem().then(() => setVersaoFechados((v) => v + 1)); }, [nuvemAtiva]);
 
   // Campanhas de Email (2026-09-26) — reaproveita os filtros de distrito/segmento já
   // existentes acima (prospetosFiltrados), ao contrário de Clientes onde o setor/email
@@ -8297,9 +9176,22 @@ function ProspetosView() {
   // extra a carregar.
   const [pesquisa, setPesquisa] = useState("");
 
+  // "fechados" (2026-09-29) — deixou de ler localStorage["prospetos-fechados"]
+  // diretamente; agora vem de extras.negocioFechado (o mesmo campo da ficha, mesmo
+  // padrão de obterTodosExtras já usado por ClientesView/CampanhaPorProdutoView),
+  // para funcionar também com a nuvem ativa. `versaoFechados` continua a forçar um
+  // refrescar depois de marcar um prospeto como fechado (ver "guardar" abaixo).
+  const [extrasTodosProspetos, setExtrasTodosProspetos] = useState(null);
+  useEffect(() => {
+    if (!todosProspetos.length) return;
+    let cancelado = false;
+    obterTodosExtras().then((mapa) => { if (!cancelado) setExtrasTodosProspetos(mapa); });
+    return () => { cancelado = true; };
+  }, [todosProspetos.length, nuvemAtiva, versaoFechados]);
   const fechados = useMemo(() => {
-    try { return new Set(JSON.parse(localStorage.getItem("prospetos-fechados") || "[]")); } catch { return new Set(); }
-  }, [versaoFechados]);
+    const mapa = extrasTodosProspetos || {};
+    return new Set(Object.keys(mapa).filter((nif) => mapa[nif] && mapa[nif].negocioFechado));
+  }, [extrasTodosProspetos]);
 
   const prospetosAbertos = useMemo(() => todosProspetos.filter((p) => !fechados.has(p.n)), [todosProspetos, fechados]);
   const distritosDisponiveis = useMemo(() => [...new Set(todosProspetos.map((p) => p.distrito).filter(Boolean))].sort(), [todosProspetos]);
@@ -8317,13 +9209,15 @@ function ProspetosView() {
   const prospetoAtual = useMemo(() => todosProspetos.find((p) => p.n === nifSelecionado) || null, [nifSelecionado, todosProspetos]);
   const mostraFicha = ehNovo || prospetoAtual;
 
-  const carregarExtras = (nif) => {
-    try { setExtras(JSON.parse(localStorage.getItem(`prospect-extra:${nif}`) || "{}")); } catch { setExtras({}); }
+  const carregarExtras = async (nif) => {
+    const guardadas = (await obterExtras(nif)) || {};
+    setExtras(guardadas);
+    setExtrasOriginais(guardadas);
   };
 
-  const selecionarProspeto = (nif) => { setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif); if (nif) carregarExtras(nif); else setExtras({}); irParaTopo(); };
-  const abrirNovo = () => { setEhNovo(true); setNifSelecionado(""); setAvisoSucesso(""); setErroNif(""); setNovoBase({ e: "", n: "" }); setExtras({}); irParaTopo(); };
-  const limpar = () => { setEhNovo(false); setNifSelecionado(""); setExtras({}); };
+  const selecionarProspeto = (nif) => { setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif); if (nif) carregarExtras(nif); else { setExtras({}); setExtrasOriginais({}); } irParaTopo(); };
+  const abrirNovo = () => { setEhNovo(true); setNifSelecionado(""); setAvisoSucesso(""); setErroNif(""); setNovoBase({ e: "", n: "" }); setExtras({}); setExtrasOriginais({}); irParaTopo(); };
+  const limpar = () => { setEhNovo(false); setNifSelecionado(""); setExtras({}); setExtrasOriginais({}); };
   const mudarExtra = (key, value) => setExtras((prev) => ({ ...prev, [key]: value }));
 
   // Import único de Telefone/Email a partir de "Carteira a Fidelizar", cruzado por NIF
@@ -8372,15 +9266,28 @@ function ProspetosView() {
     const nif = ehNovo ? novoBase.n.trim() : prospetoAtual?.n;
     if (!nif) return;
     setAGuardar(true);
-    localStorage.setItem(`prospect-extra:${nif}`, JSON.stringify(extras));
+    // Invalidação de campanhas_pontuacao (2026-09-29) — mesmo princípio de
+    // ClientesView: se uma pergunta-chave mudou, qualquer pontuação antiga deste NIF
+    // fica marcada como desatualizada (Prospetos não têm ranking próprio, só
+    // alimentam a Campanha por Produto).
+    const perguntaChaveMudou = !ehNovo && PERGUNTAS_CHAVE_PRODUTOS.some((p) => (extras[p.key] || "") !== (extrasOriginais[p.key] || ""));
+    // Ordem importa em modo nuvem (2026-09-29): se for um prospeto novo, o documento
+    // base tem de existir ANTES de gravar `extras` — `definirExtras` usa
+    // `{merge:true}`, mas `adicionar` (nuvem.definir) usa `.set()` sem merge; gravar
+    // extras primeiro e o documento base a seguir apagaria os extras que acabaram de
+    // ser escritos.
     if (ehNovo) {
-      adicionar({ n: nif, e: novoBase.e, seg: "", cae: "", caeDesc: "", cls: "Prospect", cidade: "", distrito: "", colab: 0, tel: "", email: "", contacto: "Sem contactos", estado: "", manual: true });
+      await adicionar({ n: nif, e: novoBase.e, seg: "", cae: "", caeDesc: "", cls: "Prospect", cidade: "", distrito: "", colab: 0, tel: "", email: "", contacto: "Sem contactos", estado: "", manual: true });
       await adicionarProspectAoExcel({ n: nif, e: novoBase.e }).catch(() => false);
     }
+    await definirExtras(nif, extras);
+    if (perguntaChaveMudou) await marcarProdutosDesatualizados(nif);
     const nome = ehNovo ? novoBase.e : prospetoAtual.e;
 
     if (extras.negocioFechado) {
-      marcarProspectFechado(nif);
+      // "fechados" já ficou marcado — `extras.negocioFechado` acabou de ser gravado
+      // pelo `definirExtras(nif, extras)` acima, mesmo campo que "fechados" lê
+      // (2026-09-29, deixou de haver uma marca à parte em localStorage).
       // Usar SEMPRE o adicionar() de useClientesNovos (cloud-aware) — nunca a função
       // livre adicionarClienteLocal, que só escrevia em localStorage e ficaria
       // "invisível" para quem já migrou Clientes para a nuvem (2026-09-18).
@@ -8397,7 +9304,7 @@ function ProspetosView() {
       setAvisoSucesso(`"${nome}" guardado`);
     }
     setAGuardar(false);
-    setEhNovo(false); setNifSelecionado(""); setExtras({});
+    setEhNovo(false); setNifSelecionado(""); setExtras({}); setExtrasOriginais({});
     irParaTopo();
     setTimeout(() => setAvisoSucesso(""), 5000);
   };
@@ -8568,6 +9475,26 @@ function ProspetosView() {
               <span className="font-medium">Negócio fechado</span>
               <span className="text-neutral-400 text-xs">— ao guardar, passa para "Clientes" e sai de "Prospetos"</span>
             </label>
+          </div>
+
+          {/* Perguntas-chave de produtos (2026-09-29) — mesmas 7 perguntas de
+              ClientesView, sem ranking próprio (Prospetos não têm "Produtos para este
+              cliente" nesta versão) — só entram como contexto extra na Campanha por
+              Produto, ver montarRespostasChaveParaState. Nota: fica local a este
+              browser (mesmo padrão do resto da ficha de Prospetos), nunca sincroniza
+              entre computadores — limitação já existente, não nova. */}
+          <div className="border border-neutral-200 rounded-lg bg-white p-4">
+            <div className="text-xs font-medium text-neutral-400 mb-3">PERGUNTAS-CHAVE DE PRODUTOS</div>
+            <div className="text-[11px] text-neutral-400 mb-3">
+              Ajudam a Campanha por Produto a distinguir este prospeto — preenche as que souberes, mesmo sem correr nada.
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {PERGUNTAS_CHAVE_PRODUTOS.map((f) => (
+                <div key={f.key}>
+                  <Field field={f} value={extras[f.key] || ""} onChange={mudarExtra} />
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="flex items-center justify-between border border-neutral-900 rounded-lg bg-neutral-900 text-white p-4">
@@ -9063,7 +9990,7 @@ function NegociosView() {
   // vivem em useClientesNovos desde o Passo 3 do refactor (2026-09-19) — mexem em dados
   // de Clientes (incl. na nuvem, se migrado), nunca em Negócios.
   const { todosClientes, sincronizarComClientes, removerNegocioDeTodosOsClientes, reverterClienteAutoCriadoSeVazio } = useClientesNovos();
-  const { todosProspetos } = useProspetosNovos();
+  const { todosProspetos, definirExtras: definirExtrasProspeto } = useProspetosNovos();
   const { ehCampanha, definir: definirCampanha } = useNegociosCampanha();
   // "Campanha" depois de Negócios migrar para a nuvem (Passo 2, 2026-09-19): passa a
   // viver diretamente no próprio documento (negocio.campanha) — deixa de precisar do
@@ -9224,7 +10151,10 @@ function NegociosView() {
     if (!transicaoPendente) return;
     setATransicionar(true);
     const { nif, nome, prospect } = transicaoPendente;
-    marcarProspectFechado(nif);
+    // Fecho automático (sem passar pela ficha do prospeto) — mesmo campo
+    // extras.negocioFechado que a ficha usa (2026-09-29, deixou de haver uma marca à
+    // parte em localStorage["prospetos-fechados"]).
+    await definirExtrasProspeto(nif, { negocioFechado: true });
     const excelP = await removerProspectDoExcel(nif).catch(() => false);
     const excelC = await adicionarClienteAoExcel(prospect, "").catch(() => false);
     setAvisoNegocio(
@@ -11611,7 +12541,7 @@ function EtiquetaEstado({ estado, opcoes, onMudar }) {
   );
 }
 
-function CartaoClienteFidelizacao({ c, valor, tom, ehCliente, onMudarEstado }) {
+function CartaoClienteFidelizacao({ c, valor, tom, ehCliente, onMudarEstado, permanencia }) {
   const estado = c.estado || "Em aberto";
   return (
     <div className="bg-white border rounded-[18px] p-4 space-y-3" style={{ borderColor: "var(--vf-border)" }}>
@@ -11619,6 +12549,11 @@ function CartaoClienteFidelizacao({ c, valor, tom, ehCliente, onMudarEstado }) {
         <div className="min-w-0">
           <div className="text-[15px] font-semibold leading-snug">{c.e}</div>
           <div className="text-xs mt-0.5" style={{ color: "var(--vf-muted)" }}>NIF {c.n}{c.grupo ? ` · Grupo ${c.grupo}` : ""}{c.zonaD ? ` · Zona ${c.zonaD}` : ""}</div>
+          {permanencia && (
+            <div className="text-xs mt-1" style={{ color: "var(--vf-muted)" }}>
+              Contratos importados: {permanencia.terminado ? `permanências terminadas (a última há ${-permanencia.dias} dias)` : `fim mais próximo ${formatarDataIsoPT(permanencia.fim)} (em ${permanencia.dias} dias)`}
+            </div>
+          )}
           {estado === "Fechado" && ehCliente && (
             <div className="text-xs font-medium mt-1.5" style={{ color: "#0F5F58" }}>
               Nota na ficha de Cliente: negócio de fidelização fechado{c.dataFechado ? ` em ${new Date(c.dataFechado).toLocaleDateString("pt-PT")}` : ""}
@@ -11645,6 +12580,7 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
     lista, atualizadoEm, aProcessar, processarUpload, definirEstado, criarClienteSeNaoExistir, registarFechoFidelizacao, anularFechoFidelizacao, todosClientes, obterNotasFidelizacao,
     firebaseUser: firebaseUserTrimestre, nuvemAtiva: nuvemAtivaTrimestre, migrarParaNuvem: migrarTrimestre, aMigrar: aMigrarTrimestre, nParaMigrar: nParaMigrarTrimestre,
   } = useFidelizacaoTrimestre();
+  const mapaContratosTrimestre = useContratosPermanencia(firebaseUserTrimestre);
   const [aviso, setAviso] = useState("");
   const inputRef = React.useRef(null);
   // Cliente pendente de confirmação para criar em "Clientes" — só quando o estado passa
@@ -11749,7 +12685,7 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {itens.map((c) => (
-            <CartaoClienteFidelizacao key={c.n} c={c.dataFechado || !datasDasNotas[c.n] ? c : { ...c, dataFechado: datasDasNotas[c.n] }} valor={c[campo]} tom={tom} ehCliente={nifsClientes.has(c.n)} onMudarEstado={mudarEstado} />
+            <CartaoClienteFidelizacao key={c.n} c={c.dataFechado || !datasDasNotas[c.n] ? c : { ...c, dataFechado: datasDasNotas[c.n] }} valor={c[campo]} tom={tom} ehCliente={nifsClientes.has(c.n)} onMudarEstado={mudarEstado} permanencia={calcularFimMaisProximo(mapaContratosTrimestre.get(c.n))} />
           ))}
         </div>
       )}
@@ -11859,6 +12795,7 @@ function CampanhaPorProdutoView() {
   const { todosClientes, firebaseUser, nuvemAtiva, obterTodosExtras } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
   const { lista: fidelizacaoLista } = useFidelizacaoTrimestre();
+  const mapaContratos = useContratosPermanencia(firebaseUser);
 
   const [catalogo, setCatalogo] = useState(null);
   const [produtoEscolhido, setProdutoEscolhido] = useState("");
@@ -11874,6 +12811,10 @@ function CampanhaPorProdutoView() {
   const [resultados, setResultados] = useState(null);
   const [erro, setErro] = useState("");
   const [pedidoExemplo, setPedidoExemplo] = useState(null);
+  // Cliente do "Ver pedido exemplo" (2026-09-29) — por omissão o 1.º da amostra, mas pode
+  // ser escolhido um cliente com faturas na lista (ver render abaixo), para confirmar que
+  // os indicadores de faturação estão a chegar ao Jev. "" = 1.º da amostra.
+  const [pedidoNif, setPedidoNif] = useState("");
   const [filtros, setFiltros] = useState({ clientes: true, prospetos: true, soElegiveis: false, comEmail: false });
   const [nSelecionar, setNSelecionar] = useState(10);
   const [selecionados, setSelecionados] = useState(() => new Set());
@@ -11883,10 +12824,18 @@ function CampanhaPorProdutoView() {
   // darem sempre o mesmo resultado (achado de Augusto: a Bobadela tinha email na ficha
   // mas aparecia "sem email" aqui, porque esta vista nunca tinha ido buscar os extras).
   const [extrasClientes, setExtrasClientes] = useState(null);
+  // 🐛→✅ Faturas reais na Campanha por Produto (2026-09-29, achado real de Augusto):
+  // até agora `kpisFaturas` chegava sempre `null` a pontuarClienteParaCampanha — a
+  // "necessidade" nunca via valores/indicadores de faturação, apesar do state estar
+  // pronto para os receber (ver montarStateRecomendacao). Mapa NIF → contas, 1
+  // leitura em lote (nunca 1 por cliente).
+  const [analiseFaturasPorNif, setAnaliseFaturasPorNif] = useState(new Map());
 
   useEffect(() => {
     (async () => setCatalogo(((await lerProdutosCaracteristicasNuvem()) || {}).produtos || []))();
     listarCampanhasPontuadas().then(setCampanhasGuardadas).catch(() => setCampanhasGuardadas([]));
+    lerTodasAsAnalisesFaturasCacheNuvem().then(setAnaliseFaturasPorNif);
+    marcarPontuacoesAntigasSemFaturas().catch((e) => console.warn("Não foi possível marcar pontuações antigas:", e.message));
   }, []);
   useEffect(() => {
     if (!todosClientes.length) return;
@@ -11911,18 +12860,46 @@ function CampanhaPorProdutoView() {
   // amostra, e "Só elegíveis"/"Com email" descartam candidatos antes de gastar pedidos
   // ao Jev com gente que ia ficar de fora de qualquer forma. Sem filtros, metade de
   // cada grupo, até `nRegistos` no total.
+  // Respostas às perguntas-chave de um prospeto (2026-09-29) — sempre em
+  // localStorage, mesmo padrão do resto da ficha de Prospetos (ver ProspetosView);
+  // lido diretamente (síncrono, mesmo browser/origin), nunca precisa de um hook.
+  const respostasChaveProspeto = (nif) => {
+    try { return JSON.parse(localStorage.getItem(`prospect-extra:${nif}`) || "{}"); } catch { return {}; }
+  };
+
+  // kpisFaturas real (2026-09-29) — mesma agregação multi-conta que Análise de
+  // Faturas já usa (calcularKpisEInsights soma todas as contas do cliente
+  // internamente); `null` quando não há nenhuma análise em cache para este NIF
+  // (comportamento já existente, montarStateRecomendacao já sabe lidar com `null`).
+  const kpisFaturasDoNif = (nif) => {
+    const contas = analiseFaturasPorNif.get(nif);
+    return contas ? calcularKpisEInsights(contas) : null;
+  };
+
   const montarUniverso = () => {
     const nCada = Math.ceil(nRegistos / 2);
-    let clientes = !filtros.clientes ? [] : todosClientes.map((c) => ({
-      n: c.n, e: c.e, email: (extrasClientes && extrasClientes[c.n] && extrasClientes[c.n].email) || null,
-      tipo: "cliente", cliente: c,
-      servicos: servicosContratadosDoCliente(c),
-      elegibilidade: calcularSinalElegibilidade(c.n, fidelizacaoLista),
-    }));
+    // Elegibilidade = o maior entre o sinal do ficheiro trimestral e o sinal da
+    // permanência (contratos importados) — nunca só um deles. `diasPermanencia` só
+    // serve para mostrar na tabela; nada disto vai para o `state` do TypeSafe.
+    let clientes = !filtros.clientes ? [] : todosClientes.map((c) => {
+      const perm = calcularSinalPermanencia(mapaContratos.get(c.n));
+      return {
+        n: c.n, e: c.e, email: (extrasClientes && extrasClientes[c.n] && extrasClientes[c.n].email) || null,
+        tipo: "cliente", cliente: c,
+        servicos: servicosContratadosDoCliente(c),
+        elegibilidade: Math.max(calcularSinalElegibilidade(c.n, fidelizacaoLista), perm.sinal),
+        diasPermanencia: perm.dias,
+        respostasChave: (extrasClientes && extrasClientes[c.n]) || {},
+        kpisFaturas: kpisFaturasDoNif(c.n),
+      };
+    });
     let prospetos = !filtros.prospetos ? [] : todosProspetos.map((p) => ({
       n: p.n, e: p.e, email: p.email || null, tipo: "prospeto", cliente: p,
       servicos: [],
       elegibilidade: 0,
+      diasPermanencia: null,
+      respostasChave: respostasChaveProspeto(p.n),
+      kpisFaturas: kpisFaturasDoNif(p.n),
     }));
     if (filtros.soElegiveis) clientes = clientes.filter((c) => c.elegibilidade > 0);
     if (filtros.comEmail) { clientes = clientes.filter((c) => c.email); prospetos = prospetos.filter((p) => p.email); }
@@ -11933,11 +12910,24 @@ function CampanhaPorProdutoView() {
 
   const verPedidoExemplo = () => {
     const produto = produtoParaCampanha();
-    const universo = montarUniverso();
-    if (!produto || universo.length === 0) { setPedidoExemplo(null); return; }
-    const alvo = universo[0];
+    if (!produto) { setPedidoExemplo(null); return; }
+    // Se foi escolhido um NIF na lista, monta o pedido para ESSE cliente (mesma forma de
+    // `alvo` de montarUniverso: e/cliente/servicos/respostasChave/kpisFaturas); senão
+    // mantém o comportamento de sempre (1.º registo da amostra).
+    let alvo = null;
+    if (pedidoNif) {
+      const cliente = todosClientes.find((c) => c.n === pedidoNif);
+      if (cliente) {
+        alvo = { n: pedidoNif, e: cliente.e, cliente, servicos: servicosContratadosDoCliente(cliente), respostasChave: (extrasClientes && extrasClientes[pedidoNif]) || {}, kpisFaturas: kpisFaturasDoNif(pedidoNif) };
+      } else {
+        const p = todosProspetos.find((x) => x.n === pedidoNif);
+        if (p) alvo = { n: pedidoNif, e: p.e, cliente: p, servicos: [], respostasChave: respostasChaveProspeto(pedidoNif), kpisFaturas: kpisFaturasDoNif(pedidoNif) };
+      }
+    }
+    if (!alvo) alvo = montarUniverso()[0] || null;
+    if (!alvo) { setPedidoExemplo(null); return; }
     setPedidoExemplo({
-      state: montarStateRecomendacao(alvo.cliente, null, alvo.servicos, montarProdutoParaState(produto)),
+      state: montarStateRecomendacao(alvo.cliente, alvo.kpisFaturas, alvo.servicos, montarProdutoParaState(produto), montarRespostasChaveParaState(alvo.respostasChave)),
       questions: montarPerguntasCampanha(),
     });
   };
@@ -11956,10 +12946,11 @@ function CampanhaPorProdutoView() {
       const linhas = await executarEmLotes(
         universo,
         async (item) => {
-          const jev = await pontuarClienteParaCampanha(item.cliente, null, item.servicos, produto);
+          const jev = await pontuarClienteParaCampanha(item.cliente, item.kpisFaturas, item.servicos, produto, item.respostasChave);
           return {
             n: item.n, e: item.e, email: item.email, tipo: item.tipo,
             adequacao: jev.adequacao, necessidade: jev.necessidade, elegibilidade: item.elegibilidade,
+            diasPermanencia: item.diasPermanencia,
             final: calcularScoreFinalCampanha(jev.adequacao, jev.necessidade, item.elegibilidade, pesoElegibilidade, pesoAdequacao),
           };
         },
@@ -12039,6 +13030,20 @@ function CampanhaPorProdutoView() {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {analiseFaturasPorNif.size > 0 && (
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-neutral-500">Pedido exemplo de:</label>
+              <select value={pedidoNif} onChange={(e) => setPedidoNif(e.target.value)}
+                className="px-2 py-1 rounded border border-neutral-300 text-xs max-w-[300px]">
+                <option value="">1.º da amostra</option>
+                {[...analiseFaturasPorNif.keys()].map((nif) => {
+                  const c = todosClientes.find((x) => x.n === nif);
+                  const p = c ? null : todosProspetos.find((x) => x.n === nif);
+                  return <option key={nif} value={nif}>{c ? c.e : p ? `${p.e} (prospeto)` : nif}</option>;
+                })}
+              </select>
+            </div>
+          )}
           <button onClick={verPedidoExemplo} className="text-xs px-3 py-1.5 rounded-md border border-neutral-400 text-neutral-700 hover:bg-neutral-50">
             Ver pedido exemplo (1 registo)
           </button>
@@ -12082,7 +13087,7 @@ function CampanhaPorProdutoView() {
           <div className="max-h-[420px] overflow-y-auto">
             <table className="w-full text-xs">
               <thead className="text-neutral-400 text-left sticky top-0 bg-white">
-                <tr><th className="p-1"></th><th className="p-1">Empresa</th><th className="p-1">Tipo</th><th className="p-1">Adequação (0-4)</th><th className="p-1">Necessidade (0-4)</th><th className="p-1">Elegibilidade</th><th className="p-1">Final</th></tr>
+                <tr><th className="p-1"></th><th className="p-1">Empresa</th><th className="p-1">Tipo</th><th className="p-1">Adequação (0-4)</th><th className="p-1">Necessidade (0-4)</th><th className="p-1">Elegibilidade</th><th className="p-1">Permanência (dias)</th><th className="p-1">Final</th></tr>
               </thead>
               <tbody>
                 {resultadosFiltrados.map((r) => (
@@ -12093,6 +13098,7 @@ function CampanhaPorProdutoView() {
                     <td className="p-1">{r.adequacao !== null ? r.adequacao.toFixed(2) : "—"}</td>
                     <td className="p-1">{r.necessidade !== null ? r.necessidade.toFixed(2) : "—"}</td>
                     <td className="p-1">{r.elegibilidade.toFixed(1)}</td>
+                    <td className="p-1 text-neutral-500">{r.diasPermanencia === null || r.diasPermanencia === undefined ? "—" : r.diasPermanencia < 0 ? `terminou há ${-r.diasPermanencia}` : r.diasPermanencia}</td>
                     <td className="p-1 font-semibold">{r.final.toFixed(2)}</td>
                   </tr>
                 ))}
