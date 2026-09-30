@@ -3526,6 +3526,21 @@ function diasEntreDatasIso(deIso, paraIso) {
   return Math.round((Date.parse(paraIso + "T00:00:00Z") - Date.parse(deIso + "T00:00:00Z")) / 86400000);
 }
 
+// Soma N meses a uma data ISO "aaaa-mm-dd" (2026-09-30, ao fechar propostas: Data de
+// Fim = Data de Início + duração em meses). Ajusta o dia ao último dia do mês de
+// destino quando não existe (ex. 31/01 + 1 mês = 28/29/02) — nunca "transborda" para o
+// mês seguinte. Devolve "aaaa-mm-dd".
+function somarMesesIso(iso, meses) {
+  const [a, m, d] = String(iso).slice(0, 10).split("-").map(Number);
+  if (!a || !m || !d) return null;
+  const total = m - 1 + Number(meses || 0);
+  const novoAno = a + Math.floor(total / 12);
+  const novoMes = (total % 12 + 12) % 12; // 0-11
+  const ultimoDia = new Date(Date.UTC(novoAno, novoMes + 1, 0)).getUTCDate();
+  const novoDia = Math.min(d, ultimoDia);
+  return `${novoAno}-${String(novoMes + 1).padStart(2, "0")}-${String(novoDia).padStart(2, "0")}`;
+}
+
 // Data de fim mais próxima entre TODAS as contas do cliente: o contrato que termina
 // mais cedo a partir de hoje; se todos já terminaram, o que terminou há menos tempo
 // (dias negativos, terminado=true). null se não houver contratos com data.
@@ -5643,6 +5658,48 @@ function useClientesNovos() {
     await guardarNotasFidelizacao(nif, atuais.filter((_, i) => i !== indice));
   };
 
+  // "propostas" (2026-09-30) — histórico de propostas entregues/fechadas deste cliente,
+  // mesmo padrão cloud-aware de negociosFechados/notasFidelizacao (campo próprio no
+  // documento, nunca dentro de "extras"). Cada entrada:
+  //   { entregueEm, linhas: [...], total, fechada: bool, fechadaEm, contratosGerados: bool }
+  // `linhas` guarda o retrato das linhas da proposta no momento da entrega (serviço,
+  // tarifário, valor unitário, duração, quantidade), para ao FECHAR se saber exatamente
+  // que serviços fechar e com que duração — sem depender do estado atual da Propostas.
+  const obterPropostas = async (nif) => {
+    if (nuvemAtiva) {
+      try {
+        const doc = await firebaseDb.collection("clientes").doc(String(nif)).get();
+        return (doc.exists && Array.isArray(doc.data().propostas)) ? doc.data().propostas : [];
+      } catch { return null; }
+    }
+    try { return JSON.parse(localStorage.getItem(`cliente-extra:${nif}`) || "{}").propostas || []; } catch { return []; }
+  };
+  const guardarPropostas = async (nif, lista) => {
+    if (nuvemAtiva) {
+      await firebaseDb.collection("clientes").doc(String(nif)).set({ propostas: lista }, { merge: true });
+      return;
+    }
+    let extra = {};
+    try { extra = JSON.parse(localStorage.getItem(`cliente-extra:${nif}`) || "{}"); } catch { extra = {}; }
+    localStorage.setItem(`cliente-extra:${nif}`, JSON.stringify({ ...extra, propostas: lista }));
+  };
+  // Regista a entrega (nova entrada). Devolve a lista atualizada.
+  const adicionarProposta = async (nif, proposta) => {
+    const atuais = await obterPropostas(nif);
+    const nova = [...(Array.isArray(atuais) ? atuais : []), proposta];
+    await guardarPropostas(nif, nova);
+    return nova;
+  };
+  // Marca a proposta (por índice) como fechada na data indicada. Nunca apaga a proposta
+  // — só preenche fechada/fechadaEm/contratosGerados.
+  const fecharProposta = async (nif, indice, dataFecho) => {
+    const atuais = await obterPropostas(nif);
+    if (!Array.isArray(atuais)) return null;
+    const nova = atuais.map((p, i) => (i === indice ? { ...p, fechada: true, fechadaEm: dataFecho, contratosGerados: true } : p));
+    await guardarPropostas(nif, nova);
+    return nova;
+  };
+
   // "extras" (2026-09-20) — mesmo padrão de negociosFechados acima, agora aplicado ao
   // resto da ficha de Clientes (EXTRA_FIELDS: setor, morada, telefone, email,
   // contactoNome, contactoCargo, ...). Achado do import "Carteira a Fidelizar → Clientes"
@@ -5845,6 +5902,7 @@ function useClientesNovos() {
     firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar: todosClientesLocal.length,
     sincronizarComClientes, removerNegocioDeTodosOsClientes, reverterClienteAutoCriadoSeVazio,
     obterExtras, definirExtras, obterNotasFidelizacao, adicionarNotaFidelizacao, removerUltimaNotaFidelizacao, removerNotaFidelizacaoNoIndice,
+    obterPropostas, guardarPropostas, adicionarProposta, fecharProposta,
     obterTodosExtras,
   };
 }
@@ -6933,7 +6991,7 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
 
 function ClientesView() {
   const { todosClientes, clientesSemNif, adicionar, fonteExcel, aCarregarExcel, precisaPermissaoExcel, continuarExcel, ligarExcel, recarregarExcel,
-    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, obterExtras, definirExtras, obterNotasFidelizacao, removerNotaFidelizacaoNoIndice, obterTodosExtras } = useClientesNovos();
+    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, obterExtras, definirExtras, obterNotasFidelizacao, removerNotaFidelizacaoNoIndice, obterTodosExtras, obterPropostas, fecharProposta } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
   const { todos: todaCarteira } = useCarteiraFidelizar();
   const mapaContratos = useContratosPermanencia(firebaseUser);
@@ -6946,6 +7004,9 @@ function ClientesView() {
   // `guardar()` saber se alguma pergunta-chave mudou de valor, e decidir se marca
   // `produtosPontuados`/`campanhas_pontuacao` como desatualizados.
   const [extrasOriginais, setExtrasOriginais] = useState({});
+  // Histórico de propostas entregues/fechadas deste cliente (2026-09-30) — campo
+  // próprio do cliente, lido à parte dos extras (ver obterPropostas).
+  const [propostas, setPropostas] = useState([]);
   const [avisoSucesso, setAvisoSucesso] = useState("");
   const [erroNif, setErroNif] = useState("");
   const [catalogoProdutos, setCatalogoProdutos] = useState(null);
@@ -6970,6 +7031,7 @@ function ClientesView() {
     guardadas = { ...guardadas, notasFidelizacao: notas || [] };
     setExtras(guardadas);
     setExtrasOriginais(guardadas);
+    setPropostas((await obterPropostas(nif)) || []);
     setErroProdutos("");
   };
 
@@ -7008,6 +7070,51 @@ function ClientesView() {
     if (!window.confirm("Apagar esta nota de fidelização? Não há como desfazer.")) return;
     await removerNotaFidelizacaoNoIndice(nifSelecionado, indice);
     await carregarExtras(nifSelecionado);
+  };
+
+  // Fechar uma proposta entregue (2026-09-30) — pedido explícito de Augusto: ao marcar
+  // "Proposta Fechada" com uma data, o dashboard gera CONTRATOS de permanência novos a
+  // partir das linhas guardadas na proposta (Data de Início = data de fecho; Data de Fim
+  // = fecho + duração). Esses contratos acrescentam-se aos que já existem na conta
+  // (nunca substituem — mesma regra do merge por conta), para o alerta a 6 meses do fim
+  // disparar sozinho na ficha e na Carteira a Fidelizar. Nunca escreve no Excel.
+  const fecharPropostaEntregue = async (indice, dataFecho) => {
+    if (!nifSelecionado || !dataFecho) return;
+    const proposta = propostas[indice];
+    if (!proposta) return;
+    const novoMapa = new Map((mapaContratos.get(nifSelecionado) || { contas: {} }).contas ? Object.entries(mapaContratos.get(nifSelecionado).contas) : []);
+    const nif = nifSelecionado;
+    const linhasFechaveis = (proposta.linhas || []).filter((l) => l.duracaoMeses && l.servico);
+    if (!linhasFechaveis.length) {
+      window.alert("Esta proposta não tem serviços com duração definida — não há contratos para gerar. Confirma a duração nas linhas da proposta (na Propostas) e entrega de novo.");
+      return;
+    }
+    try {
+      // Agrupa por conta e acrescenta os contratos novos aos existentes dessa conta.
+      const porConta = new Map();
+      linhasFechaveis.forEach((l) => {
+        const conta = l.conta || "(sem conta)";
+        if (!porConta.has(conta)) porConta.set(conta, []);
+        const inicio = dataFecho; // aaaa-mm-dd
+        const fim = somarMesesIso(inicio, Number(l.duracaoMeses));
+        porConta.get(conta).push({
+          id: `proposta-${Date.now()}-${porConta.get(conta).length}`,
+          servico: l.servico || "",
+          blocos: null, inicio, fim,
+          duracao: `${l.duracaoMeses} meses`, tipo: null, multa: null,
+          descricao: "", codigo: "",
+          produto: l.produto || null,
+        });
+      });
+      for (const [conta, novos] of porConta) {
+        const atuais = (novoMapa.get(conta) || { contratos: [] }).contratos || [];
+        await gravarContratosConta(nif, conta, [...atuais, ...novos]);
+      }
+      await fecharProposta(nif, indice, dataFecho);
+      setPropostas((await obterPropostas(nif)) || []);
+    } catch (e) {
+      window.alert(`Não foi possível fechar a proposta: ${e.message}`);
+    }
   };
 
   const selecionarCliente = (nif) => { setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif); if (nif) carregarExtras(nif); else setExtras({}); irParaTopo(); };
@@ -7259,6 +7366,45 @@ function ClientesView() {
           ))}
 
           {!ehNovo && clienteAtual && <ContratosPermanenciaCard nif={clienteAtual.n} firebaseUser={firebaseUser} mapa={mapaContratos} />}
+
+          {!ehNovo && clienteAtual && propostas.length > 0 && (
+            <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
+              <div className="text-xs font-medium text-neutral-400">PROPOSTAS ENTREGUES</div>
+              {propostas.map((p, i) => {
+                const em = p.entregueEm ? new Date(p.entregueEm).toLocaleDateString("pt-PT") : "—";
+                return (
+                  <div key={i} className="border border-neutral-100 rounded-md px-3 py-2 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap text-sm">
+                      <span className="text-neutral-700">Proposta entregue em <b>{em}</b></span>
+                      <span className="text-xs text-neutral-400">{formatEuro(p.total || 0)} · {(p.linhas || []).length} serviço(s)</span>
+                      {p.fechada ? (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          ✓ Proposta fechada em {p.fechadaEm ? formatarDataIsoPT(p.fechadaEm) : "—"}
+                        </span>
+                      ) : (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">Por fechar</span>
+                      )}
+                    </div>
+                    {p.fechada ? (
+                      <div className="text-[11px] text-neutral-400">Contratos gerados a partir desta proposta — vê-os em cima, em "Contratos de permanência".</div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-xs">
+                        <label className="text-neutral-500">Fechada em:</label>
+                        <input type="date" value={p._dataFecho || ""} onChange={(e) => setPropostas((prev) => prev.map((x, j) => j === i ? { ...x, _dataFecho: e.target.value } : x))}
+                          className="px-2 py-1 rounded border border-neutral-300 text-xs" />
+                        <button onClick={() => fecharPropostaEntregue(i, (propostas[i] || {})._dataFecho)}
+                          disabled={!(propostas[i] || {})._dataFecho}
+                          className="text-xs px-2.5 py-1 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40">
+                          Proposta Fechada
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <div className="text-[11px] text-neutral-400">Ao fechar, o dashboard cria os contratos de permanência (início = data de fecho, fim = data de fecho + duração) e passa a avisar 6 meses antes do fim.</div>
+            </div>
+          )}
 
           {!ehNovo && clienteAtual && (
             <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
@@ -8310,6 +8456,11 @@ function AnaliseRapidaForm({ analise, mudarAnalise, toggleServicoAtual }) {
 // "Alterar tarifário"/"Upgrade" = trocar de tarifário (novo valor).
 const ACOES_PROPOSTA = ["Inalterado", "Manter", "Alterar tarifário", "Upgrade", "Apagar serviço"];
 
+// Durações oficiais de contrato (mesmas de MESES_OPCOES, sem o 0 = "indefinido").
+// Dropdown nas propostas (Cliente e Prospeto), para nunca haver durações escritas à mão.
+const DURACOES_PROPOSTA = [12, 18, 24, 30, 36, 48];
+function labelDuracao(meses) { return `${meses} meses`; }
+
 function numProposta(v) {
   if (v === null || v === undefined || v === "") return null;
   const n = typeof v === "number" ? v : parseFloat(String(v).replace(",", "."));
@@ -8326,6 +8477,19 @@ function valorLinhaProposta(l) {
   const novo = numProposta(l.novoValor);
   return novo !== null ? novo : base;
 }
+
+// Prospeto (2026-09-30): o cálculo é diferente do de Cliente — não há ações nem
+// "novo valor". O que conta é o "Valor final" = valor unitário (mensal) × quantidade.
+// Uma quantidade vazia conta como 1 (uma linha = um serviço), nunca 0.
+function quantidadeLinhaProposta(l) {
+  const q = numProposta(l.quantidade);
+  return q === null ? 1 : q;
+}
+function valorLinhaProspeto(l) {
+  const unit = numProposta(l.valorMensal);
+  if (unit === null) return null;
+  return Number((unit * quantidadeLinhaProposta(l)).toFixed(2));
+}
 function mostraNovoTarifarioProposta(l) { return l.acao === "Alterar tarifário" || l.acao === "Upgrade"; }
 function mostraNovoValorProposta(l) { return l.acao === "Manter" || mostraNovoTarifarioProposta(l); }
 
@@ -8338,39 +8502,63 @@ function novoTarifarioLinhaProposta(l) {
 }
 
 // Entram no Excel: tudo MENOS "Inalterado" (inclui "Apagar serviço", com valor 0).
-function linhasPropostaExcel(linhas) {
+// Um Prospeto não tem ações (nunca fica "Inalterado"), portanto entram todas as linhas.
+function linhasPropostaExcel(linhas, ehProspeto) {
+  if (ehProspeto) return (linhas || []).slice();
   return (linhas || []).filter((l) => l.acao !== "Inalterado");
 }
 // Entram no PDF: tudo MENOS "Inalterado" e "Apagar serviço". PENDENTE (2026-09-30,
 // Augusto): "Apagar serviço" deve também aparecer no PDF, mas só quando a proposta
 // (PDF) for mais elaborada — por agora fica de fora. Ver tarefa pendente.
-function linhasPropostaPdf(linhas) {
+function linhasPropostaPdf(linhas, ehProspeto) {
+  if (ehProspeto) return (linhas || []).slice();
   return linhasPropostaExcel(linhas).filter((l) => l.acao !== "Apagar serviço");
 }
-function totalProposta(linhas) {
+// Total: no Cliente soma o "valor na proposta" (novo valor quando há); no Prospeto
+// soma o "valor final" (unitário × quantidade).
+function totalProposta(linhas, ehProspeto) {
+  if (ehProspeto) return linhasPropostaPdf(linhas, true).reduce((s, l) => s + (valorLinhaProspeto(l) || 0), 0);
   return linhasPropostaExcel(linhas).reduce((s, l) => s + (valorLinhaProposta(l) || 0), 0);
 }
 
-function gerarPropostaExcel(nomeAlvo, linhas, data) {
-  const incluidas = linhasPropostaExcel(linhas);
+function gerarPropostaExcel(nomeAlvo, linhas, data, ehProspeto) {
   const hoje = new Date().toISOString().slice(0, 10);
-  const cabecalho = ["Conta", "Serviço", "Permanência (fim)", "Dias", "Valor mensal", "Desconto atual (€)", "Tarifário atual", "Ação", "Novo tarifário", "Novo valor mensal", "Valor na proposta"];
-  const dados = incluidas.map((l) => {
-    const novoVal = mostraNovoValorProposta(l);
-    return [
-      l.conta || "",
+  const cabecalhoProspeto = ["Serviço", "Duração do contrato", "Valor mensal (unitário)", "Tarifário proposto", "Quantidade", "Valor final"];
+  const cabecalhoCliente = ["Conta", "Serviço", "Permanência (fim)", "Dias", "Duração novo contrato", "Valor mensal", "Desconto atual (€)", "Tarifário atual", "Ação", "Novo tarifário", "Novo valor mensal", "Valor na proposta"];
+  let dados;
+  if (ehProspeto) {
+    dados = linhasPropostaPdf(linhas, true).map((l) => [
       l.servico || "",
-      l.fim ? formatarDataIsoPT(l.fim) : "",
-      l.fim ? diasEntreDatasIso(hoje, l.fim) : "",
+      l.duracao || "",
       numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
-      numProposta(l.desconto) != null ? numProposta(l.desconto) : "",
       l.produtoAtual || "",
-      l.acao || "Inalterado",
-      novoTarifarioLinhaProposta(l),
-      novoVal && numProposta(l.novoValor) != null ? numProposta(l.novoValor) : "",
-      valorLinhaProposta(l) != null ? valorLinhaProposta(l) : "",
-    ];
-  });
+      quantidadeLinhaProposta(l),
+      valorLinhaProspeto(l) != null ? valorLinhaProspeto(l) : "",
+    ]);
+  } else {
+    const incluidas = linhasPropostaExcel(linhas);
+    dados = incluidas.map((l) => {
+      const novoVal = mostraNovoValorProposta(l);
+      return [
+        l.conta || "",
+        l.servico || "",
+        l.fim ? formatarDataIsoPT(l.fim) : "",
+        l.fim ? diasEntreDatasIso(hoje, l.fim) : "",
+        l.duracao || "",
+        numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
+        numProposta(l.desconto) != null ? numProposta(l.desconto) : "",
+        l.produtoAtual || "",
+        l.acao || "Inalterado",
+        novoTarifarioLinhaProposta(l),
+        novoVal && numProposta(l.novoValor) != null ? numProposta(l.novoValor) : "",
+        valorLinhaProposta(l) != null ? valorLinhaProposta(l) : "",
+      ];
+    });
+  }
+  const cabecalho = ehProspeto ? cabecalhoProspeto : cabecalhoCliente;
+  const linhaTotal = ehProspeto
+    ? ["", "", "", "", "Total mensal", totalProposta(linhas, true)]
+    : ["", "", "", "", "", "", "", "", "", "Total mensal", totalProposta(linhas)];
   const ws = XLSX.utils.aoa_to_sheet([
     [`Proposta — ${nomeAlvo || ""}`],
     [`Data: ${new Date(data).toLocaleDateString("pt-PT")}`],
@@ -8378,17 +8566,29 @@ function gerarPropostaExcel(nomeAlvo, linhas, data) {
     cabecalho,
     ...dados,
     [],
-    ["", "", "", "", "", "", "", "", "", "Total mensal", totalProposta(linhas)],
+    linhaTotal,
   ]);
-  ws["!cols"] = [{ wch: 12 }, { wch: 24 }, { wch: 16 }, { wch: 8 }, { wch: 14 }, { wch: 16 }, { wch: 26 }, { wch: 18 }, { wch: 24 }, { wch: 16 }, { wch: 16 }];
+  ws["!cols"] = cabecalho.map((_, i) => ({ wch: i === 0 ? 22 : 16 }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Proposta");
   return wb;
 }
 
-function gerarPropostaHtml(nomeAlvo, linhas, data) {
-  const incluidas = linhasPropostaPdf(linhas);
+function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
+  const incluidas = linhasPropostaPdf(linhas, ehProspeto);
+  const avisoVazio = ehProspeto ? 6 : 9;
   const linhaHtml = (l) => {
+    if (ehProspeto) {
+      const v = valorLinhaProspeto(l);
+      return `<tr>
+      <td>${escaparHtml(l.servico || "")}</td>
+      <td>${escaparHtml(l.duracao || "—")}</td>
+      <td>${escaparHtml(l.produtoAtual || "")}</td>
+      <td style="text-align:right">${numProposta(l.valorMensal) != null ? formatEuro(numProposta(l.valorMensal)) : "—"}</td>
+      <td style="text-align:right">${quantidadeLinhaProposta(l)}</td>
+      <td style="text-align:right">${v != null ? formatEuro(v) : "—"}</td>
+    </tr>`;
+    }
     const novo = novoTarifarioLinhaProposta(l);
     const v = valorLinhaProposta(l);
     return `<tr>
@@ -8403,6 +8603,12 @@ function gerarPropostaHtml(nomeAlvo, linhas, data) {
       <td style="text-align:right">${v != null ? formatEuro(v) : "—"}</td>
     </tr>`;
   };
+  const head = ehProspeto
+    ? `<thead><tr><th>Serviço</th><th>Duração do contrato</th><th>Tarifário proposto</th><th style="text-align:right">Valor mensal (unitário)</th><th style="text-align:right">Quantidade</th><th style="text-align:right">Valor final</th></tr></thead>`
+    : `<thead><tr><th>Conta</th><th>Serviço</th><th>Permanência</th><th>Tarifário atual</th><th>Ação</th><th>Novo tarifário</th><th style="text-align:right">Valor mensal</th><th style="text-align:right">Desconto atual</th><th style="text-align:right">Valor na proposta</th></tr></thead>`;
+  const foot = ehProspeto
+    ? `<tfoot><tr><td colspan="5" style="text-align:right">Total mensal na proposta</td><td style="text-align:right">${formatEuro(totalProposta(linhas, true))}</td></tr></tfoot>`
+    : `<tfoot><tr><td colspan="8" style="text-align:right">Total mensal na proposta</td><td style="text-align:right">${formatEuro(totalProposta(linhas))}</td></tr></tfoot>`;
   return `<!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Proposta — ${escaparHtml(nomeAlvo || "")}</title>
   <style>
     * { box-sizing: border-box; }
@@ -8420,15 +8626,15 @@ function gerarPropostaHtml(nomeAlvo, linhas, data) {
   <h1>Proposta — ${escaparHtml(nomeAlvo || "")}</h1>
   <div class="sub">${new Date(data).toLocaleDateString("pt-PT", { day: "2-digit", month: "long", year: "numeric" })}</div>
   <table>
-    <thead><tr><th>Conta</th><th>Serviço</th><th>Permanência</th><th>Tarifário atual</th><th>Ação</th><th>Novo tarifário</th><th style="text-align:right">Valor mensal</th><th style="text-align:right">Desconto atual</th><th style="text-align:right">Valor na proposta</th></tr></thead>
-    <tbody>${incluidas.map(linhaHtml).join("") || `<tr><td colspan="9">Sem serviços na proposta.</td></tr>`}</tbody>
-    <tfoot><tr><td colspan="8" style="text-align:right">Total mensal na proposta</td><td style="text-align:right">${formatEuro(totalProposta(linhas))}</td></tr></tfoot>
+    ${head}
+    <tbody>${incluidas.map(linhaHtml).join("") || `<tr><td colspan="${avisoVazio}">Sem serviços na proposta.</td></tr>`}</tbody>
+    ${foot}
   </table>
   </body></html>`;
 }
 
 function PropostasView() {
-  const { todosClientes } = useClientesNovos();
+  const { todosClientes, adicionarProposta } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
   const firebaseUser = useFirebaseAuthUser();
   const mapaContratos = useContratosPermanencia(firebaseUser);
@@ -8482,7 +8688,7 @@ function PropostasView() {
             fim: c.fim || "",
             produtoAtual: c.produto || c.tipo || "",
             valorMensal: c.multa !== null && c.multa !== undefined && c.multa !== "" ? c.multa : "",
-            desconto: "", acao: "Inalterado", novoTarifario: "", novoValor: "",
+            desconto: "", duracao: "", quantidade: 1, acao: "Inalterado", novoTarifario: "", novoValor: "",
           });
         });
       });
@@ -8495,16 +8701,18 @@ function PropostasView() {
 
   const atualizarLinha = (key, campos) => setLinhas((prev) => prev.map((l) => (l.key === key ? { ...l, ...campos } : l)));
   const togglarConta = (conta) => setContasSel((prev) => (prev.includes(conta) ? prev.filter((c) => c !== conta) : [...prev, conta]));
-  const adicionarManual = (conta) => setLinhas((prev) => [...prev, { key: `manual::${conta}::${Date.now()}`, conta, manual: true, servico: "", fim: "", produtoAtual: "", valorMensal: "", desconto: "", acao: "Alterar tarifário", novoTarifario: "", novoValor: "" }]);
+  const adicionarManual = (conta) => setLinhas((prev) => [...prev, { key: `manual::${conta}::${Date.now()}`, conta, manual: true, servico: "", fim: "", produtoAtual: "", valorMensal: "", desconto: "", duracao: "", quantidade: 1, acao: "Alterar tarifário", novoTarifario: "", novoValor: "" }]);
   const removerLinha = (key) => setLinhas((prev) => prev.filter((l) => l.key !== key));
 
+  const ehProspeto = alvo === "prospeto";
+
   // Só se pode gravar/apresentar quando há pelo menos uma linha que ENTRA na proposta
-  // (Inalterado e Apagar serviço não contam).
-  const podeGerar = linhasPropostaExcel(linhas).length > 0 && !!nomeAlvo;
+  // (Inalterado e Apagar serviço não contam — num Prospeto não há ações, entram todas).
+  const podeGerar = linhasPropostaExcel(linhas, ehProspeto).length > 0 && !!nomeAlvo;
 
   const gravarExcel = () => {
     if (!podeGerar) return;
-    const wb = gerarPropostaExcel(nomeAlvo, linhas, new Date());
+    const wb = gerarPropostaExcel(nomeAlvo, linhas, new Date(), ehProspeto);
     const nome = `Proposta - ${nomeFicheiroSeguro(nomeAlvo)} - ${new Date().toLocaleDateString("pt-PT").replace(/\//g, "-")}.xlsx`;
     XLSX.writeFile(wb, nome);
     setAviso(`Excel gravado: ${nome}`);
@@ -8513,10 +8721,35 @@ function PropostasView() {
   const apresentarPdf = () => {
     if (!podeGerar) return;
     setPedidoPdf(true);
-    setPdfHtml(gerarPropostaHtml(nomeAlvo, linhas, new Date()));
+    setPdfHtml(gerarPropostaHtml(nomeAlvo, linhas, new Date(), ehProspeto));
   };
 
-  const total = totalProposta(linhas);
+  // "Proposta Entregue" (2026-09-30) — regista na ficha do CLIENTE que esta proposta
+  // foi entregue hoje, guardando um retrato das linhas (para ao fechar se saber o que
+  // fechar). Só faz sentido para um cliente com ficha (nunca um prospeto, que não tem
+  // ficha de cliente onde guardar). Nunca grava contratos nesta ação — só regista.
+  const propostaEntregue = async () => {
+    if (!podeGerar || !registo || alvo !== "cliente") return;
+    const usadas = linhasPropostaExcel(linhas, false);
+    const retrato = usadas.map((l) => {
+      const dur = numProposta(String(l.duracao || "").replace(/\D/g, ""));
+      return {
+        conta: l.conta || "", servico: l.servico || "", produto: novoTarifarioLinhaProposta(l) || l.produtoAtual || "",
+        valorMensal: numProposta(l.novoValor) != null ? numProposta(l.novoValor) : numProposta(l.valorMensal),
+        duracaoMeses: dur, acao: l.acao || "",
+      };
+    });
+    const proposta = { entregueEm: new Date().toISOString(), linhas: retrato, total: totalProposta(linhas), fechada: false, fechadaEm: null, contratosGerados: false };
+    try {
+      await adicionarProposta(nifAlvo, proposta);
+      setAviso(`Proposta registada como entregue para ${nomeAlvo} (${new Date().toLocaleDateString("pt-PT")}). Vê a ficha do cliente.`);
+      setTimeout(() => setAviso(""), 10000);
+    } catch (e) {
+      setAviso(`Não foi possível registar a proposta: ${e.message}`);
+    }
+  };
+
+  const total = totalProposta(linhas, ehProspeto);
 
   return (
     <div className="space-y-4">
@@ -8605,23 +8838,56 @@ function PropostasView() {
                 <div className="max-h-[420px] overflow-y-auto">
                   <table className="w-full text-xs">
                     <thead className="text-neutral-400 text-left sticky top-0 bg-white">
-                      <tr>
-                        <th className="p-2">Serviço</th>
-                        <th className="p-2">Permanência</th>
-                        <th className="p-2">Valor mensal</th>
-                        <th className="p-2">Desconto atual (€)</th>
-                        <th className="p-2">Tarifário atual</th>
-                        <th className="p-2">Ação</th>
-                        <th className="p-2">Novo tarifário</th>
-                        <th className="p-2">Novo valor mensal</th>
-                        <th className="p-2"></th>
-                      </tr>
+                      {ehProspeto ? (
+                        <tr>
+                          <th className="p-2">Serviço</th>
+                          <th className="p-2">Duração do contrato</th>
+                          <th className="p-2">Valor mensal (unitário)</th>
+                          <th className="p-2">Tarifário proposto</th>
+                          <th className="p-2">Quantidade</th>
+                          <th className="p-2">Valor final</th>
+                          <th className="p-2"></th>
+                        </tr>
+                      ) : (
+                        <tr>
+                          <th className="p-2">Serviço</th>
+                          <th className="p-2">Permanência</th>
+                          <th className="p-2">Duração novo contrato</th>
+                          <th className="p-2">Valor mensal</th>
+                          <th className="p-2">Desconto atual (€)</th>
+                          <th className="p-2">Tarifário atual</th>
+                          <th className="p-2">Ação</th>
+                          <th className="p-2">Novo tarifário</th>
+                          <th className="p-2">Novo valor mensal</th>
+                          <th className="p-2"></th>
+                        </tr>
+                      )}
                     </thead>
                     <tbody>
                       {doConta.map((l) => {
                         const novoTar = mostraNovoTarifarioProposta(l);
                         const novoVal = mostraNovoValorProposta(l);
                         const apagar = l.acao === "Apagar serviço";
+                        if (ehProspeto) {
+                          const vf = valorLinhaProspeto(l);
+                          return (
+                            <tr key={l.key} className="border-t border-neutral-100">
+                              <td className="p-2">
+                                {l.manual
+                                  ? <input value={l.servico} onChange={(e) => atualizarLinha(l.key, { servico: e.target.value })} placeholder="Serviço" className="w-40 px-2 py-1 rounded border border-neutral-300 text-xs" />
+                                  : <span className="font-medium">{l.servico || "—"}</span>}
+                              </td>
+                              <td className="p-2"><select value={l.duracao} onChange={(e) => atualizarLinha(l.key, { duracao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">—</option>{DURACOES_PROPOSTA.map((m) => <option key={m} value={labelDuracao(m)}>{labelDuracao(m)}</option>)}</select></td>
+                              <td className="p-2"><input value={l.valorMensal} onChange={(e) => atualizarLinha(l.key, { valorMensal: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
+                              <td className="p-2"><input value={l.produtoAtual} onChange={(e) => atualizarLinha(l.key, { produtoAtual: e.target.value })} placeholder="Tarifário proposto" className="w-40 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
+                              <td className="p-2"><input value={l.quantidade} onChange={(e) => atualizarLinha(l.key, { quantidade: e.target.value })} inputMode="numeric" placeholder="1" className="w-16 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
+                              <td className="p-2 text-right font-medium">{vf != null ? formatEuro(vf) : <span className="text-neutral-300">—</span>}</td>
+                              <td className="p-2">
+                                <button onClick={() => removerLinha(l.key)} title="Retirar da proposta" className="text-neutral-400 hover:text-red-600">✕</button>
+                              </td>
+                            </tr>
+                          );
+                        }
                         return (
                           <tr key={l.key} className={`border-t border-neutral-100 ${apagar ? "bg-neutral-50 opacity-60" : ""}`}>
                             <td className="p-2">
@@ -8630,6 +8896,7 @@ function PropostasView() {
                                 : <span className="font-medium">{l.servico || "—"}</span>}
                             </td>
                             <td className="p-2 text-neutral-500">{l.fim ? `${formatarDataIsoPT(l.fim)} (${diasEntreDatasIso(new Date().toISOString().slice(0, 10), l.fim)}d)` : "—"}</td>
+                            <td className="p-2"><select value={l.duracao} onChange={(e) => atualizarLinha(l.key, { duracao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">—</option>{DURACOES_PROPOSTA.map((m) => <option key={m} value={labelDuracao(m)}>{labelDuracao(m)}</option>)}</select></td>
                             <td className="p-2"><input value={l.valorMensal} onChange={(e) => atualizarLinha(l.key, { valorMensal: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
                             <td className="p-2"><input value={l.desconto} onChange={(e) => atualizarLinha(l.key, { desconto: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
                             <td className="p-2">
@@ -8659,7 +8926,7 @@ function PropostasView() {
                         );
                       })}
                       {doConta.length === 0 && (
-                        <tr><td colSpan={9} className="p-4 text-center text-neutral-400">Sem serviços. Usa "+ Adicionar serviço".</td></tr>
+                        <tr><td colSpan={ehProspeto ? 7 : 10} className="p-4 text-center text-neutral-400">Sem serviços. Usa "+ Adicionar serviço".</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -8674,6 +8941,11 @@ function PropostasView() {
             </button>
             <button onClick={apresentarPdf} disabled={!podeGerar} className="text-sm px-3.5 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-40">
               Apresentar proposta (PDF)
+            </button>
+            <button onClick={propostaEntregue} disabled={!podeGerar || alvo !== "cliente" || !registo}
+              title={alvo !== "cliente" ? "Só para clientes com ficha (onde fica registada a entrega)" : "Regista na ficha do cliente que esta proposta foi entregue hoje"}
+              className="text-sm px-3.5 py-2 rounded-md border border-emerald-600 text-emerald-700 font-medium hover:bg-emerald-50 disabled:opacity-40">
+              Proposta Entregue
             </button>
             <div className="text-sm text-neutral-600 ml-auto">Total mensal na proposta: <b>{formatEuro(total)}</b></div>
           </div>
@@ -12353,6 +12625,11 @@ function CartaoClienteFidelizacao({ c, valor, tom, ehCliente, onMudarEstado, per
               Contratos importados: {permanencia.terminado ? `permanências terminadas (a última há ${-permanencia.dias} dias)` : `fim mais próximo ${formatarDataIsoPT(permanencia.fim)} (em ${permanencia.dias} dias)`}
             </div>
           )}
+          {c.contratosAproximar && permanencia && !permanencia.terminado && permanencia.dias <= 183 && (
+            <div className="text-xs font-semibold mt-1" style={{ color: "#92400E" }}>
+              ⚠ Contrato a {permanencia.dias} dias do fim — avisar 6 meses antes
+            </div>
+          )}
           {estado === "Fechado" && ehCliente && (
             <div className="text-xs font-medium mt-1.5" style={{ color: "#0F5F58" }}>
               Nota na ficha de Cliente: negócio de fidelização fechado{c.dataFechado ? ` em ${new Date(c.dataFechado).toLocaleDateString("pt-PT")}` : ""}
@@ -12446,6 +12723,31 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
   );
   const curtoPrazo = useMemo(() => lista.filter((c) => c.servico8D > 0 || c.servico60D > 0), [lista]);
 
+  // (2026-09-30) Contratos a acabar em ≤6 meses (≤183 dias) que NÃO estão no ficheiro
+  // trimestral — tipicamente os contratos gerados ao FECHAR uma proposta entregue.
+  // Aparecem no grupo "A aproximar-se" com um cartão próprio, para o aviso a 6 meses
+  // nunca depender de o cliente calhar no Excel trimestral. `n` = NIF, `e` = nome
+  // (vem de todosClientes quando existir), `servico12M` = 1 (só para o cartão mostrar
+  // "1 serviço" — a informação real é a data do fim, mostrada pelo `permanencia`).
+  const aAproximarSeContratos = useMemo(() => {
+    const jaListados = new Set([...elegiveisAgora, ...aAproximarSe, ...curtoPrazo].map((c) => c.n));
+    const nomePorNif = new Map(todosClientes.map((cl) => [cl.n, cl.e]));
+    const out = [];
+    mapaContratosTrimestre.forEach((doc, nif) => {
+      if (jaListados.has(nif)) return;
+      const f = calcularFimMaisProximo(doc);
+      if (f && !f.terminado && f.dias >= 0 && f.dias <= 183) {
+        out.push({ n: nif, e: nomePorNif.get(nif) || `Cliente ${nif}`, servico12M: 1, estado: "Em aberto", contratosAproximar: true });
+      }
+    });
+    return out.sort((a, b) => {
+      const fa = calcularFimMaisProximo(mapaContratosTrimestre.get(a.n));
+      const fb = calcularFimMaisProximo(mapaContratosTrimestre.get(b.n));
+      return ((fa && fa.dias) || 9999) - ((fb && fb.dias) || 9999) || a.e.localeCompare(b.e);
+    });
+  }, [elegiveisAgora, aAproximarSe, curtoPrazo, mapaContratosTrimestre, todosClientes]);
+  const aAproximarSeTotal = useMemo(() => [...aAproximarSe, ...aAproximarSeContratos], [aAproximarSe, aAproximarSeContratos]);
+
   const [filtro, setFiltro] = useState("todos"); // "todos" | "elegiveis" | "aproximar"
   const nifsClientes = useMemo(() => new Set(todosClientes.map((cl) => cl.n)), [todosClientes]);
   // Registos fechados antes de existir `dataFechado` (2026-09-26): a data vem da nota
@@ -12508,7 +12810,7 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
       <CartoesKpi itens={[
         { rotulo: "Clientes na carteira", valor: nCarteira, tom: "escuro" },
         { rotulo: "Elegíveis agora", valor: elegiveisAgora.length, detalhe: "fim de fidelização em 3-6 meses", tom: "vermelho" },
-        { rotulo: "A aproximar-se", valor: aAproximarSe.length, detalhe: "fim em 7-12 meses", tom: "amarelo" },
+        { rotulo: "A aproximar-se", valor: aAproximarSeTotal.length, detalhe: "fim em 7-12 meses ou contratos a 6 meses do fim", tom: "amarelo" },
         { rotulo: "Fechados no trimestre", valor: fechadosTrimestre, tom: "verde" },
       ]} />
 
@@ -12553,7 +12855,7 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
       ) : (
         <>
           {filtro !== "aproximar" && grupo("Elegíveis agora", "fidelização a terminar em 3-6 meses", elegiveisAgora, "servico6M", TOM_ELEGIVEL)}
-          {filtro !== "elegiveis" && grupo("A aproximar-se", "fim em 7-12 meses, por importância", aAproximarSe, "servico12M", TOM_APROXIMAR)}
+          {filtro !== "elegiveis" && grupo("A aproximar-se", "fim em 7-12 meses ou contratos a 6 meses do fim", aAproximarSeTotal, "servico12M", TOM_APROXIMAR)}
 
           {filtro === "todos" && curtoPrazo.length > 0 && (
             <div>
