@@ -8461,6 +8461,11 @@ const ACOES_PROPOSTA = ["Inalterado", "Manter", "Alterar tarifário", "Upgrade",
 const DURACOES_PROPOSTA = [12, 18, 24, 30, 36, 48];
 function labelDuracao(meses) { return `${meses} meses`; }
 
+// Tipo de serviço de uma linha de Prospeto (2026-09-30, pedido de Augusto): só faz
+// sentido "Novo" (serviço novo) ou "Portabilidade" (vem de outro operador). Dropdown,
+// nunca texto livre — evita valores escritos à mão.
+const SERVICOS_PROPOSTA = ["Novo", "Portabilidade"];
+
 function numProposta(v) {
   if (v === null || v === undefined || v === "") return null;
   const n = typeof v === "number" ? v : parseFloat(String(v).replace(",", "."));
@@ -8523,17 +8528,17 @@ function totalProposta(linhas, ehProspeto) {
 
 function gerarPropostaExcel(nomeAlvo, linhas, data, ehProspeto) {
   const hoje = new Date().toISOString().slice(0, 10);
-  const cabecalhoProspeto = ["Serviço", "Duração do contrato", "Valor mensal (unitário)", "Tarifário proposto", "Quantidade", "Valor final"];
-  const cabecalhoCliente = ["Conta", "Serviço", "Permanência (fim)", "Dias", "Duração novo contrato", "Valor mensal", "Desconto atual (€)", "Tarifário atual", "Ação", "Novo tarifário", "Novo valor mensal", "Valor na proposta"];
+  const cabecalhoProspeto = ["Serviço", "Valor mensal (unitário)", "Tarifário proposto", "Quantidade", "Valor final", "Duração do contrato"];
+  const cabecalhoCliente = ["Conta", "Serviço", "Permanência (fim)", "Dias", "Valor mensal", "Desconto atual (€)", "Tarifário atual", "Ação", "Novo tarifário", "Novo valor mensal", "Duração novo contrato", "Valor na proposta"];
   let dados;
   if (ehProspeto) {
     dados = linhasPropostaPdf(linhas, true).map((l) => [
       l.servico || "",
-      l.duracao || "",
       numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
       l.produtoAtual || "",
       quantidadeLinhaProposta(l),
       valorLinhaProspeto(l) != null ? valorLinhaProspeto(l) : "",
+      l.duracao || "",
     ]);
   } else {
     const incluidas = linhasPropostaExcel(linhas);
@@ -8544,13 +8549,13 @@ function gerarPropostaExcel(nomeAlvo, linhas, data, ehProspeto) {
         l.servico || "",
         l.fim ? formatarDataIsoPT(l.fim) : "",
         l.fim ? diasEntreDatasIso(hoje, l.fim) : "",
-        l.duracao || "",
         numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
         numProposta(l.desconto) != null ? numProposta(l.desconto) : "",
         l.produtoAtual || "",
         l.acao || "Inalterado",
         novoTarifarioLinhaProposta(l),
         novoVal && numProposta(l.novoValor) != null ? numProposta(l.novoValor) : "",
+        l.duracao || "",
         valorLinhaProposta(l) != null ? valorLinhaProposta(l) : "",
       ];
     });
@@ -8558,7 +8563,7 @@ function gerarPropostaExcel(nomeAlvo, linhas, data, ehProspeto) {
   const cabecalho = ehProspeto ? cabecalhoProspeto : cabecalhoCliente;
   const linhaTotal = ehProspeto
     ? ["", "", "", "", "Total mensal", totalProposta(linhas, true)]
-    : ["", "", "", "", "", "", "", "", "", "Total mensal", totalProposta(linhas)];
+    : ["", "", "", "", "", "", "", "", "", "", "Total mensal", totalProposta(linhas)];
   const ws = XLSX.utils.aoa_to_sheet([
     [`Proposta — ${nomeAlvo || ""}`],
     [`Data: ${new Date(data).toLocaleDateString("pt-PT")}`],
@@ -8582,11 +8587,11 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
       const v = valorLinhaProspeto(l);
       return `<tr>
       <td>${escaparHtml(l.servico || "")}</td>
-      <td>${escaparHtml(l.duracao || "—")}</td>
       <td>${escaparHtml(l.produtoAtual || "")}</td>
       <td style="text-align:right">${numProposta(l.valorMensal) != null ? formatEuro(numProposta(l.valorMensal)) : "—"}</td>
       <td style="text-align:right">${quantidadeLinhaProposta(l)}</td>
       <td style="text-align:right">${v != null ? formatEuro(v) : "—"}</td>
+      <td>${escaparHtml(l.duracao || "—")}</td>
     </tr>`;
     }
     const novo = novoTarifarioLinhaProposta(l);
@@ -8604,7 +8609,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     </tr>`;
   };
   const head = ehProspeto
-    ? `<thead><tr><th>Serviço</th><th>Duração do contrato</th><th>Tarifário proposto</th><th style="text-align:right">Valor mensal (unitário)</th><th style="text-align:right">Quantidade</th><th style="text-align:right">Valor final</th></tr></thead>`
+    ? `<thead><tr><th>Serviço</th><th>Tarifário proposto</th><th style="text-align:right">Valor mensal (unitário)</th><th style="text-align:right">Quantidade</th><th style="text-align:right">Valor final</th><th>Duração do contrato</th></tr></thead>`
     : `<thead><tr><th>Conta</th><th>Serviço</th><th>Permanência</th><th>Tarifário atual</th><th>Ação</th><th>Novo tarifário</th><th style="text-align:right">Valor mensal</th><th style="text-align:right">Desconto atual</th><th style="text-align:right">Valor na proposta</th></tr></thead>`;
   const foot = ehProspeto
     ? `<tfoot><tr><td colspan="5" style="text-align:right">Total mensal na proposta</td><td style="text-align:right">${formatEuro(totalProposta(linhas, true))}</td></tr></tfoot>`
@@ -8841,24 +8846,24 @@ function PropostasView() {
                       {ehProspeto ? (
                         <tr>
                           <th className="p-2">Serviço</th>
-                          <th className="p-2">Duração do contrato</th>
                           <th className="p-2">Valor mensal (unitário)</th>
                           <th className="p-2">Tarifário proposto</th>
                           <th className="p-2">Quantidade</th>
                           <th className="p-2">Valor final</th>
+                          <th className="p-2">Duração do contrato</th>
                           <th className="p-2"></th>
                         </tr>
                       ) : (
                         <tr>
                           <th className="p-2">Serviço</th>
                           <th className="p-2">Permanência</th>
-                          <th className="p-2">Duração novo contrato</th>
                           <th className="p-2">Valor mensal</th>
                           <th className="p-2">Desconto atual (€)</th>
                           <th className="p-2">Tarifário atual</th>
                           <th className="p-2">Ação</th>
                           <th className="p-2">Novo tarifário</th>
                           <th className="p-2">Novo valor mensal</th>
+                          <th className="p-2">Duração novo contrato</th>
                           <th className="p-2"></th>
                         </tr>
                       )}
@@ -8873,15 +8878,16 @@ function PropostasView() {
                           return (
                             <tr key={l.key} className="border-t border-neutral-100">
                               <td className="p-2">
-                                {l.manual
-                                  ? <input value={l.servico} onChange={(e) => atualizarLinha(l.key, { servico: e.target.value })} placeholder="Serviço" className="w-40 px-2 py-1 rounded border border-neutral-300 text-xs" />
-                                  : <span className="font-medium">{l.servico || "—"}</span>}
+                                <select value={l.servico} onChange={(e) => atualizarLinha(l.key, { servico: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs">
+                                  <option value="">—</option>
+                                  {SERVICOS_PROPOSTA.map((s) => <option key={s} value={s}>{s}</option>)}
+                                </select>
                               </td>
-                              <td className="p-2"><select value={l.duracao} onChange={(e) => atualizarLinha(l.key, { duracao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">—</option>{DURACOES_PROPOSTA.map((m) => <option key={m} value={labelDuracao(m)}>{labelDuracao(m)}</option>)}</select></td>
                               <td className="p-2"><input value={l.valorMensal} onChange={(e) => atualizarLinha(l.key, { valorMensal: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
                               <td className="p-2"><input value={l.produtoAtual} onChange={(e) => atualizarLinha(l.key, { produtoAtual: e.target.value })} placeholder="Tarifário proposto" className="w-40 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
                               <td className="p-2"><input value={l.quantidade} onChange={(e) => atualizarLinha(l.key, { quantidade: e.target.value })} inputMode="numeric" placeholder="1" className="w-16 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
                               <td className="p-2 text-right font-medium">{vf != null ? formatEuro(vf) : <span className="text-neutral-300">—</span>}</td>
+                              <td className="p-2"><select value={l.duracao} onChange={(e) => atualizarLinha(l.key, { duracao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">—</option>{DURACOES_PROPOSTA.map((m) => <option key={m} value={labelDuracao(m)}>{labelDuracao(m)}</option>)}</select></td>
                               <td className="p-2">
                                 <button onClick={() => removerLinha(l.key)} title="Retirar da proposta" className="text-neutral-400 hover:text-red-600">✕</button>
                               </td>
@@ -8896,7 +8902,6 @@ function PropostasView() {
                                 : <span className="font-medium">{l.servico || "—"}</span>}
                             </td>
                             <td className="p-2 text-neutral-500">{l.fim ? `${formatarDataIsoPT(l.fim)} (${diasEntreDatasIso(new Date().toISOString().slice(0, 10), l.fim)}d)` : "—"}</td>
-                            <td className="p-2"><select value={l.duracao} onChange={(e) => atualizarLinha(l.key, { duracao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">—</option>{DURACOES_PROPOSTA.map((m) => <option key={m} value={labelDuracao(m)}>{labelDuracao(m)}</option>)}</select></td>
                             <td className="p-2"><input value={l.valorMensal} onChange={(e) => atualizarLinha(l.key, { valorMensal: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
                             <td className="p-2"><input value={l.desconto} onChange={(e) => atualizarLinha(l.key, { desconto: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
                             <td className="p-2">
@@ -8919,6 +8924,7 @@ function PropostasView() {
                                 ? <input value={l.novoValor} onChange={(e) => atualizarLinha(l.key, { novoValor: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" />
                                 : <span className="text-neutral-300">—</span>}
                             </td>
+                            <td className="p-2"><select value={l.duracao} onChange={(e) => atualizarLinha(l.key, { duracao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">—</option>{DURACOES_PROPOSTA.map((m) => <option key={m} value={labelDuracao(m)}>{labelDuracao(m)}</option>)}</select></td>
                             <td className="p-2">
                               <button onClick={() => removerLinha(l.key)} title="Retirar da proposta" className="text-neutral-400 hover:text-red-600">✕</button>
                             </td>
