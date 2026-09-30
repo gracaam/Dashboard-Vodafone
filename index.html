@@ -3390,7 +3390,7 @@ const DIAS_CONTRATOS_DESATUALIZADOS = 30;
 // Campos comparados entre importações. `duracao` ("Duração e Remanescente") fica de
 // fora de propósito: o remanescente muda todos os meses sozinho, e marcaria todos os
 // contratos como "alterados" em cada importação.
-const CAMPOS_COMPARADOS_CONTRATO = ["servico", "blocos", "inicio", "fim", "tipo", "multa", "descricao", "codigo"];
+const CAMPOS_COMPARADOS_CONTRATO = ["servico", "blocos", "inicio", "fim", "tipo", "produto", "multa", "descricao", "codigo"];
 
 function normalizarTextoContrato(s) {
   return String(s === null || s === undefined ? "" : s)
@@ -3442,7 +3442,12 @@ const CABECALHOS_CONTRATO = [
   ["inicio", (h) => h === "data de inicio"],
   ["fim", (h) => h === "data de fim"],
   ["duracao", (h) => h.startsWith("duracao")],
-  ["tipo", (h) => h === "tipo produto"],
+  // "Produto" (2026-09-30) — coluna do ficheiro de contratos de Augusto (o "tarifário
+  // atual" usado na Proposta). Os dois matchers aceitam "Produto" E "Tipo Produto" para
+  // que, exista só uma ou a outra, ambas as chaves fiquem preenchidas (sem aviso de
+  // "Coluna não encontrada" falso). A Proposta usa `produto || tipo`.
+  ["tipo", (h) => h === "tipo produto" || h === "produto"],
+  ["produto", (h) => h === "produto" || h === "tipo produto"],
   ["multa", (h) => h.startsWith("multa")],
   ["descricao", (h) => h === "descricao"],
   ["codigo", (h) => h === "codigo"],
@@ -3483,6 +3488,7 @@ function lerContratosPermanenciaDeWorkbook(wb) {
         fim: paraDataIsoContrato(cel("fim")),
         duracao: texto("duracao"),
         tipo: texto("tipo"),
+        produto: texto("produto"),
         multa: typeof cel("multa") === "number" ? cel("multa") : parseNumeroPT(cel("multa")),
         descricao: texto("descricao"),
         codigo: texto("codigo"),
@@ -3491,7 +3497,9 @@ function lerContratosPermanenciaDeWorkbook(wb) {
       const pos = contratos.findIndex((c) => c.id === id);
       if (pos >= 0) contratos[pos] = contrato; else contratos.push(contrato);
     }
-    const faltam = CABECALHOS_CONTRATO.filter(([k]) => !(k in colunas)).map(([k]) => k);
+    // `produto` fica fora desta lista: é alternativa a `tipo` (ambos aceitam "Produto"/
+    // "Tipo Produto"), por isso nunca faz sentido avisar dos dois ao mesmo tempo.
+    const faltam = CABECALHOS_CONTRATO.filter(([k]) => k !== "produto" && !(k in colunas)).map(([k]) => k);
     if (faltam.length) avisos.push(`Colunas não encontradas: ${faltam.join(", ")}`);
     return { conta, contratos, avisos, erro: null };
   }
@@ -6725,9 +6733,13 @@ async function gravarContratosConta(nif, conta, contratos, removerDeNif) {
 }
 
 function LinhaContratoResumo({ c, extra }) {
+  // Mostra o Produto do contrato por linha (2026-09-30, pedido de Augusto) — é o
+  // "tarifário atual" usado depois na Proposta. `produto` (coluna "Produto") ou `tipo`
+  // (coluna "Tipo Produto") — o parser preenche ambos a partir de qualquer das duas.
+  const produto = c.produto || c.tipo || null;
   return (
     <div className="text-[11px] text-neutral-600">
-      {c.id} · {c.servico || "—"} · fim {formatarDataIsoPT(c.fim)}{extra ? ` · ${extra}` : ""}
+      {c.id} · {c.servico || "—"}{produto ? ` · ${produto}` : ""} · fim {formatarDataIsoPT(c.fim)}{extra ? ` · ${extra}` : ""}
     </div>
   );
 }
@@ -6825,11 +6837,17 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
                       <span className="text-xs text-neutral-500">{(dados.contratos || []).length} contrato(s) · importado em {dados.atualizadoEm ? new Date(dados.atualizadoEm).toLocaleDateString("pt-PT") : "—"}</span>
                       {desatualizada && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ desatualizada{dias !== null ? ` (há ${dias} dias)` : ""} — volta a importar</span>}
                     </summary>
-                    <div className="mt-1.5 space-y-0.5">
+                    {/* Janela com scroll (2026-09-30, pedido de Augusto): mostra ~10
+                        contratos de cada vez; com mais, rola por baixo dentro da própria
+                        conta. Antes listava os 156 de uma vez. */}
+                    <div className="mt-1.5 space-y-0.5 max-h-40 overflow-y-auto pr-1">
                       {(dados.contratos || []).map((c) => (
-                        <LinhaContratoResumo key={c.id} c={c} extra={[c.tipo, c.multa !== null && c.multa !== undefined ? `multa ${formatEuro(c.multa)}/mês` : null].filter(Boolean).join(" · ")} />
+                        <LinhaContratoResumo key={c.id} c={c} extra={c.multa !== null && c.multa !== undefined ? `multa ${formatEuro(c.multa)}/mês` : ""} />
                       ))}
                     </div>
+                    {(dados.contratos || []).length > 10 && (
+                      <div className="text-[10px] text-neutral-400 pt-0.5">↕ rola para ver os restantes {(dados.contratos || []).length - 10}</div>
+                    )}
                   </details>
                 );
               })}
@@ -8278,703 +8296,399 @@ function AnaliseRapidaForm({ analise, mudarAnalise, toggleServicoAtual }) {
   );
 }
 
-function PropostasView({ ligacaoPasta }) {
-  const { todosClientes, adicionar } = useClientesNovos();
+/* ================= PONTO: PROPOSTAS (2026-09-30 — novo fluxo por contratos) =================
+   Decisão explícita de Augusto: a Proposta deixou de trabalhar com faturas anexadas.
+   Passa a ler os CONTRATOS DE PERMANÊNCIA já guardados na ficha do cliente (importados
+   no separador Clientes, cartão "Carregar contratos (Excel)") e, por serviço, permite
+   decidir Manter / Alterar tarifário / Upgrade / Apagar serviço, com valor mensal
+   editável. Só duas saídas: "Gravar proposta" (Excel) e "Apresentar proposta" (PDF no
+   browser). Um prospeto não tem contratos — nesse caso as linhas são preenchidas à mão.
+   Nada é escrito no Excel nem nos contratos: esta vista só lê. */
+
+// "Inalterado" (por defeito) e "Apagar serviço" NÃO entram na proposta.
+// "Manter" = fidelizar com o MESMO tarifário (só se mexer no valor/desconto).
+// "Alterar tarifário"/"Upgrade" = trocar de tarifário (novo valor).
+const ACOES_PROPOSTA = ["Inalterado", "Manter", "Alterar tarifário", "Upgrade", "Apagar serviço"];
+
+function numProposta(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : parseFloat(String(v).replace(",", "."));
+  return isNaN(n) ? null : n;
+}
+
+// Valor mensal de uma linha na proposta: para "Manter"/"Alterar tarifário"/"Upgrade" é o
+// novo valor (se preenchido), caindo para o valor base quando o novo está vazio.
+// "Apagar serviço" vale 0 (o serviço sai, deixa de contar). "Inalterado" não entra.
+function valorLinhaProposta(l) {
+  if (l.acao === "Inalterado") return null;
+  if (l.acao === "Apagar serviço") return 0;
+  const base = numProposta(l.valorMensal);
+  const novo = numProposta(l.novoValor);
+  return novo !== null ? novo : base;
+}
+function mostraNovoTarifarioProposta(l) { return l.acao === "Alterar tarifário" || l.acao === "Upgrade"; }
+function mostraNovoValorProposta(l) { return l.acao === "Manter" || mostraNovoTarifarioProposta(l); }
+
+// "Novo Tarifário" a mostrar: em "Manter" repete o tarifário atual (fidelização com o
+// mesmo tarifário); em Alterar/Upgrade é o novo; nos restantes fica vazio.
+function novoTarifarioLinhaProposta(l) {
+  if (l.acao === "Manter") return l.produtoAtual || "";
+  if (mostraNovoTarifarioProposta(l)) return l.novoTarifario || "";
+  return "";
+}
+
+// Entram no Excel: tudo MENOS "Inalterado" (inclui "Apagar serviço", com valor 0).
+function linhasPropostaExcel(linhas) {
+  return (linhas || []).filter((l) => l.acao !== "Inalterado");
+}
+// Entram no PDF: tudo MENOS "Inalterado" e "Apagar serviço". PENDENTE (2026-09-30,
+// Augusto): "Apagar serviço" deve também aparecer no PDF, mas só quando a proposta
+// (PDF) for mais elaborada — por agora fica de fora. Ver tarefa pendente.
+function linhasPropostaPdf(linhas) {
+  return linhasPropostaExcel(linhas).filter((l) => l.acao !== "Apagar serviço");
+}
+function totalProposta(linhas) {
+  return linhasPropostaExcel(linhas).reduce((s, l) => s + (valorLinhaProposta(l) || 0), 0);
+}
+
+function gerarPropostaExcel(nomeAlvo, linhas, data) {
+  const incluidas = linhasPropostaExcel(linhas);
+  const hoje = new Date().toISOString().slice(0, 10);
+  const cabecalho = ["Conta", "Serviço", "Permanência (fim)", "Dias", "Valor mensal", "Desconto atual (€)", "Tarifário atual", "Ação", "Novo tarifário", "Novo valor mensal", "Valor na proposta"];
+  const dados = incluidas.map((l) => {
+    const novoVal = mostraNovoValorProposta(l);
+    return [
+      l.conta || "",
+      l.servico || "",
+      l.fim ? formatarDataIsoPT(l.fim) : "",
+      l.fim ? diasEntreDatasIso(hoje, l.fim) : "",
+      numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
+      numProposta(l.desconto) != null ? numProposta(l.desconto) : "",
+      l.produtoAtual || "",
+      l.acao || "Inalterado",
+      novoTarifarioLinhaProposta(l),
+      novoVal && numProposta(l.novoValor) != null ? numProposta(l.novoValor) : "",
+      valorLinhaProposta(l) != null ? valorLinhaProposta(l) : "",
+    ];
+  });
+  const ws = XLSX.utils.aoa_to_sheet([
+    [`Proposta — ${nomeAlvo || ""}`],
+    [`Data: ${new Date(data).toLocaleDateString("pt-PT")}`],
+    [],
+    cabecalho,
+    ...dados,
+    [],
+    ["", "", "", "", "", "", "", "", "", "Total mensal", totalProposta(linhas)],
+  ]);
+  ws["!cols"] = [{ wch: 12 }, { wch: 24 }, { wch: 16 }, { wch: 8 }, { wch: 14 }, { wch: 16 }, { wch: 26 }, { wch: 18 }, { wch: 24 }, { wch: 16 }, { wch: 16 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Proposta");
+  return wb;
+}
+
+function gerarPropostaHtml(nomeAlvo, linhas, data) {
+  const incluidas = linhasPropostaPdf(linhas);
+  const linhaHtml = (l) => {
+    const novo = novoTarifarioLinhaProposta(l);
+    const v = valorLinhaProposta(l);
+    return `<tr>
+      <td>${escaparHtml(l.conta || "")}</td>
+      <td>${escaparHtml(l.servico || "")}</td>
+      <td>${l.fim ? escaparHtml(formatarDataIsoPT(l.fim)) : "—"}</td>
+      <td>${escaparHtml(l.produtoAtual || "")}</td>
+      <td>${escaparHtml(l.acao || "Inalterado")}</td>
+      <td>${novo ? escaparHtml(novo) : "—"}</td>
+      <td style="text-align:right">${numProposta(l.valorMensal) != null ? formatEuro(numProposta(l.valorMensal)) : "—"}</td>
+      <td style="text-align:right">${numProposta(l.desconto) != null ? formatEuro(numProposta(l.desconto)) : "—"}</td>
+      <td style="text-align:right">${v != null ? formatEuro(v) : "—"}</td>
+    </tr>`;
+  };
+  return `<!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Proposta — ${escaparHtml(nomeAlvo || "")}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Calibri, Arial, sans-serif; color: #1a1a1a; margin: 28px; }
+    .btnprint { position: fixed; top: 12px; right: 12px; padding: 8px 14px; border: 0; background: #e60000; color: #fff; border-radius: 8px; cursor: pointer; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: #666; font-size: 13px; margin-bottom: 18px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    th, td { border-bottom: 1px solid #e5e5e5; padding: 7px 8px; text-align: left; vertical-align: top; }
+    th { background: #f4f4f4; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: #555; }
+    tfoot td { font-weight: bold; border-top: 2px solid #ccc; border-bottom: 0; }
+    @media print { .btnprint { display: none; } }
+  </style></head><body>
+  <button class="btnprint" onclick="window.print()">Imprimir / PDF</button>
+  <h1>Proposta — ${escaparHtml(nomeAlvo || "")}</h1>
+  <div class="sub">${new Date(data).toLocaleDateString("pt-PT", { day: "2-digit", month: "long", year: "numeric" })}</div>
+  <table>
+    <thead><tr><th>Conta</th><th>Serviço</th><th>Permanência</th><th>Tarifário atual</th><th>Ação</th><th>Novo tarifário</th><th style="text-align:right">Valor mensal</th><th style="text-align:right">Desconto atual</th><th style="text-align:right">Valor na proposta</th></tr></thead>
+    <tbody>${incluidas.map(linhaHtml).join("") || `<tr><td colspan="9">Sem serviços na proposta.</td></tr>`}</tbody>
+    <tfoot><tr><td colspan="8" style="text-align:right">Total mensal na proposta</td><td style="text-align:right">${formatEuro(totalProposta(linhas))}</td></tr></tfoot>
+  </table>
+  </body></html>`;
+}
+
+function PropostasView() {
+  const { todosClientes } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
-  // Fase 3, Passo 3 (2026-09-20) — só o Excel de decisão ("Novos Tarifários") passa a
-  // gravar/ler da nuvem quando ativo; os PDFs/Word finais da proposta continuam só
-  // locais, sem alteração nenhuma (decisão explícita do utilizador). Sem "migração"
-  // própria no sentido de Negócios/Clientes (nunca há um arquivo a copiar de uma vez
-  // só — é sempre só o Excel mais recente de cada cliente, trabalho em curso, nunca
-  // dados a preservar) — por isso ativa logo com o login, sem precisar de confirmar
-  // nenhuma contagem antes.
-  const firebaseUserExcel = useFirebaseAuthUser();
-  const nuvemAtivaExcel = !!firebaseUserExcel;
-  const [nifSelecionado, setNifSelecionado] = useState("");
-  const [ehNovo, setEhNovo] = useState(false);
-  const [novoBase, setNovoBase] = useState({ e: "", n: "" });
-  const [avisoSucesso, setAvisoSucesso] = useState("");
-  const [erroNif, setErroNif] = useState("");
-  const [faturas, setFaturas] = useState([]);
-  const [analise, setAnalise] = useState(null);
-  const [aAnexar, setAAnexar] = useState(false);
-  const [aAnalisar, setAAnalisar] = useState(false);
-  const [dadosAutonomias, setDadosAutonomias] = useState(null);
-  // Catálogo de produtos (dados-privados/produtos-caracteristicas.json) — usado só
-  // para preencher a coluna informativa "Sugestão de Catálogo" no Excel "Novos
-  // Tarifários" (decisão explícita do utilizador, 2026-09-15). Nunca confundir com
-  // dadosAutonomias (autonomias-comerciais.json), que serve um propósito diferente
-  // (preço/autonomia na folha "Referência Autonomia").
-  const [dadosProdutosCatalogo, setDadosProdutosCatalogo] = useState(null);
-  // Escolha explícita "Tenho faturas / Não tenho faturas" (Caminho A, cliente/prospect
-  // existente) — decisão explícita do utilizador (2026-09-11). null = ainda por
-  // escolher (mostra os 2 botões); "sim" mostra a zona de anexos de sempre; "não" salta
-  // essa zona sem bloquear o resto do fluxo (o dashboard já funcionava sem faturas).
-  const [temFaturas, setTemFaturas] = useState(null);
-  const [aGerarQuestionario, setAGerarQuestionario] = useState(false);
-  // "Dar seguimento" (decisão explícita do utilizador, 2026-09-11): substitui a decisão
-  // linha-a-linha dentro do dashboard (não escalava para 50-70 serviços) — Augusto edita
-  // "Novos Tarifários" diretamente no Excel gerado, e isto relê esse ficheiro. Vive fora
-  // de "analise" porque tem de funcionar mesmo reabrindo o dashboard sem re-anexar/
-  // re-analisar faturas nessa sessão — só depende da pasta do projeto estar ligada.
-  const [aDarSeguimento, setADarSeguimento] = useState(false);
-  const [seguimentoResultado, setSeguimentoResultado] = useState(null);
-  const [seguimentoErro, setSeguimentoErro] = useState("");
-  // "Abrir no Terminal" (decisão explícita do utilizador, 2026-09-12, esquema trocado
-  // para claude-cli:// em 2026-09-14): substitui o copiar/colar manual por um link
-  // claude-cli://open — ver construirLinkClaudeCode. `caminhoProjeto` é o caminho
-  // absoluto da pasta do projeto no disco, escrito à mão 1 vez (o File System Access
-  // API nunca expõe esse caminho); sem ele o link ainda abre o Claude Code com o texto
-  // preenchido, só não propõe a pasta certa sozinho.
-  const [caminhoProjeto, setCaminhoProjetoState] = useState(() => {
-    try { return localStorage.getItem("caminhoProjetoAbsoluto") || ""; } catch { return ""; }
-  });
-  const setCaminhoProjeto = (valor) => {
-    setCaminhoProjetoState(valor);
-    try { localStorage.setItem("caminhoProjetoAbsoluto", valor); } catch {}
-  };
-  const [linkClaudeCode, setLinkClaudeCode] = useState("");
-  // Quais linhas de "RESUMO POR CATEGORIA" estão expandidas a mostrar a decomposição
-  // por serviço (Passo 4, decisão explícita do utilizador 2026-09-12: "(a) decomposição
-  // expansível no cartão") — chave "categoria|tarifario", só entradas expandidas vivem
-  // aqui (Set pequeno, nunca todas as combinações possíveis).
-  const [tarifariosExpandidos, setTarifariosExpandidos] = useState(() => new Set());
-  const toggleTarifarioExpandido = (chave) => setTarifariosExpandidos((prev) => {
-    const novo = new Set(prev);
-    if (novo.has(chave)) novo.delete(chave); else novo.add(chave);
-    return novo;
-  });
+  const firebaseUser = useFirebaseAuthUser();
+  const mapaContratos = useContratosPermanencia(firebaseUser);
 
+  const [alvo, setAlvo] = useState("cliente");
+  const [nifInput, setNifInput] = useState("");
+  const [nomeManual, setNomeManual] = useState("");
+  const [contasSel, setContasSel] = useState([]);
+  const [linhas, setLinhas] = useState([]);
+  const [aviso, setAviso] = useState("");
+  const [pdfHtml, setPdfHtml] = useState("");
+  const [pedidoPdf, setPedidoPdf] = useState(false);
+  const iframePdfRef = React.useRef(null);
+
+  const lista = alvo === "cliente" ? todosClientes : todosProspetos;
+  const nifNorm = nifInput.trim();
+  const registo = lista.find((x) => x.n === nifNorm) || null;
+  const nomeAlvo = registo ? registo.e : (alvo === "prospeto" ? nomeManual.trim() : "");
+  const nifAlvo = registo ? registo.n : (alvo === "prospeto" ? nifNorm : "");
+
+  const docContratos = nifAlvo ? mapaContratos.get(nifAlvo) : null;
+  const contas = docContratos && docContratos.contas ? Object.keys(docContratos.contas).sort() : [];
+
+  const sugestoes = nifNorm && !registo
+    ? lista.filter((x) => (x.n || "").includes(nifNorm) || (x.e || "").toLowerCase().includes(nifNorm.toLowerCase())).slice(0, 8)
+    : [];
+
+  // Muda de alvo/NIF → limpa a seleção e a proposta (nunca arrastar linhas de outro
+  // cliente). Um prospeto não tem contas/contratos: usa uma "conta" própria para os
+  // serviços escritos à mão.
   useEffect(() => {
-    (async () => {
-      if (!ligacaoPasta.pronto) return;
-      const lidos = await lerJsonDadosPrivados(ligacaoPasta.handle, "autonomias-comerciais.json");
-      setDadosAutonomias(lidos);
-      const lidosCatalogo = await lerJsonDadosPrivados(ligacaoPasta.handle, "produtos-caracteristicas.json");
-      setDadosProdutosCatalogo(lidosCatalogo);
-    })();
-  }, [ligacaoPasta.pronto]);
+    setLinhas([]);
+    setAviso("");
+    setContasSel(alvo === "prospeto" ? ["(prospeto)"] : []);
+  }, [alvo, nifAlvo]);
 
-  // Vista principal do dashboard: resumo por categoria (Fixo/Móvel/IoT-ICT), com
-  // nível intermédio por tarifário e notas pontuais de consumo extra — decisão
-  // explícita do utilizador (2026-09-06/07): o antigo detalhe completo linha-a-linha
-  // (dezenas de cartões, um por número/mês) foi removido por ser demasiado scroll;
-  // este resumo é a única vista, e o Excel usa a mesma agregação (`calcularResumoPorCategoria`,
-  // função pura partilhada). Nunca inventa dados novos — só agrega o que
-  // `analisarLinhasFinanceiras` já extraiu.
-  const resumoPorCategoria = useMemo(() => calcularResumoPorCategoria((analise && analise.linhas) || []), [analise]);
-  const evolucaoTotalMensal = useMemo(() => calcularEvolucaoTotalMensal((analise && analise.linhas) || []), [analise]);
-
-  // Junta Clientes e Prospetos numa só lista para a proposta poder ser feita a qualquer um.
-  const todosClientesEProspetos = useMemo(() => {
-    const clientesTag = todosClientes.map((c) => ({ ...c, origem: "cliente" }));
-    const prospetosTag = todosProspetos.map((p) => ({ ...p, t: p.cls || "Prospect", origem: "prospect" }));
-    return [...clientesTag, ...prospetosTag].sort((a, b) => a.e.localeCompare(b.e));
-  }, [todosClientes, todosProspetos]);
-
-  const clienteAtual = useMemo(() => todosClientesEProspetos.find((c) => c.n === nifSelecionado) || null, [nifSelecionado, todosClientesEProspetos]);
-  const mostraConteudo = ehNovo || clienteAtual;
-  // NIF "ativo" para anexos/análise — para um Cliente Novo (Caminho B) ainda não há
-  // "nifSelecionado" (só é atribuído a um cliente/prospect já existente na base); os
-  // anexos ficam associados ao NIF que o utilizador vai escrevendo em novoBase.n.
-  const nifAtivo = ehNovo ? novoBase.n.trim() : nifSelecionado;
-  const temFaturaParaAnalisar = faturas.some((f) => (f.categoriaAnexo || "fatura") === "fatura");
-
-  // Excel de decisão — fluxo por arrastar/largar, sem procura automática nenhuma no
-  // disco nem na nuvem (2026-09-21, pedido explícito do utilizador, depois de 2 bugs
-  // reais causados exatamente por essa procura por convenção de nome). Fonte de
-  // verdade única: excelAnexadoLocal, o ficheiro que Augusto arrasta para "Caixa 1"
-  // depois de editar — fica em memória, nunca depende de rede nenhuma. A gravação na
-  // nuvem continua a acontecer por trás, silenciosa, só como conveniência (acesso de
-  // outro Mac) — nunca lida de volta, nunca mostrada, nunca pode bloquear nada aqui.
-  const [excelAnexadoLocal, setExcelAnexadoLocal] = useState(null); // { nome, file } | null
-  const [aReenviarExcelNuvem, setAReenviarExcelNuvem] = useState(false);
-  const [avisoExcelNuvem, setAvisoExcelNuvem] = useState("");
-
-  const reenviarExcelNuvemClick = async (file) => {
-    if (!file || !nifAtivo) return;
-    // Anexa já em memória, ANTES de sequer tentar a nuvem — "Gerar Word" passa a ter
-    // sempre um Excel válido a partir daqui, independentemente do resultado da nuvem.
-    setExcelAnexadoLocal({ nome: file.name, file });
-    setAReenviarExcelNuvem(true);
-    const resultado = await guardarFicheiroExcelDecisaoNuvem(nifAtivo, file);
-    setAvisoExcelNuvem(resultado.ok
-      ? "✓ Excel anexado e também gravado na nuvem (acesso de outro Mac)."
-      : `✓ Excel anexado — pronto a usar. (Gravação na nuvem falhou: ${resultado.erro || "erro desconhecido"} — sem impacto no que precisas de fazer agora.)`);
-    setAReenviarExcelNuvem(false);
-    setTimeout(() => setAvisoExcelNuvem(""), 9000);
-  };
-
+  // Reconstrói as linhas a partir dos contratos das contas selecionadas, preservando
+  // edições já feitas (por key) e as linhas manuais das contas ainda selecionadas.
   useEffect(() => {
-    if (nifAtivo) carregarFaturas(nifAtivo); else setFaturas([]);
-    // eslint-disable-next-line
-  }, [nifAtivo]);
-
-  const carregarFaturas = async (nif) => {
-    try { setFaturas(await listarFaturasDoCliente(nif)); } catch { setFaturas([]); }
-  };
-
-  const selecionarCliente = (nif) => {
-    setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif);
-    setFaturas([]); setAnalise(null); setTemFaturas(null);
-    setSeguimentoResultado(null); setSeguimentoErro(""); setExcelAnexadoLocal(null);
-    setWordAnexado(null); setWordJaGerado(false);
-    irParaTopo();
-  };
-  const abrirNovo = () => { setEhNovo(true); setNifSelecionado(""); setAvisoSucesso(""); setErroNif(""); setNovoBase({ e: "", n: "" }); setFaturas([]); setAnalise(null); setTemFaturas(null); setSeguimentoResultado(null); setSeguimentoErro(""); setExcelAnexadoLocal(null); setWordAnexado(null); setWordJaGerado(false); irParaTopo(); };
-  const limpar = () => { setEhNovo(false); setNifSelecionado(""); setFaturas([]); setAnalise(null); setTemFaturas(null); setSeguimentoResultado(null); setSeguimentoErro(""); setExcelAnexadoLocal(null); setWordAnexado(null); setWordJaGerado(false); };
-
-  // "categoriaForcada" é usado pelo Caminho A2 (Sem Faturas): mesmo um PDF/imagem
-  // anexado aí é sempre "documento" de apoio, nunca "fatura" — o utilizador já indicou
-  // explicitamente que não tem faturas, por isso nunca deve entrar na análise automática.
-  const anexarFicheiros = async (ficheiros, categoriaForcada) => {
-    if (!nifAtivo) return false;
-    setAAnexar(true);
-    const nomeCliente = clienteAtual ? clienteAtual.e : (ehNovo ? novoBase.e || nifAtivo : nifAtivo);
-    for (const f of ficheiros) {
-      await guardarFaturaAnexada(nifAtivo, f, categoriaForcada || classificarAnexo(f.name));
-      if (ligacaoPasta.pronto) await guardarPdfNaPastaCliente(ligacaoPasta.handle, nomeCliente, f);
-    }
-    await carregarFaturas(nifAtivo);
-    if (!analise) setAnalise({ operadoraAtual: "", valorMensal: "", servicosAtuais: [], dataFimFidelizacao: "", linhas: [], decisoes: {} });
-    setAAnexar(false);
-    return true;
-  };
-
-
-  // Gera e grava o Excel de análise — partilhada entre o fluxo automático (ver
-  // analisarFaturasAnexadas) e o botão manual do Caminho A2 "Sem Faturas" (gerarExcelClick).
-  //
-  // Bug real corrigido (2026-09-21): quando a nuvem estava ativa (login feito),
-  // guardarExcelAnaliseNuvem era a ÚNICA tentativa — se falhasse (ex.: Firebase
-  // Storage ainda por ativar/configurar no Console, ver storage.rules), o erro ficava
-  // só num console.warn e o Excel não aparecia em lado nenhum (nem nuvem, nem disco,
-  // nem download) — exatamente o sintoma reportado por Augusto ("análise corre bem,
-  // Excel nunca aparece"). Agora cai sempre para guardarExcelAnalise como rede de
-  // segurança, que faz XLSX.writeFile (download real do browser) quando não há pasta
-  // do projeto ligada — nunca deixa Augusto sem ficheiro nenhum no disco.
-  const gerarEGuardarExcel = async (analiseParaExcel, nomeCliente, decisoesOverride) => {
-    const wb = gerarExcelAnaliseTarifarios(nomeCliente, analiseParaExcel.linhas || [], decisoesOverride || analiseParaExcel.decisoes || {}, dadosAutonomias, dadosProdutosCatalogo, analiseParaExcel.observacaoManual);
-    if (nuvemAtivaExcel && nifAtivo) {
-      const resultadoNuvem = await guardarExcelAnaliseNuvem(nifAtivo, nomeCliente, wb);
-      if (resultadoNuvem.gravadoNaNuvem) return resultadoNuvem;
-      const resultadoLocal = await guardarExcelAnalise(ligacaoPasta.pronto ? ligacaoPasta.handle : null, nomeCliente, wb);
-      return { ...resultadoLocal, gravadoNaNuvem: false, erroNuvem: resultadoNuvem.erro || "erro desconhecido" };
-    }
-    return guardarExcelAnalise(ligacaoPasta.pronto ? ligacaoPasta.handle : null, nomeCliente, wb);
-  };
-
-  // Fonte do Excel de decisão para "Gerar Word" (2026-09-21, simplificação definitiva
-  // pedida pelo utilizador): SÓ excelAnexadoLocal — o ficheiro que Augusto arrastou
-  // para "Caixa 1". Nunca procura na nuvem nem no disco por nome/convenção — essa
-  // procura automática foi exatamente a causa dos 2 bugs reais de hoje (Excel "gerado"
-  // que nunca aparecia). Sem adivinhação: só o que foi arrastado à mão.
-  const lerExcelDeDecisao = () => excelAnexadoLocal;
-
-  // "⬇️ Descarregar Excel agora" — atalho manual que nunca depende da nuvem (nem para
-  // gravar, nem para reler): regenera o workbook a partir da "analise" já em memória
-  // (mesmos dados que "Analisar faturas anexadas" já calculou) e descarrega logo pelo
-  // browser. Rede de segurança pedida por Augusto (2026-09-21) depois de a leitura da
-  // nuvem ter falhado em silêncio mesmo com a escrita a dizer "sucesso" — garante
-  // sempre um ficheiro real no disco, independente do estado da nuvem.
-  const [aDescarregarAgora, setADescarregarAgora] = useState(false);
-  const descarregarExcelAgoraClick = () => {
-    if (!analise) return;
-    setADescarregarAgora(true);
-    const nomeCliente = ehNovo ? novoBase.e : clienteAtual.e;
-    const wb = gerarExcelAnaliseTarifarios(nomeCliente, analise.linhas || [], analise.decisoes || {}, dadosAutonomias, dadosProdutosCatalogo, analise.observacaoManual);
-    const nomeFicheiro = `${sanitizarNomePasta(nomeCliente)}_Analise_Tarifarios_${new Date().toISOString().slice(0, 10)}.xlsx`;
-    XLSX.writeFile(wb, nomeFicheiro);
-    setADescarregarAgora(false);
-  };
-
-  // Formata a mensagem de sucesso do Excel de análise — partilhada entre
-  // analisarFaturasAnexadas (fluxo automático) e gerarExcelClick (botão manual).
-  const formatarMensagemExcel = (resultado, nomeCliente, automatico) => {
-    const local = resultado.gravadoNaNuvem
-      ? "na nuvem"
-      : resultado.gravadoNaPasta
-        ? `em 03_Analise Faturas/${nomeCliente}/Analise/${resultado.nomeFicheiro}`
-        : `descarregado: ${resultado.nomeFicheiro}`;
-    const avisoNuvem = resultado.erroNuvem
-      ? ` ⚠ A gravação na nuvem falhou (${resultado.erroNuvem}) — grava-se ${resultado.gravadoNaPasta ? "na pasta do projeto" : "por download"} em alternativa. Confirma com o Claude Code se o Firebase Storage já foi ativado/configurado (ver storage.rules).`
-      : "";
-    if (automatico) {
-      return `Excel gerado e gravado automaticamente ${resultado.gravadoNaNuvem || resultado.gravadoNaPasta ? local : `(${local})`}.${avisoNuvem}`;
-    }
-    return (resultado.gravadoNaNuvem || resultado.gravadoNaPasta ? `Excel gravado ${local}` : `Excel ${local}`) + avisoNuvem;
-  };
-
-  // Extrai texto de cada PDF anexado com PDF.js e tenta identificar serviço/consumo/
-  // data de fidelização por linha. Nunca inventa um valor — o que não for encontrado
-  // com confiança fica em branco, marcado "não identificado", para confirmares à mão.
-  const analisarFaturasAnexadas = async () => {
-    setAAnalisar(true);
-    const novasLinhas = [];
-    // Documentos de apoio (não-fatura) nunca entram na análise automática — decisão
-    // explícita do utilizador (2026-09-11). Ficheiros antigos sem "categoriaAnexo"
-    // (anexados antes desta mudança) tratam-se como fatura, para não quebrar o
-    // comportamento já testado.
-    for (const f of faturas.filter((f) => (f.categoriaAnexo || "fatura") === "fatura")) {
-      try {
-        const texto = await extrairTextoPDF(f.blob);
-        novasLinhas.push(...analisarLinhasFinanceiras(texto, f.nome));
-      } catch (e) {
-        console.warn(`Não foi possível analisar ${f.nome}:`, e.message);
-      }
-    }
-    // Pré-preenche a Análise Rápida com o que já foi calculado — só nos campos ainda
-    // vazios (nunca substitui o que o utilizador já escreveu à mão); "Serviços atuais"
-    // soma-se ao que já estava selecionado, sem substituir o que o utilizador escreveu.
-    const base = analise || { operadoraAtual: "", valorMensal: "", servicosAtuais: [], dataFimFidelizacao: "", linhas: [], decisoes: {} };
-    const linhasCombinadas = [...(base.linhas || []), ...novasLinhas];
-    const sugestao = sugerirAnaliseRapida(linhasCombinadas);
-    const novaAnalise = {
-      ...base,
-      linhas: linhasCombinadas,
-      operadoraAtual: base.operadoraAtual || sugestao.operadoraAtual || "",
-      valorMensal: base.valorMensal || (sugestao.valorMensal !== null ? String(sugestao.valorMensal) : ""),
-      dataFimFidelizacao: base.dataFimFidelizacao || sugestao.dataFimFidelizacao || "",
-      servicosAtuais: [...new Set([...(base.servicosAtuais || []), ...sugestao.servicosAtuais])],
-    };
-    setAnalise(novaAnalise);
-    // Já não gera/grava o Excel automaticamente aqui (2026-09-21, simplificação
-    // definitiva pedida pelo utilizador) — o Excel obtém-se sempre por ação explícita
-    // ("⬇️ Descarregar Excel agora"), nunca como efeito colateral silencioso da análise.
-    setAAnalisar(false);
-  };
-
-  const [aGerarExcel, setAGerarExcel] = useState(false);
-  const gerarExcelClick = async (decisoesOverride) => {
-    // Sem faturas (Caminho A2), "linhas" fica sempre vazio — o Excel ainda faz
-    // sentido gerar-se, mais vazio, com a observação do consultor incluída (ver
-    // gerarExcelAnaliseTarifarios). Só bloqueia quando não há análise nenhuma.
-    if (!analise) return;
-    setAGerarExcel(true);
-    const nomeCliente = ehNovo ? novoBase.e : clienteAtual.e;
-    const resultado = await gerarEGuardarExcel(analise, nomeCliente, decisoesOverride);
-    setAvisoSucesso(formatarMensagemExcel(resultado, nomeCliente, false));
-    setAGerarExcel(false);
-    setTimeout(() => setAvisoSucesso(""), 6000);
-  };
-
-  // Caminho B — Cliente Novo sem faturas: gera o Excel-questionário em branco em vez do
-  // Excel de análise (que precisa de linhas extraídas de faturas, aqui inexistentes).
-  const gerarQuestionarioClick = async () => {
-    if (!novoBase.e.trim() || !novoBase.n.trim()) { setErroNif("Preenche o Nome e o NIF antes de gerar o questionário."); return; }
-    setErroNif("");
-    setAGerarQuestionario(true);
-    const wb = gerarExcelQuestionarioClienteNovo(novoBase.e, novoBase.n);
-    const resultado = await guardarExcelAnalise(ligacaoPasta.pronto ? ligacaoPasta.handle : null, novoBase.e, wb, "Questionario_Cliente_Novo");
-    setAvisoSucesso(resultado.gravadoNaPasta
-      ? `Questionário gravado em 03_Analise Faturas/${novoBase.e}/Analise/${resultado.nomeFicheiro}`
-      : `Questionário descarregado: ${resultado.nomeFicheiro}`);
-    setAGerarQuestionario(false);
-    setTimeout(() => setAvisoSucesso(""), 6000);
-  };
-
-  const removerFatura = async (id) => {
-    await removerFaturaAnexada(id);
-    const restantes = await listarFaturasDoCliente(nifAtivo);
-    setFaturas(restantes);
-    // Sem faturas anexadas, a análise calculada a partir delas deixa de fazer sentido
-    // no ecrã — as duas devem limpar-se sempre juntas, nunca uma sem a outra.
-    if (restantes.length === 0) setAnalise(null);
-  };
-
-  const verFatura = (fatura) => {
-    const url = URL.createObjectURL(fatura.blob);
-    window.open(url, "_blank");
-  };
-
-  const mudarAnalise = (campo, valor) => setAnalise((prev) => ({ ...(prev || {}), [campo]: valor }));
-  const toggleServicoAtual = (servico) => setAnalise((prev) => {
-    const atual = (prev && prev.servicosAtuais) || [];
-    const novos = atual.includes(servico) ? atual.filter((s) => s !== servico) : [...atual, servico];
-    return { ...(prev || {}), servicosAtuais: novos };
-  });
-
-  const nomeParaProposta = ehNovo ? novoBase.e : (clienteAtual ? clienteAtual.e : "");
-
-  // Caixa 2 "Arrasta o Word aqui" (2026-09-21, simplificação definitiva pedida pelo
-  // utilizador) — substitui por completo a antiga procura automática na pasta do
-  // projeto por convenção de nome (encontrarPropostaMaisRecente). Augusto abre e revê
-  // o Word em Finder/Word; só arrasta de volta para aqui se tiver feito ajustes que
-  // "Gerar PDF" precise de usar como fonte explícita — sem arrastar, "Gerar PDF"
-  // continua a funcionar (wordJaGerado), só assume "o Word que acabaste de gerar".
-  const [wordAnexado, setWordAnexado] = useState(null); // { nome, file } | null
-  const [wordJaGerado, setWordJaGerado] = useState(false);
-
-  // "Gerar PDF" — pede ao Claude Code (via Terminal) para converter o Word para PDF.
-  // Nunca procura no disco: usa o nome exato do Word arrastado (wordAnexado) quando
-  // existir, ou refere-se ao "Word que acabaste de gerar" (mesma conversa/Terminal,
-  // sem precisar do nome exato) quando Augusto avançou direto sem arrastar nada.
-  const linkGerarPdf = () => {
-    const pastaAbsoluta = caminhoPastaCliente(caminhoProjeto, nomeParaProposta);
-    const texto = wordAnexado
-      ? `Converte a proposta Word "${wordAnexado.nome}" (pasta "03_Analise Faturas/${nomeParaProposta}/Analise/") para PDF, mantendo a mesma formatação, e guarda o PDF na mesma pasta.`
-      : `Converte para PDF o Word da proposta que acabaste de gerar no passo anterior desta conversa, mantendo a mesma formatação, e guarda o PDF na pasta "03_Analise Faturas/${nomeParaProposta}/Analise/".`;
-    return construirLinkClaudeCode(texto, pastaAbsoluta).url;
-  };
-
-  // Resume esta seleção num texto pronto a colar numa conversa com o Claude Code, para
-  // seguir o pipeline da skill "proposta-vodafone-business" (Excel → Word → PDF branded).
-  // "linhasSeguimento" (opcional) — vem de "Dar seguimento" (ver darSeguimentoClick),
-  // já relido e validado (nenhuma linha "Upgrade" sem Mensalidade nova). Sem isto, o
-  // o botão "Gerar Word" usa este resumo como entrada para a skill.
-  const gerarResumoParaSkill = async (linhasSeguimento) => {
-    const nome = ehNovo ? novoBase.e : clienteAtual.e;
-    const nif = ehNovo ? novoBase.n : clienteAtual.n;
-    const textoLinhas = [`PEDIDO DE PROPOSTA — ${nome} (NIF ${nif})`, "", "Os produtos e valores foram definidos manualmente no Excel final."];
-    if (linhasSeguimento && linhasSeguimento.length) {
-      const alteradas = linhasSeguimento.filter((l) => l.acao !== "Manter");
-      const mantidas = linhasSeguimento.length - alteradas.length;
-      textoLinhas.push("", `DECISÕES POR SERVIÇO (Excel "Novos Tarifários" relido via "Dar seguimento" — ${linhasSeguimento.length} serviço(s), ${mantidas} sem alteração):`);
-      if (!alteradas.length) {
-        textoLinhas.push("(todas as linhas ficaram como \"Manter\" — nenhuma alteração proposta)");
-      }
-      alteradas.forEach((l) => {
-        if (l.acao === "Upgrade") {
-          textoLinhas.push(`- ${l.numero} (${l.tarifarioAtual}, ${formatEuro(l.custoAtual)}/mês) → Upgrade para ${l.tarifarioProposto || "(tarifário por preencher)"}, ${formatEuro(l.mensalidadeNova)}/mês${l.poupanca !== null ? ` (poupança ${formatEuro(l.poupanca)}/mês)` : ""}.`);
-        } else {
-          textoLinhas.push(`- ${l.numero} (${l.tarifarioAtual}, ${formatEuro(l.custoAtual)}/mês): ${l.acao}.`);
-        }
-        if (l.observacao) textoLinhas.push(`  Obs: ${l.observacao}`);
-      });
-    }
-    if (analise) {
-      textoLinhas.push("", "ANÁLISE DA FATURA ATUAL:");
-      if (analise.operadoraAtual) textoLinhas.push(`- Operadora atual: ${analise.operadoraAtual}`);
-      if (analise.valorMensal) textoLinhas.push(`- Valor mensal atual: ${analise.valorMensal}€`);
-      if (analise.dataFimFidelizacao) textoLinhas.push(`- Data fim de fidelização: ${analise.dataFimFidelizacao}`);
-      if (analise.servicosAtuais && analise.servicosAtuais.length) textoLinhas.push(`- Serviços atuais: ${analise.servicosAtuais.join(", ")}`);
-      if (faturas.length) textoLinhas.push(`- ${faturas.length} documento(s) anexado(s) (guardados no dashboard${ligacaoPasta.pronto ? " e em 03_Analise Faturas/" + nome + "/Faturas/" : ""})`);
-      if (resumoPorCategoria.length) {
-        textoLinhas.push("", "RESUMO POR CATEGORIA (ver Excel gerado para o detalhe completo por tarifário):");
-        resumoPorCategoria.forEach((c) => {
-          textoLinhas.push(`- ${c.categoria}: ${c.nServicos} serviço(s), ${formatEuro(c.custoTotalMedio)}/mês médio (variável/extra ${formatEuro(c.variavelMedio)}/mês)`);
-          c.porTarifario.forEach((t) => {
-            textoLinhas.push(`  · ${t.tarifario}${t.tipoServico ? ` (${t.tipoServico})` : ""} — ${t.nServicos}× — ${formatEuro(t.mediaPorServico)}/mês médio`);
+    setLinhas((prev) => {
+      const prevByKey = new Map(prev.map((l) => [l.key, l]));
+      const novas = [];
+      contasSel.forEach((conta) => {
+        const dados = docContratos && docContratos.contas ? docContratos.contas[conta] : null;
+        ((dados && dados.contratos) || []).forEach((c) => {
+          const key = `${conta}::${c.id}`;
+          if (prevByKey.has(key)) { novas.push(prevByKey.get(key)); return; }
+          novas.push({
+            key, conta, manual: false,
+            servico: c.servico || "",
+            fim: c.fim || "",
+            produtoAtual: c.produto || c.tipo || "",
+            valorMensal: c.multa !== null && c.multa !== undefined && c.multa !== "" ? c.multa : "",
+            desconto: "", acao: "Inalterado", novoTarifario: "", novoValor: "",
           });
-          c.notas.forEach((n) => textoLinhas.push(`  ⚠ ${n}`));
         });
-      }
-    }
-    textoLinhas.push("", 'Segue o pipeline da skill "proposta-vodafone-business" (Modo A se houver faturas/dados reais — audita as faturas reais anexadas no dashboard; Modo B se não) para construir a proposta completa. O texto de email de envio já faz parte do output dessa skill (passo 4b) — não é preciso gerá-lo aqui.');
-    const texto = textoLinhas.join("\n");
-    // A cópia para a área de transferência mantém-se sempre como reserva (pedido
-    // explícito do utilizador, 2026-09-12) — o link claude-cli:// é o caminho
-    // principal, mas não substitui isto (falha em silêncio se o Claude Code CLI nunca
-    // tiver sido corrido interativamente nesta máquina, por exemplo — o handler só fica
-    // registado depois do 1º prompt de uma sessão interativa, ver docs).
-    let avisoClipboard;
-    try {
-      await navigator.clipboard.writeText(texto);
-      avisoClipboard = "Resumo copiado (reserva)";
-    } catch {
-      avisoClipboard = "Não consegui copiar automaticamente — usa o botão abaixo, ou copia da consola (F12)";
-      console.log(texto);
-    }
-    const pastaAbsoluta = caminhoPastaCliente(caminhoProjeto, nome);
-    const { url, truncado } = construirLinkClaudeCode(texto, pastaAbsoluta);
-    setLinkClaudeCode(url);
-    setWordJaGerado(true); // liberta "Gerar PDF" — ver linkGerarPdf
-    // Navega logo para o link — "1 clique → Word pronto" (decisão explícita do
-    // utilizador, 2026-09-14): antes exigia um 2º clique manual em "Abrir no Terminal".
-    // Ainda dentro do mesmo gesto de clique (só passaram awaits rápidos — leitura do
-    // Excel, escrita no clipboard), por isso o browser deixa navegar para o esquema
-    // claude-cli:// sem bloquear. O botão "Abrir no Terminal" fica sempre visível a
-    // seguir, como reserva, caso isto falhe em silêncio nalgum browser.
-    try { window.location.href = url; } catch {}
-    setAvisoSucesso(
-      `${avisoClipboard} — a abrir o Terminal…` +
-      (pastaAbsoluta ? "" : " ⚠ Sem o caminho da pasta do projeto (campo abaixo), o link não propõe a pasta certa.") +
-      (truncado ? " ⚠ O resumo passava de 5.000 caracteres — foi cortado no link (a cópia no clipboard tem o texto completo)." : "") +
-      ` Se não abrir sozinho, usa o botão "Abrir no Terminal" abaixo.`
-    );
-    irParaTopo();
-    setTimeout(() => setAvisoSucesso(""), 9000);
+      });
+      prev.filter((l) => l.manual && contasSel.includes(l.conta)).forEach((l) => {
+        if (!novas.some((x) => x.key === l.key)) novas.push(l);
+      });
+      return novas;
+    });
+  }, [contasSel, docContratos]); // eslint-disable-line
+
+  const atualizarLinha = (key, campos) => setLinhas((prev) => prev.map((l) => (l.key === key ? { ...l, ...campos } : l)));
+  const togglarConta = (conta) => setContasSel((prev) => (prev.includes(conta) ? prev.filter((c) => c !== conta) : [...prev, conta]));
+  const adicionarManual = (conta) => setLinhas((prev) => [...prev, { key: `manual::${conta}::${Date.now()}`, conta, manual: true, servico: "", fim: "", produtoAtual: "", valorMensal: "", desconto: "", acao: "Alterar tarifário", novoTarifario: "", novoValor: "" }]);
+  const removerLinha = (key) => setLinhas((prev) => prev.filter((l) => l.key !== key));
+
+  // Só se pode gravar/apresentar quando há pelo menos uma linha que ENTRA na proposta
+  // (Inalterado e Apagar serviço não contam).
+  const podeGerar = linhasPropostaExcel(linhas).length > 0 && !!nomeAlvo;
+
+  const gravarExcel = () => {
+    if (!podeGerar) return;
+    const wb = gerarPropostaExcel(nomeAlvo, linhas, new Date());
+    const nome = `Proposta - ${nomeFicheiroSeguro(nomeAlvo)} - ${new Date().toLocaleDateString("pt-PT").replace(/\//g, "-")}.xlsx`;
+    XLSX.writeFile(wb, nome);
+    setAviso(`Excel gravado: ${nome}`);
+    setTimeout(() => setAviso(""), 8000);
+  };
+  const apresentarPdf = () => {
+    if (!podeGerar) return;
+    setPedidoPdf(true);
+    setPdfHtml(gerarPropostaHtml(nomeAlvo, linhas, new Date()));
   };
 
-  // "Gerar Word": lê o Excel arrastado para a Caixa 1 (excelAnexadoLocal), relê
-  // "Novos Tarifários" (lerNovosTarifariosDoExcel) e valida. Decisão explícita do
-  // utilizador (2026-09-11):
-  // uma linha "Upgrade" sem "Mensalidade nova" preenchida BLOQUEIA o avanço — mostra
-  // quais faltam, sem mostrar o botão de gerar o resumo, até estarem corrigidas no
-  // Excel (ou a Ação mudada para Manter/Anular) e "Dar seguimento" ser clicado de novo.
-  const darSeguimentoClick = async () => {
-    setSeguimentoErro(""); setSeguimentoResultado(null);
-    // Fonte única a partir de agora: excelAnexadoLocal (2026-09-21, simplificação
-    // definitiva pedida pelo utilizador) — nunca tenta nuvem nem disco.
-    const encontrado = lerExcelDeDecisao();
-    if (!encontrado) {
-      setSeguimentoErro(`Ainda não anexaste nenhum Excel — clica "⬇️ Descarregar Excel agora" acima, edita "Novos Tarifários" no teu computador, guarda, e arrasta-o para "📤 Anexar Excel editado" abaixo.`);
-      return;
-    }
-    setADarSeguimento(true);
-    try {
-      const buffer = await encontrado.file.arrayBuffer();
-      const wb = XLSX.read(buffer, { type: "array" });
-      const linhas = lerNovosTarifariosDoExcel(wb);
-      if (!linhas) {
-        setSeguimentoErro(`O ficheiro "${encontrado.nome}" não tem a folha "Novos Tarifários" esperada — não foi alterada a estrutura do Excel, certo?`);
-        setADarSeguimento(false);
-        return;
-      }
-      const incompletas = linhas.filter((l) => l.incompleta);
-      setSeguimentoResultado({ ficheiro: encontrado.nome, linhas, incompletas });
-      if (incompletas.length) {
-        setSeguimentoErro(`O Excel ainda tem ${incompletas.length} linha(s) Upgrade sem Mensalidade nova. Preenche-as, guarda o Excel e tenta novamente.`);
-      } else {
-        await gerarResumoParaSkill(linhas);
-      }
-    } catch (e) {
-      setSeguimentoErro(`Não foi possível ler "${encontrado.nome}": ${e.message}`);
-    }
-    setADarSeguimento(false);
-  };
+  const total = totalProposta(linhas);
 
   return (
-    <div className="space-y-3">
-      {avisoSucesso && <div className="flex items-center gap-1.5 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">✓ {avisoSucesso}</div>}
-      <ClientePicker todosClientes={todosClientesEProspetos} nifSelecionado={nifSelecionado} ehNovo={ehNovo}
-        onSelecionar={selecionarCliente} onNovo={abrirNovo} labelNovo="+ Novo Cliente" labelPicker="cliente ou prospect" />
+    <div className="space-y-4">
+      <p className="text-sm text-neutral-500">
+        Monta a proposta a partir dos contratos já guardados na ficha do cliente. Por serviço: manter, alterar tarifário, upgrade ou apagar. No fim, grava em Excel ou apresenta em PDF.
+      </p>
 
-      {!mostraConteudo && (
-        <div className="border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-400">
-          Seleciona um cliente ou prospect para quem construir a proposta, ou cria uma oportunidade nova.
+      {aviso && <div className="text-xs text-neutral-600 bg-neutral-50 border border-neutral-200 rounded-md px-3 py-2">{aviso}</div>}
+
+      <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-4">
+        <div className="flex items-center gap-2">
+          <button onClick={() => { setAlvo("cliente"); setNifInput(""); }}
+            className={`text-sm px-3.5 py-1.5 rounded-md border ${alvo === "cliente" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"}`}>
+            Cliente
+          </button>
+          <button onClick={() => { setAlvo("prospeto"); setNifInput(""); }}
+            className={`text-sm px-3.5 py-1.5 rounded-md border ${alvo === "prospeto" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"}`}>
+            Prospeto
+          </button>
+        </div>
+
+        <div className="relative max-w-md">
+          <label className="text-xs text-neutral-500">NIF do {alvo}</label>
+          <input value={nifInput} onChange={(e) => setNifInput(e.target.value)}
+            placeholder="Introduz o NIF" className="w-full px-3 py-2 rounded-md border border-neutral-300 text-sm" />
+          {registo && <div className="text-xs text-emerald-700 mt-1">{registo.e}</div>}
+          {!registo && nifNorm && alvo === "cliente" && <div className="text-xs text-amber-700 mt-1">NIF não encontrado na lista de clientes.</div>}
+          {sugestoes.length > 0 && (
+            <div className="absolute z-10 mt-1 w-full bg-white border border-neutral-200 rounded-md shadow-lg max-h-56 overflow-auto">
+              {sugestoes.map((x) => (
+                <button key={x.n} onClick={() => setNifInput(x.n)}
+                  className="block w-full text-left text-xs px-3 py-2 hover:bg-neutral-50">
+                  {x.e} — NIF {x.n}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {alvo === "prospeto" && !registo && (
+          <div className="max-w-md">
+            <label className="text-xs text-neutral-500">Nome do prospeto</label>
+            <input value={nomeManual} onChange={(e) => setNomeManual(e.target.value)}
+              placeholder="Nome" className="w-full px-3 py-2 rounded-md border border-neutral-300 text-sm" />
+          </div>
+        )}
+
+        {alvo === "cliente" && registo && !firebaseUser && (
+          <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            Inicia sessão (Firebase) para ler os contratos guardados.
+          </div>
+        )}
+
+        {alvo === "cliente" && registo && firebaseUser && contas.length === 0 && (
+          <div className="text-xs text-neutral-500 border border-dashed border-neutral-300 rounded-md px-3 py-4 text-center">
+            Não há contratos guardados para este cliente. Importa-os na ficha do cliente, no separador Clientes.
+          </div>
+        )}
+
+        {alvo === "cliente" && registo && contas.length > 0 && (
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-neutral-500">Contas (podes escolher várias)</div>
+            <div className="flex flex-wrap gap-2">
+              {contas.map((conta) => (
+                <label key={conta} className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-md border cursor-pointer ${contasSel.includes(conta) ? "border-red-400 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-700"}`}>
+                  <input type="checkbox" checked={contasSel.includes(conta)} onChange={() => togglarConta(conta)} />
+                  Conta {conta}
+                  <span className="text-[11px] text-neutral-400">{((docContratos.contas[conta] || {}).contratos || []).length} serviço(s)</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {contasSel.length > 0 && (
+        <div className="space-y-4">
+          {contasSel.map((conta) => {
+            const doConta = linhas.filter((l) => l.conta === conta);
+            return (
+              <div key={conta} className="bg-white border border-neutral-200 rounded-lg overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-neutral-100">
+                  <div className="text-sm font-medium">{conta === "(prospeto)" ? "Prospeto — serviços" : `Conta ${conta}`}</div>
+                  <button onClick={() => adicionarManual(conta)} className="text-xs px-2.5 py-1 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50">+ Adicionar serviço</button>
+                </div>
+                <div className="max-h-[420px] overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="text-neutral-400 text-left sticky top-0 bg-white">
+                      <tr>
+                        <th className="p-2">Serviço</th>
+                        <th className="p-2">Permanência</th>
+                        <th className="p-2">Valor mensal</th>
+                        <th className="p-2">Desconto atual (€)</th>
+                        <th className="p-2">Tarifário atual</th>
+                        <th className="p-2">Ação</th>
+                        <th className="p-2">Novo tarifário</th>
+                        <th className="p-2">Novo valor mensal</th>
+                        <th className="p-2"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {doConta.map((l) => {
+                        const novoTar = mostraNovoTarifarioProposta(l);
+                        const novoVal = mostraNovoValorProposta(l);
+                        const apagar = l.acao === "Apagar serviço";
+                        return (
+                          <tr key={l.key} className={`border-t border-neutral-100 ${apagar ? "bg-neutral-50 opacity-60" : ""}`}>
+                            <td className="p-2">
+                              {l.manual
+                                ? <input value={l.servico} onChange={(e) => atualizarLinha(l.key, { servico: e.target.value })} placeholder="Serviço" className="w-40 px-2 py-1 rounded border border-neutral-300 text-xs" />
+                                : <span className="font-medium">{l.servico || "—"}</span>}
+                            </td>
+                            <td className="p-2 text-neutral-500">{l.fim ? `${formatarDataIsoPT(l.fim)} (${diasEntreDatasIso(new Date().toISOString().slice(0, 10), l.fim)}d)` : "—"}</td>
+                            <td className="p-2"><input value={l.valorMensal} onChange={(e) => atualizarLinha(l.key, { valorMensal: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
+                            <td className="p-2"><input value={l.desconto} onChange={(e) => atualizarLinha(l.key, { desconto: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
+                            <td className="p-2">
+                              {l.manual
+                                ? <input value={l.produtoAtual} onChange={(e) => atualizarLinha(l.key, { produtoAtual: e.target.value })} placeholder="Produto atual" className="w-36 px-2 py-1 rounded border border-neutral-300 text-xs" />
+                                : <span>{l.produtoAtual || "—"}</span>}
+                            </td>
+                            <td className="p-2">
+                              <select value={l.acao} onChange={(e) => atualizarLinha(l.key, { acao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs">
+                                {ACOES_PROPOSTA.map((a) => <option key={a} value={a}>{a}</option>)}
+                              </select>
+                            </td>
+                            <td className="p-2">
+                              {novoTar
+                                ? <input value={l.novoTarifario} onChange={(e) => atualizarLinha(l.key, { novoTarifario: e.target.value })} placeholder="Nome do novo tarifário" className="w-44 px-2 py-1 rounded border border-neutral-300 text-xs" />
+                                : <span className="text-neutral-300">—</span>}
+                            </td>
+                            <td className="p-2">
+                              {novoVal
+                                ? <input value={l.novoValor} onChange={(e) => atualizarLinha(l.key, { novoValor: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" />
+                                : <span className="text-neutral-300">—</span>}
+                            </td>
+                            <td className="p-2">
+                              <button onClick={() => removerLinha(l.key)} title="Retirar da proposta" className="text-neutral-400 hover:text-red-600">✕</button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {doConta.length === 0 && (
+                        <tr><td colSpan={9} className="p-4 text-center text-neutral-400">Sem serviços. Usa "+ Adicionar serviço".</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
+
+          <div className="bg-white border border-neutral-200 rounded-lg p-4 flex items-center gap-3 flex-wrap">
+            <button onClick={gravarExcel} disabled={!podeGerar} className="text-sm px-3.5 py-2 rounded-md bg-neutral-900 text-white font-medium hover:bg-neutral-800 disabled:opacity-40">
+              Gravar proposta (Excel)
+            </button>
+            <button onClick={apresentarPdf} disabled={!podeGerar} className="text-sm px-3.5 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-40">
+              Apresentar proposta (PDF)
+            </button>
+            <div className="text-sm text-neutral-600 ml-auto">Total mensal na proposta: <b>{formatEuro(total)}</b></div>
+          </div>
         </div>
       )}
 
-      {mostraConteudo && (
-        <>
-          <button onClick={limpar} className="text-xs text-neutral-500 hover:text-neutral-800">✕ Limpar seleção</button>
-
-          <div className="border border-neutral-200 rounded-lg bg-white p-4">
-            {ehNovo ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs text-neutral-500 mb-1 block">Nome / Entidade</label>
-                  <input value={novoBase.e} onChange={(e) => setNovoBase({ ...novoBase, e: e.target.value })}
-                    className="w-full px-3 py-2 rounded-md border border-neutral-200 text-sm" />
-                </div>
-                <div>
-                  <label className="text-xs text-neutral-500 mb-1 block">NIF *</label>
-                  <input value={novoBase.n} onChange={(e) => setNovoBase({ ...novoBase, n: e.target.value })}
-                    className={`w-full px-3 py-2 rounded-md border text-sm ${erroNif ? "border-red-400" : "border-neutral-200"}`} />
-                  {erroNif && <div className="text-xs text-red-600 mt-1">{erroNif}</div>}
-                </div>
-                <div className="sm:col-span-2 border-t border-neutral-100 pt-3">
-                  <div className="text-xs text-neutral-500 mb-2">
-                    Cliente novo, sem faturas/histórico — gera um Excel-questionário em branco para preencheres fora do dashboard (Tipo de serviço, Quantidade, Produto, Valor) e depois voltares a anexar aqui em baixo.
-                  </div>
-                  <button onClick={gerarQuestionarioClick} disabled={aGerarQuestionario}
-                    className="text-xs px-3 py-1.5 rounded-md border border-neutral-300 text-neutral-700 hover:border-neutral-400 disabled:opacity-60"><Icone nome="documento" className="w-4 h-4 shrink-0" />
-                    {aGerarQuestionario ? "A gerar…" : "Gerar Excel-questionário em branco"}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-base font-medium">{clienteAtual.e}</div>
-                    <div className="text-sm text-neutral-500 mt-0.5">NIF {clienteAtual.n} · {clienteAtual.t}</div>
-                  </div>
-                  {clienteAtual.origem === "prospect" && (
-                    <span className="text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">Prospect</span>
-                  )}
-                </div>
-                {clienteAtual.origem === "prospect" ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
-                    <div className="text-center p-2 rounded-md bg-neutral-50"><div className="text-sm font-medium">{clienteAtual.colab ?? "—"}</div><div className="text-[10px] text-neutral-400">Colaboradores</div></div>
-                    <div className="text-center p-2 rounded-md bg-neutral-50"><div className="text-sm font-medium">{clienteAtual.cidade || "—"}</div><div className="text-[10px] text-neutral-400">Cidade</div></div>
-                    <div className="text-center p-2 rounded-md bg-neutral-50"><div className="text-sm font-medium">{clienteAtual.estado || "—"}</div><div className="text-[10px] text-neutral-400">Estado</div></div>
-                    <div className="text-center p-2 rounded-md bg-neutral-50"><div className="text-sm font-medium">{clienteAtual.contacto || "—"}</div><div className="text-[10px] text-neutral-400">Contacto</div></div>
-                  </div>
-                ) : (
-                  <StatsCliente c={clienteAtual} />
-                )}
-              </>
-            )}
-          </div>
-
-          {/* AÇÕES PRINCIPAIS — Analisar/Word/PDF sempre visíveis no topo, sem
-              percorrer o ecrã todo (decisão explícita do utilizador, 2026-09-14). O
-              resto (upload de faturas, gráficos, Análise Rápida) fica abaixo. */}
-          <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
-            <div className="text-xs font-medium text-neutral-400">AÇÕES PRINCIPAIS</div>
-
-            {!ehNovo && temFaturas === null && (
-              <div>
-                <div className="text-xs font-medium text-neutral-400 mb-2">Este cliente/prospect tem faturas ou histórico?</div>
-                <div className="flex gap-2">
-                  <button onClick={() => setTemFaturas("sim")} className="text-xs px-3 py-1.5 rounded-md bg-neutral-900 text-white font-medium hover:bg-neutral-800">📎 Tenho faturas</button>
-                  <button onClick={() => setTemFaturas("nao")} className="text-xs px-3 py-1.5 rounded-md border border-neutral-300 text-neutral-700 hover:border-neutral-400">🚫 Não tenho faturas</button>
-                </div>
-              </div>
-            )}
-
-            {seguimentoErro && (
-              <div className="border border-amber-300 bg-amber-50 rounded-lg p-3 text-xs text-amber-900 space-y-1.5">
-                <div>⚠ {seguimentoErro}</div>
-                {seguimentoResultado && seguimentoResultado.incompletas.length > 0 && (
-                  <div className="space-y-0.5 pt-1 border-t border-amber-200">
-                    {seguimentoResultado.incompletas.map((l) => (
-                      <div key={l.numero}>· {l.numero} — {l.tarifarioProposto || "(tarifário proposto por preencher)"}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="flex flex-wrap gap-2">
-              <button onClick={analisarFaturasAnexadas} disabled={aAnalisar || !temFaturaParaAnalisar}
-                title={temFaturaParaAnalisar ? "" : (temFaturas === "nao" ? "Não aplicável — cliente/prospect sem faturas" : "Anexa faturas mais abaixo primeiro")}
-                className="text-sm px-3.5 py-2 rounded-md bg-neutral-900 text-white font-medium hover:bg-neutral-800 disabled:opacity-40 whitespace-nowrap"><Icone nome="lupa" className="w-4 h-4 shrink-0" />
-                {aAnalisar ? "A analisar…" : "Analisar faturas anexadas"}
-              </button>
-
-              <button onClick={darSeguimentoClick} disabled={aDarSeguimento}
-                className="text-sm border border-neutral-300 text-neutral-700 px-3.5 py-2 rounded-md hover:border-neutral-400 disabled:opacity-50 whitespace-nowrap">
-                {aDarSeguimento ? "A ler Excel…" : "Gerar Word"}
-              </button>
-
-              {analise && (
-                <button onClick={descarregarExcelAgoraClick} disabled={aDescarregarAgora}
-                  title="Descarrega já o Excel gerado a partir da análise atual — não depende da nuvem nem da pasta do projeto"
-                  className="text-sm border border-neutral-300 text-neutral-700 px-3.5 py-2 rounded-md hover:border-neutral-400 disabled:opacity-50 whitespace-nowrap"><Icone nome="download" className="w-4 h-4 shrink-0" />
-                  {aDescarregarAgora ? "A gerar…" : "Descarregar Excel agora"}
-                </button>
-              )}
-
-              {wordJaGerado || wordAnexado ? (
-                <a href={linkGerarPdf()}
-                  className="text-sm bg-red-600 text-white px-3.5 py-2 rounded-md hover:bg-red-700 whitespace-nowrap">
-                  🤖 Gerar PDF
-                </a>
-              ) : (
-                <button disabled title="Gera primeiro o Word (ou arrasta um Word já existente para a caixa abaixo)"
-                  className="text-sm border border-neutral-200 text-neutral-400 px-3.5 py-2 rounded-md whitespace-nowrap cursor-not-allowed">
-                  Gerar PDF
-                </button>
-              )}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-              {linkClaudeCode && (
-                <a href={linkClaudeCode} className="text-red-600 hover:underline whitespace-nowrap">
-                  ⌨️ Abrir no Terminal (reserva)
-                </a>
-              )}
-              {seguimentoResultado && !seguimentoErro && (
-                <span className="text-neutral-400">Lido de "{seguimentoResultado.ficheiro}" — {seguimentoResultado.linhas.length} linha(s).</span>
-              )}
-            </div>
-
-            {/* Caixa 1 — Excel de decisão (2026-09-20, simplificado 2026-09-21): é
-                assim que Augusto edita à mão as colunas Ação/Tarifário/Mensalidade
-                antes de "Gerar Word". Sem procura automática nenhuma — só o que for
-                arrastado para aqui. Visível sempre, com ou sem login. */}
-            <CaixaArrastarFicheiro titulo="📎 CAIXA 1 — EXCEL DE DECISÃO" accept=".xlsx"
-              ficheiro={excelAnexadoLocal} mensagemAnexado='anexado — pronto para "Gerar Word".'
-              placeholder='Arrasta o Excel aqui (já editado com as decisões em "Novos Tarifários") — usa "⬇️ Descarregar Excel agora" acima para o obter primeiro.'
-              aAnexar={aReenviarExcelNuvem} aviso={avisoExcelNuvem} onFicheiro={reenviarExcelNuvemClick} />
-
-            {/* Caixa 2 — Word da proposta (2026-09-21, novo): opcional — só é preciso
-                arrastar aqui se Augusto tiver feito ajustes ao Word depois de o rever;
-                sem arrastar, "Gerar PDF" usa o Word que acabou de ser gerado no passo
-                anterior (mesma conversa/Terminal, ver linkGerarPdf). */}
-            <CaixaArrastarFicheiro titulo="📎 CAIXA 2 — WORD DA PROPOSTA (opcional)" accept=".docx"
-              ficheiro={wordAnexado} mensagemAnexado='anexado — "Gerar PDF" vai usar exatamente este ficheiro.'
-              placeholder='Depois de reveres o Word gerado (Finder/Word), só precisas de o arrastar para aqui se tiveres feito ajustes antes de "Gerar PDF".'
-              aAnexar={false} aviso="" onFicheiro={(f) => setWordAnexado({ nome: f.name, file: f })} />
-
-            <details className="text-[11px] text-neutral-400">
-              <summary className="cursor-pointer select-none hover:text-neutral-600">Caminho da pasta do projeto no disco</summary>
-              <input value={caminhoProjeto} onChange={(e) => setCaminhoProjeto(e.target.value)}
-                placeholder="/Users/augustograca/Desktop/Dashboard Vodafone Business"
-                className="w-full mt-1.5 px-2.5 py-1.5 rounded-md border border-neutral-200 text-xs" />
-            </details>
-          </div>
-
-          {!ehNovo && temFaturas === "nao" && (
-            <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-medium text-neutral-400">SEM FATURAS — anexos de apoio e observações</div>
-                <button onClick={() => setTemFaturas(null)} className="text-xs text-neutral-500 hover:underline">mudar</button>
-              </div>
-
-              <div>
-                <div className="text-xs text-neutral-500 mb-2">
-                  Anexos opcionais (capturas do extrato, notas, etc.) — sem OCR nem processamento automático, ficam só como referência visual.
-                </div>
-                <DropzoneFaturas onFicheiros={(fs) => anexarFicheiros(fs, "documento")} />
-                {aAnexar && <div className="text-xs text-neutral-400 mt-1">A anexar…</div>}
-                {faturas.length > 0 && (
-                  <div className="space-y-1.5 mt-2">
-                    {faturas.map((f) => (
-                      <div key={f.id} className="flex items-center justify-between gap-2 bg-neutral-50 rounded-md px-3 py-2 text-xs">
-                        <button onClick={() => verFatura(f)} className="text-left flex-1 hover:underline">
-                          📎 {f.nome} <span className="text-neutral-400">({formatarTamanhoFicheiro(f.tamanho)})</span>
-                        </button>
-                        <button onClick={() => removerFatura(f.id)} className="text-neutral-400 hover:text-red-600">✕</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <label className="text-xs text-neutral-500 mb-1 block">
-                  Observações — o que sabes sobre este cliente: serviços atuais, o que pretende, pontos importantes
-                </label>
-                <textarea value={(analise && analise.observacaoManual) || ""} onChange={(e) => mudarAnalise("observacaoManual", e.target.value)}
-                  rows={6} placeholder="Descreve aqui o que já souberes sobre o cliente..."
-                  className="w-full px-3 py-2 rounded-md border border-neutral-200 text-sm focus:outline-none focus:border-red-600 resize-y" />
-                <div className="text-[11px] text-neutral-400 mt-1">Este texto fica sempre incluído, bem visível, no Excel gerado abaixo.</div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-neutral-100">
-                <button onClick={gerarExcelClick} disabled={aGerarExcel || !analise}
-                  className="text-xs px-3 py-1.5 rounded-md border border-neutral-300 text-neutral-700 hover:border-neutral-400 disabled:opacity-60"><Icone nome="grafico" className="w-4 h-4 shrink-0" />
-                  {aGerarExcel ? "A gerar…" : "Gerar Excel (opcional)"}
-                </button>
-              </div>
-              <div className="text-[11px] text-neutral-400 bg-neutral-50 rounded-md px-3 py-2">
-                Decide item a item dentro de cada bloco <strong>▶ Nº/Serviço</strong> na folha <strong>Novos Tarifários</strong>. Para um serviço novo, usa um dos blocos <strong>▶ NOVO-1</strong> a <strong>▶ NOVO-5</strong> já preparados; depois guarda o Excel, arrasta-o para a <strong>Caixa 1</strong> acima e clica em <strong>Gerar Word</strong>.
-              </div>
-            </div>
-          )}
-
-          {(ehNovo || temFaturas === "sim") && (
-            <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-medium text-neutral-400">
-                  {ehNovo ? "ANEXOS (questionário preenchido, notas, etc.)" : "FATURAS E DOCUMENTOS DE APOIO — opcional"}
-                </div>
-                {!ligacaoPasta.pronto && <div className="text-[11px] text-neutral-400">liga a pasta do projeto no aviso do topo para guardar cópias aqui</div>}
-              </div>
-
-              <AnexosFaturas ehNovo={ehNovo} nifAtivo={nifAtivo} aAnexar={aAnexar} anexarFicheiros={anexarFicheiros}
-                faturas={faturas} verFatura={verFatura} removerFatura={removerFatura} analise={analise} />
-
-              {analise && resumoPorCategoria.length > 0 && (
-                <ResumoPorCategoria resumoPorCategoria={resumoPorCategoria} evolucaoTotalMensal={evolucaoTotalMensal}
-                  tarifariosExpandidos={tarifariosExpandidos} toggleTarifarioExpandido={toggleTarifarioExpandido} />
-              )}
-
-              {analise && (
-                <AnaliseRapidaForm analise={analise} mudarAnalise={mudarAnalise} toggleServicoAtual={toggleServicoAtual} />
-              )}
-            </div>
-          )}
-
-        </>
+      {pdfHtml && (
+        <iframe ref={iframePdfRef} srcDoc={pdfHtml} title="Proposta PDF"
+          style={{ position: "absolute", width: "1px", height: "1px", opacity: 0, left: "-9999px", pointerEvents: "none" }}
+          onLoad={() => { if (pedidoPdf && iframePdfRef.current && iframePdfRef.current.contentWindow) { iframePdfRef.current.contentWindow.print(); setPedidoPdf(false); } }} />
       )}
     </div>
   );
 }
+
 
 /* ================= PONTO: PROSPETOS ================= */
 
