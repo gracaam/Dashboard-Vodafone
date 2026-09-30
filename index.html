@@ -119,30 +119,50 @@ function useFirebaseAuthUser() {
 // dashboard — useAssuntos) — nunca escreve diretamente no JSON/Firestore, para
 // herdar a proteção contra condições de corrida que essa função já tem.
 //
-// Modo local (nuvemAtiva=false, comportamento original, inalterado): só lê
-// processado==false, e um documento só é marcado processado:true DEPOIS de
-// adicionar() correr — se isso falhar, fica pendente e é tentado de novo na próxima
-// sincronização (nunca perdido).
+// Só lê processado==false, em modo local E em modo nuvem, e um documento só é marcado
+// processado:true DEPOIS de adicionar() correr — se isso falhar, fica pendente e é
+// tentado de novo na próxima sincronização (nunca perdido).
 //
-// Modo nuvem (2026-09-20, achado real): processado:true deixou de significar
-// "arquivado" — significa só "algum browser já importou este documento", e antes de
-// Assuntos ter migração própria para o Firestore, esse "algum browser" podia ser um
-// que só guardava em localStorage (ex. site público, sem pasta ligada), tornando o
-// assunto invisível em qualquer outro sítio apesar de processado:true. Por isso, em
-// modo nuvem, ignora `processado` por completo e usa o próprio id do documento do
-// inbox como id do assunto — nunca duplica (idempotente: só grava quem ainda não
-// existir na coleção "assuntos", via `idsExistentes`), recuperando também os que já
-// estavam processado:true mas nunca chegaram a um sítio duradouro.
-async function sincronizarAssuntosInbox(adicionar, nuvemAtiva, idsExistentes) {
+// 🐛 Histórico (corrigido 2026-09-30): em modo nuvem chegou a ignorar-se `processado`
+// de propósito (2026-09-20) para recuperar documentos marcados processado:true por um
+// browser que só guardava em localStorage (antes de os Assuntos terem migração para o
+// Firestore). Isso fazia um assunto APAGADO voltar a aparecer: ao apagar removia-se o
+// assunto, mas o documento de origem em assuntos_inbox continuava lá e era
+// reimportado a cada sincronização. Agora processado:true volta a significar "já
+// importado" e é respeitado — a recuperação de assuntos que só existam em
+// localStorage continua assegurada pelo botão "Sincronizar assuntos locais em falta
+// para a nuvem" (sincronizarLocalEmFaltaParaNuvem).
+// Impressão digital do conteúdo de um assunto — usada só para reconhecer um assunto
+// importado ANTES da migração para a nuvem, que ficou com um id gerado (diferente do id
+// do documento em assuntos_inbox) e por isso não podia ser identificado pelo id. Campos
+// estáveis à edição do cartão (cliente/data/importância; o comentário é incluído para
+// nunca casar dois assuntos genuinamente diferentes).
+function impressaoAssunto(a) {
+  return [a.cliente || "", a.comentario || "", a.dataPedido || "", a.importancia || ""].join("\u0001");
+}
+
+async function sincronizarAssuntosInbox(adicionar, atualizar, nuvemAtiva, assuntosExistentes) {
   if (!firebaseAuth.currentUser) return { importados: 0 };
   try {
-    const query = nuvemAtiva
-      ? firebaseDb.collection("assuntos_inbox")
-      : firebaseDb.collection("assuntos_inbox").where("processado", "==", false);
+    const query = firebaseDb.collection("assuntos_inbox").where("processado", "==", false);
     const snap = await query.get();
+    // 🐛 Corrigido (2026-09-30): em modo nuvem, para além do `id`, reconhece assuntos já
+    // importados pelo `inboxId` (link explícito) e pela impressão digital do conteúdo
+    // (legado sem inboxId). Sem isto, um assunto importado antes da migração (id gerado,
+    // diferente do id do documento em assuntos_inbox) era reimportado como duplicado a
+    // cada sincronização — e, ao apagar, voltava a aparecer (o documento de origem nunca
+    // era removido, porque o remover só apagava assuntos_inbox/{id} com o id errado).
+    const idsExistentes = new Set();
+    const inboxIdsExistentes = new Set();
+    const porImpressao = new Map();
+    for (const a of (assuntosExistentes || [])) {
+      idsExistentes.add(a.id);
+      if (a.inboxId) inboxIdsExistentes.add(a.inboxId);
+      const imp = impressaoAssunto(a);
+      if (!porImpressao.has(imp)) porImpressao.set(imp, a);
+    }
     let importados = 0;
     for (const doc of snap.docs) {
-      if (nuvemAtiva && idsExistentes.has(doc.id)) continue;
       const d = doc.data();
       const registo = {
         cliente: d.cliente || "",
@@ -151,8 +171,21 @@ async function sincronizarAssuntosInbox(adicionar, nuvemAtiva, idsExistentes) {
         comentario: d.comentario || "",
         dataPedido: d.dataPedido || new Date().toISOString().slice(0, 10),
         dataPrevista: "",
+        inboxId: doc.id,
       };
-      if (nuvemAtiva) registo.id = doc.id;
+      if (nuvemAtiva) {
+        if (idsExistentes.has(doc.id) || inboxIdsExistentes.has(doc.id)) continue;
+        // Legado: já existe um assunto com o mesmo conteúdo, mas sem link para este
+        // documento (foi criado antes da migração). Liga-o (`inboxId`) em vez de criar
+        // um duplicado — e o documento deixa de ser reimportado.
+        const legado = porImpressao.get(impressaoAssunto(registo));
+        if (legado) {
+          if (!legado.inboxId) await atualizar(legado.id, { inboxId: doc.id });
+          if (!d.processado) await doc.ref.update({ processado: true });
+          continue;
+        }
+        registo.id = doc.id;
+      }
       await adicionar(registo);
       if (!d.processado) await doc.ref.update({ processado: true });
       importados++;
@@ -1429,10 +1462,9 @@ function escaparHtml(s) {
 // pela categoria dominante dos seus próprios tarifários). Chart.js só carregado AQUI
 // dentro (CDN, mesmo padrão de dependência externa já usado para pdf.js/Babel) — o
 // dashboard em si nunca precisou de gráficos.
-function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise, avisos) {
+function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
   const nomeUpper = escaparHtml(nomeCliente.toUpperCase());
   const kpis = calcularKpisEInsights(contas);
-  const avisosLista = avisos || [];
 
   const contasInfo = contas.map((c) => {
     const periodoRecente = c.periodos[c.periodos.length - 1];
@@ -1658,7 +1690,6 @@ function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise, avisos) {
   </div>
 
   <div id="v-geral">
-    ${avisosLista.length ? `<div class="alerta"><div class="tt">A confirmar</div>${avisosLista.map((a) => `⚠ ${escaparHtml(a)}`).join("<br>\n      ")}</div>` : ""}
     <div class="kpis">
       <div class="card kpi accent"><div class="lbl">Gasto mensal · ${escaparHtml(kpis.mesRecenteLabel || "")}</div><div class="val">${kpis.gastoMesRecente !== null ? formatEuro(kpis.gastoMesRecente) : "—"}</div><div class="delta">${contasInfo.map((c) => `${escaparHtml(c.rotulo)} <b>${c.periodoRecente && c.periodoRecente.rubricas.totais ? formatEuro(c.periodoRecente.rubricas.totais.total) : "—"}</b>`).join(" + ")}</div></div>
       <div class="card kpi"><div class="lbl">Média mensal · ${kpis.totalPorMes.length} mês(es)</div><div class="val">${kpis.mediaMensal !== null ? formatEuro(kpis.mediaMensal) : "—"}</div></div>
@@ -1869,10 +1900,11 @@ function gerarArgumentosReuniao(nomeCliente, contas, dataAnalise) {
     if (esgotados.length) {
       linhas.push(`- **${esgotados.length} acesso(s) esgotaram o plafond de dados** no mês mais recente: ${esgotados.map((d) => d.numero).join(", ")}.`);
     }
-    if (!periodoRecente || !periodoRecente.reconciliacao || periodoRecente.reconciliacao.confirmado) {
+    // Aviso de reconciliação removido daqui (2026-09-30, pedido de Augusto: não quer
+    // este texto). O estado de reconciliação continua visível na coluna ✓/⚠ de "Ver
+    // detalhes técnicos" e no dropdown "a confirmar" do painel.
+    if (periodoRecente && periodoRecente.reconciliacao && periodoRecente.reconciliacao.confirmado) {
       linhas.push(`- Valores reconciliados matematicamente, sem divergências.`);
-    } else {
-      linhas.push(`- ⚠ Há valores desta conta que não reconciliaram automaticamente — confirmar manualmente antes da reunião (ver o painel HTML, coluna de estado).`);
     }
     linhas.push("");
   });
@@ -7421,7 +7453,7 @@ function BarrasEvolucao({ pontos }) {
 }
 
 function AnaliseFaturasView() {
-  const { todosClientes, obterExtras } = useClientesNovos();
+  const { todosClientes, obterExtras, definirExtras } = useClientesNovos();
   // Fase 3, Passo 2 (2026-09-20) — migração completa para a nuvem (Storage + cache em
   // Firestore), mesmo padrão de confirmação explícita já usado em Clientes/Prospetos/
   // Negócios. ⚠️ Dados sensíveis de clientes — só depois de login + confirmação.
@@ -7465,10 +7497,9 @@ function AnaliseFaturasView() {
   const [avisoNuvemFalhou, setAvisoNuvemFalhou] = useState("");
 
   const clienteAtual = useMemo(() => todosClientes.find((c) => c.n === nifSelecionado) || null, [nifSelecionado, todosClientes]);
-  // Redesign (2026-09-26): cartões + gráfico + email lado a lado. Gerar o email
-  // finaliza o ciclo (limpa resumo/faturas — ver finalizarAposExportar), por isso os
-  // números mostrados vêm de uma cópia só de apresentação, guardada enquanto o
-  // resumo existe e limpa apenas ao mudar de cliente. Nunca é gravada em lado nenhum.
+  // Redesign (2026-09-26): cartões + gráfico + email lado a lado. Os números mostrados
+  // vêm de uma cópia só de apresentação, guardada enquanto o resumo existe e limpa
+  // apenas ao mudar de cliente. Nunca é gravada em lado nenhum.
   const [contasVisiveis, setContasVisiveis] = useState(null);
   useEffect(() => { if (resumo && resumo.contas.length) setContasVisiveis(resumo.contas); }, [resumo]);
   const kpisFatura = useMemo(() => (contasVisiveis ? calcularKpisEInsights(contasVisiveis) : null), [contasVisiveis]);
@@ -7519,7 +7550,7 @@ function AnaliseFaturasView() {
 
   const selecionarCliente = (nif) => {
     setAvisoSucesso(""); setNifSelecionado(nif); setResumo(null); setAnalisadoEm(null); setAnaliseVersaoAntiga(false);
-    setContasVisiveis(null); setMostrarEmail(false);
+    setContasVisiveis(null); setMostrarEmail(false); setMostrarAvisos(false);
     setMostrarArgumentos(false); setTextoArgumentos(""); // nunca mostrar os argumentos de um cliente anterior
     if (nif) { carregarFaturas(nif); carregarAnalisePersistida(nif); } else setFaturas([]);
   };
@@ -7634,28 +7665,30 @@ function AnaliseFaturasView() {
   // Painel executivo (Fase D, estilo Cliente C) — a MESMA função geradora
   // (gerarHtmlAnaliseFaturas) serve tanto a vista principal do dashboard (iframe
   // srcDoc, ver render abaixo) como o ficheiro exportado — nunca duas versões da
-  // lógica de apresentação (decisão explícita do utilizador, 2026-09-17). O aviso
-  // de reconciliação (resumo.avisos) é passado ao gerador para aparecer sempre
-  // dentro do próprio painel (banner "A confirmar" no topo), nunca escondido só
-  // porque a vista deixou de ser a tabela técnica.
+  // lógica de apresentação (decisão explícita do utilizador, 2026-09-17). Os avisos
+  // de reconciliação (resumo.avisos) JÁ NÃO entram no painel gerado (2026-09-30,
+  // pedido de Augusto: não devem ser impressos nem no HTML exportado) — ficam só no
+  // dashboard, num dropdown "A confirmar" colapsado por defeito (ver render abaixo).
   const dataAnalise = useMemo(() => new Date(), [resumo]);
   const htmlPainel = useMemo(() => (
     resumo && resumo.contas.length && clienteAtual
-      ? gerarHtmlAnaliseFaturas(clienteAtual.e, resumo.contas, dataAnalise, resumo.avisos)
+      ? gerarHtmlAnaliseFaturas(clienteAtual.e, resumo.contas, dataAnalise)
       : null
   ), [resumo, clienteAtual, dataAnalise]);
   const iframeRef = React.useRef(null);
   const [alturaIframe, setAlturaIframe] = useState(600);
   const [detalhesTecnicos, setDetalhesTecnicos] = useState(false);
+  // Avisos de reconciliação ("A confirmar") — dropdown colapsado por defeito (2026-09-30).
+  const [mostrarAvisos, setMostrarAvisos] = useState(false);
   const [aImprimir, setAImprimir] = useState(false);
   const [mostrarArgumentos, setMostrarArgumentos] = useState(false);
   const [textoArgumentos, setTextoArgumentos] = useState("");
-  // Item 4 (2026-09-25, pedido explícito do utilizador) — email de análise mensal para
-  // o cliente. `emailDestino` é sempre escrito à mão (nunca preenchido sozinho —
-  // AnaliseFaturasView não tem acesso aos "extras" de Clientes, que vivem só dentro de
-  // ClientesView). Nunca envia automaticamente — só prepara assunto/corpo para copiar
-  // e colar no cliente de email de sempre (Outlook), decisão explícita de manter simples
-  // nesta 1ª versão (sem integração de conta Microsoft).
+  // Item 4 (2026-09-25) — email de análise mensal para o cliente. Revisto (2026-09-30,
+  // pedido explícito do utilizador): o "Para" é preenchido com o email da ficha do
+  // cliente quando ele já existe (extras de Clientes) e, se Augusto o escrever, fica
+  // guardado nessa ficha ao gravar para o Outlook — nunca se inventa um endereço.
+  // Nunca envia automaticamente: gera um ficheiro `.eml` (ver gravarOutlookAnalise)
+  // com a assinatura, para abrir no Outlook e rever antes de enviar.
   const [emailDestino, setEmailDestino] = useState("");
   const [mostrarEmail, setMostrarEmail] = useState(false);
   const [assuntoEmail, setAssuntoEmail] = useState("");
@@ -7667,71 +7700,36 @@ function AnaliseFaturasView() {
   // colateral automático de "Analisar faturas" (essa continua só a gravar o cache
   // interno em dados-privados/, ver analisarClick acima — coisas diferentes).
   //
-  // Exportar = "finalizar" a análise deste cliente — decisão explícita do utilizador
-  // (2026-09-17, SUBSTITUI a decisão anterior de que as faturas anexadas deviam
-  // persistir sempre independentemente da análise): clicar em QUALQUER UM dos 2
-  // botões de exportação limpa as faturas anexadas deste cliente (repositório
-  // faturasAnalise, só este NIF — nunca outros clientes) E a análise gravada
-  // (nuvem), deixando a vista pronta para um ciclo novo (ex. mês seguinte).
-  // Idempotente por construção — nunca precisa de um "já limpei, não repetir": apagar
-  // um registo já apagado é sempre um no-op seguro, por isso clicar os 2
-  // botões em sequência (ex. Imprimir depois Argumentos) nunca dá erro na 2ª limpeza.
-  const finalizarAposExportar = async () => {
-    const nif = nifSelecionado;
-    if (nuvemAtivaAnalise) {
-      const faturasDoCliente = await listarFaturasAnaliseNuvem(nif);
-      for (const f of faturasDoCliente) await removerFaturaAnaliseAnexadaNuvem(f.id);
-      // Opção B (2026-09-29, pedido explícito de Augusto): a análise de faturas feita
-      // tem de continuar a contar para a Campanha por Produto e "Produtos para este
-      // cliente" MESMO depois de exportar (ex.: já deu origem a uma proposta que o
-      // cliente não aceitou) — por isso a cache deixa de ser apagada e passa a ser
-      // marcada `finalizado` (ver carregarAnalisePersistida, que a ignora na vista).
-      // Guarda sempre o `resumo` atual; sem resumo em ecrã não toca na cache (nunca
-      // apaga uma análise finalizada anterior por engano — os 3 botões exigem resumo).
-      if (resumo) await guardarAnaliseFaturasCacheNuvem(nif, {
-        analisadoEm, versaoLogica: VERSAO_LOGICA_ANALISE_FATURAS, resumo, finalizado: true,
-      });
-    } else {
-      const faturasDoCliente = await listarFaturasAnaliseDoCliente(nif);
-      for (const f of faturasDoCliente) await removerFaturaAnaliseAnexada(f.id);
-    }
-    setFaturas([]);
-    setResumo(null);
-    setAnalisadoEm(null);
-    setAnaliseVersaoAntiga(false);
-  };
-
+  // Revisto (2026-09-30, pedido explícito de Augusto): os botões de exportação
+  // (Imprimir/PDF, Argumentos, Email) JÁ NÃO finalizam a análise. Antes, cada um limpava
+  // as faturas anexadas e o resumo, deixando a vista vazia — o que obrigava a repetir a
+  // análise para continuar a trabalhar. Agora a análise e as faturas mantêm-se sempre em
+  // ecrã; só "remover fatura" (✕), trocar de cliente ou uma nova "Analisar faturas"
+  // mudam alguma coisa. A cache na nuvem continua a ser gravada por "Analisar faturas"
+  // (sem `finalizado`), por isso a Campanha por Produto / "Produtos para este cliente"
+  // continuam a usar estes dados.
   const imprimirClick = async () => {
     if (!htmlPainel) return;
     setAImprimir(true);
-    const nomeCliente = clienteAtual.e;
     const sufixoData = dataISOCurta(dataAnalise);
     const nomeFicheiroHtml = `_Analise_Faturas_${sufixoData}.html`;
     let aviso;
     if (nuvemAtivaAnalise) {
       const ok = await guardarExportAnaliseFaturasNuvem(nifSelecionado, nomeFicheiroHtml, htmlPainel, "text/html");
       aviso = ok
-        ? `Painel gravado na nuvem (${nomeFicheiroHtml}) — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`
-        : `Não foi possível gravar o painel na nuvem — faturas e análise deste cliente limpas na mesma.`;
+        ? `Painel gravado na nuvem (${nomeFicheiroHtml}). Abre-se o diálogo de impressão — a análise mantém-se em ecrã.`
+        : `Não foi possível gravar o painel na nuvem. Abre-se na mesma o diálogo de impressão — a análise mantém-se em ecrã.`;
     } else {
       const r = descarregarFicheiroTexto(nomeFicheiroHtml, htmlPainel, "text/html");
-      aviso = `Painel descarregado: ${r.nomeFicheiro} — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`;
+      aviso = `Painel descarregado: ${r.nomeFicheiro}. Abre-se o diálogo de impressão — a análise mantém-se em ecrã.`;
     }
     setAvisoSucesso(aviso);
     setAImprimir(false);
     setTimeout(() => setAvisoSucesso(""), 8000);
-    // window.print() é SÍNCRONO no Chrome — bloqueia o separador até o utilizador
-    // fechar o diálogo, o que só se descobriu ao testar (nada depois de print()
-    // corria enquanto o diálogo estivesse aberto). Por isso finalizar/limpar tem de
-    // vir ANTES do print(), nunca depois — senão a limpeza fica pendente de Augusto
-    // fechar o diálogo (ou nunca acontece, se ele cancelar de forma a não disparar o
-    // resto do código). As chamadas setState aqui só se refletem no DOM no próximo
-    // render (React agrupa-as) — o iframe continua montado no momento em que
-    // print() é chamado a seguir, por isso a impressão continua a mostrar o
-    // conteúdo certo.
-    await finalizarAposExportar();
     // Diálogo de impressão do browser sobre o MESMO conteúdo já em ecrã (iframe) —
     // nunca um ficheiro/janela à parte, para nunca divergir do que Augusto está a ver.
+    // window.print() é SÍNCRONO no Chrome (bloqueia o separador até o diálogo fechar),
+    // por isso fica como última operação — já não há limpeza nenhuma a fazer a seguir.
     if (iframeRef.current && iframeRef.current.contentWindow) iframeRef.current.contentWindow.print();
   };
 
@@ -7747,29 +7745,20 @@ function AnaliseFaturasView() {
     if (nuvemAtivaAnalise) {
       const ok = await guardarExportAnaliseFaturasNuvem(nifSelecionado, nomeFicheiroMd, md, "text/markdown");
       aviso = ok
-        ? `Argumentos gravados na nuvem (${nomeFicheiroMd}) — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`
-        : `Não foi possível gravar os argumentos na nuvem — faturas e análise deste cliente limpas na mesma.`;
+        ? `Argumentos gravados na nuvem (${nomeFicheiroMd}). A análise mantém-se em ecrã.`
+        : `Não foi possível gravar os argumentos na nuvem. A análise mantém-se em ecrã.`;
     } else {
       const r = descarregarFicheiroTexto(nomeFicheiroMd, md, "text/markdown");
-      aviso = `Argumentos descarregados: ${r.nomeFicheiro} — faturas e análise deste cliente limpas, pronto para o próximo ciclo.`;
+      aviso = `Argumentos descarregados: ${r.nomeFicheiro}. A análise mantém-se em ecrã.`;
     }
     setAvisoSucesso(aviso);
     setTimeout(() => setAvisoSucesso(""), 8000);
-    // O painel gerador (resumo/htmlPainel) some da vista depois disto — o texto dos
-    // argumentos já foi copiado para textoArgumentos/mostrarArgumentos (estado
-    // independente, ver render abaixo, fora do bloco condicionado a "resumo"), por
-    // isso continua visível mesmo depois da limpeza.
-    await finalizarAposExportar();
+    // O painel de argumentos (textoArgumentos/mostrarArgumentos) aparece por baixo do
+    // botão e a análise (resumo/htmlPainel) continua intacta — nada é limpo aqui.
   };
 
-  // Item 4 (2026-09-25) — gera o email de análise mensal, mesmo princípio de
-  // argumentosClick (texto client-facing derivado dos dados já calculados, nunca
-  // enviado sozinho). Decisão de desenho (a confirmar com Augusto, não pedida
-  // explicitamente): tratado como o 3º "output" desta análise, tal como Imprimir/
-  // Argumentos — finaliza o ciclo (limpa faturas/resumo) da mesma forma, para manter
-  // só 1 comportamento em vez de uma exceção. Se Augusto preferir poder gerar o email
-  // sem fechar o ciclo (ex. para o rever/ajustar várias vezes antes do PDF final),
-  // é uma alteração pequena, mas fica assim por agora.
+  // Item 4 (2026-09-25) — gera o email de análise mensal a partir dos dados já
+  // calculados, nunca enviado sozinho. Mantém a análise em ecrã (ver gravarOutlookAnalise).
   const emailAnaliseClick = async () => {
     if (!resumo || !resumo.contas.length) return;
     const nomeCliente = clienteAtual.e;
@@ -7780,27 +7769,41 @@ function AnaliseFaturasView() {
     const { assunto, corpo } = gerarEmailAnaliseFaturas(nomeCliente, resumo.contas, dataAnalise, extrasCliente.contactoNome);
     setAssuntoEmail(assunto);
     setTextoEmail(corpo);
+    // "Para" (2026-09-30, pedido de Augusto): preenche-se com o email da ficha do
+    // cliente quando ele já existe; se não existir, ele escreve e fica guardado na
+    // ficha ao gravar para o Outlook (ver gravarOutlookAnalise) — nunca inventa um endereço.
+    setEmailDestino(extrasCliente.email || "");
     setMostrarEmail(true);
-    setAvisoSucesso("Email de análise preparado — revê o texto e copia para o teu cliente de email. Faturas e análise deste cliente limpas, pronto para o próximo ciclo.");
+    setAvisoSucesso("Email de análise preparado — revê o texto antes de gravar para o Outlook. A análise mantém-se em ecrã.");
     setTimeout(() => setAvisoSucesso(""), 8000);
-    await finalizarAposExportar();
   };
   const copiarEmail = async (texto, label) => {
     const ok = await copiarParaAreaTransferencia(texto);
     setCopiadoEmail(ok ? label : `erro-${label}`);
     setTimeout(() => setCopiadoEmail(""), 2500);
   };
-  // "Abrir no Outlook" (2026-09-28, revisto para Outlook na Web — mailto: não
-  // funciona no Citrix da Vodafone) — mesmo princípio de PainelCampanhaEmail
-  // (Clientes/Prospetos), só que aqui é 1 destinatário no "to", não "bcc".
-  const abrirNoOutlookAnalise = () => {
-    const { url, excedeuLimite } = construirLinkOutlookWeb({ para: emailDestino, assunto: assuntoEmail, corpo: textoEmail });
-    if (excedeuLimite) {
-      setAvisoSucesso("O texto é demasiado longo para o Outlook abrir por link — usa \"Copiar assunto\"/\"Copiar corpo\" e cola manualmente.");
-      setTimeout(() => setAvisoSucesso(""), 8000);
-      return;
+  // "Gravar Outlook" (2026-09-30, pedido explícito de Augusto — SUBSTITUI o antigo
+  // "Abrir no Outlook"): o `mailto:` e o deep link do Outlook Web não servem no Citrix
+  // (o link ignora o Bcc e não suporta anexos), por isso grava um ficheiro `.eml` com
+  // `X-Unsent: 1` — a aplicação Outlook abre-o como rascunho novo, com botão Enviar, já
+  // com a assinatura incluída. Antes de gravar, guarda o email escrito na ficha do
+  // cliente (`extras.email`) se ele ainda lá não estiver, para nunca voltar a escrevê-lo.
+  const gravarOutlookAnalise = async () => {
+    if (!emailDestino) return;
+    const extrasCliente = (await obterExtras(nifSelecionado)) || {};
+    if ((extrasCliente.email || "") !== emailDestino) {
+      try { await definirExtras(nifSelecionado, { email: emailDestino }); } catch {}
     }
-    window.open(url, "_blank");
+    const blob = await gerarEmlCampanha({ para: emailDestino, assunto: assuntoEmail, corpo: textoEmail });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const data = new Date().toLocaleDateString("pt-PT").replace(/\//g, "-");
+    a.download = `Analise Faturas - ${nomeFicheiroSeguro(clienteAtual ? clienteAtual.e : assuntoEmail)} - ${data}.eml`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setAvisoSucesso("Ficheiro .eml gravado — abre-o (duplo clique) e o Outlook apresenta-o pronto a enviar. A análise mantém-se em ecrã.");
+    setTimeout(() => setAvisoSucesso(""), 8000);
   };
 
   return (
@@ -7879,8 +7882,8 @@ function AnaliseFaturasView() {
                   {!mostrarEmail ? (
                     <>
                       <div className="text-sm" style={{ color: "var(--vf-muted)" }}>
-                        Prepara o email de análise mensal a partir destes números. Tal como Imprimir e Argumentos, isto finaliza a análise
-                        (limpa as faturas anexadas e o resumo gravado, pronto para o próximo ciclo).
+                        Prepara o email de análise mensal a partir destes números e grava-o como ficheiro `.eml` para abril no Outlook.
+                        A análise mantém-se em ecrã para continuares a trabalhar.
                       </div>
                       <button onClick={emailAnaliseClick} disabled={!resumo} className="w-full bg-red-600 disabled:opacity-40">
                         <Icone nome="email" className="w-4 h-4 shrink-0" />
@@ -7914,9 +7917,9 @@ function AnaliseFaturasView() {
                         </div>
                         <pre className="text-sm whitespace-pre-wrap font-sans border rounded-xl p-3 max-h-[420px] overflow-auto" style={{ borderColor: "var(--vf-border)" }}>{textoEmail}</pre>
                       </div>
-                      <button onClick={abrirNoOutlookAnalise} disabled={!emailDestino} className="w-full bg-neutral-900 text-white disabled:opacity-40">
+                      <button onClick={gravarOutlookAnalise} disabled={!emailDestino} className="w-full bg-neutral-900 text-white disabled:opacity-40">
                         <Icone nome="email" className="w-4 h-4 shrink-0" />
-                        Abrir no Outlook
+                        Gravar Outlook
                       </button>
                     </>
                   )}
@@ -7935,6 +7938,21 @@ function AnaliseFaturasView() {
                 <div className="text-[11px] text-neutral-400 px-4">
                   Análise gravada em {new Date(analisadoEm).toLocaleDateString("pt-PT")} às {new Date(analisadoEm).toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" })}
                   {analiseDesatualizada && <span className="text-amber-600"> · ⚠ a lista de faturas mudou desde então ({faturas.length} agora vs. {resumo.nFaturas} nesta análise) — considera analisar de novo</span>}
+                </div>
+              )}
+              {/* "A confirmar" (2026-09-30, pedido de Augusto): os avisos de reconciliação
+                  deixam de entrar no painel/HTML/impressão — ficam só aqui, num dropdown
+                  colapsado por defeito, no dashboard. */}
+              {resumo.avisos.length > 0 && (
+                <div className="px-4 pt-2">
+                  <button onClick={() => setMostrarAvisos((v) => !v)} className="text-xs text-amber-700 hover:text-amber-900">
+                    {mostrarAvisos ? "▾" : "▸"} ⚠ {resumo.avisos.length} valor(es) a confirmar
+                  </button>
+                  {mostrarAvisos && (
+                    <div className="space-y-1 pt-2">
+                      {resumo.avisos.map((a, i) => <div key={i} className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">⚠ {a}</div>)}
+                    </div>
+                  )}
                 </div>
               )}
               {/* Mesma função geradora do ficheiro exportado (gerarHtmlAnaliseFaturas) — nunca
@@ -7987,7 +8005,7 @@ function AnaliseFaturasView() {
                                     <td className="text-right px-2">{t && t.comunicacoes !== null ? formatEuro(t.comunicacoes) : "—"}</td>
                                     <td className="text-right px-2">{t && t.descontos !== null ? formatEuro(t.descontos) : "—"}</td>
                                     <td className="text-right px-2 font-medium">{t && t.total !== null ? formatEuro(t.total) : "—"}</td>
-                                    <td className="pl-2">{p.reconciliacao.confirmado ? <span className="text-emerald-600" title="Reconciliado">✓</span> : <span className="text-amber-600" title="Não confirmado — ver avisos abaixo">⚠</span>}</td>
+                                    <td className="pl-2">{p.reconciliacao.confirmado ? <span className="text-emerald-600" title="Reconciliado">✓</span> : <span className="text-amber-600" title='Não confirmado — ver "a confirmar" no topo do painel'>⚠</span>}</td>
                                   </tr>
                                 );
                               })}
@@ -7996,11 +8014,6 @@ function AnaliseFaturasView() {
                         </div>
                       </div>
                     ))}
-                    {resumo.avisos.length > 0 && (
-                      <div className="space-y-1 pt-1 border-t border-neutral-100">
-                        {resumo.avisos.map((a, i) => <div key={i} className="text-[11px] text-amber-700 bg-amber-50 rounded-md px-2 py-1">⚠ {a}</div>)}
-                      </div>
-                    )}
                   </div>
                 )}
 
@@ -8014,7 +8027,7 @@ function AnaliseFaturasView() {
                     Argumentos
                   </button>
                   <div className="text-[11px] text-neutral-400">
-                    Gravados em 03_Analise Faturas/{clienteAtual ? clienteAtual.e : ""}/Analise/ — só ao clicar num destes botões, que também finalizam esta análise (limpam as faturas anexadas e o resumo gravado, prontos para o próximo ciclo).
+                    Gravados em 03_Analise Faturas/{clienteAtual ? clienteAtual.e : ""}/Analise/. Imprimir abre o diálogo de impressão do browser; Argumentos abre o texto por baixo. Em qualquer dos casos a análise e as faturas mantêm-se em ecrã.
                   </div>
                 </div>
               </div>
@@ -11383,7 +11396,10 @@ function useAssuntosLocal() {
 // sempre "n"/NIF, não serve aqui).
 function useAssuntosFirestore(ativo) {
   const [itens, setItens] = useState([]);
-  const [aCarregar, setACarregar] = useState(false);
+  // `true` por omissão (não `false`): garante que o AssuntosView só sincroniza o
+  // assuntos_inbox DEPOIS da 1ª leitura da coleção "assuntos" chegar — com `false`, o
+  // primeiro render tinha `aCarregarNuvem=false` e o sync corria contra a lista vazia.
+  const [aCarregar, setACarregar] = useState(true);
   useEffect(() => {
     if (!ativo) { setItens([]); return; }
     setACarregar(true);
@@ -11425,19 +11441,21 @@ function useAssuntos() {
   const atualizar = nuvemAtiva
     ? (id, campos) => firebaseDb.collection("assuntos").doc(String(id)).set(campos, { merge: true })
     : local.atualizar;
-  // 🐛 Bug real corrigido (2026-09-25): apagar um assunto importado do telemóvel
-  // (assuntos_inbox) fazia-o REAPARECER no próximo sync — sincronizarAssuntosInbox
-  // em modo nuvem ignora `processado` de propósito (ver comentário na função, achado
-  // de 2026-09-20) e só evita reimportar quem já existe em `idsExistentes`
-  // (calculado a partir da lista `assuntos` atual); ao apagar, o id desaparece dessa
-  // lista, e o documento em assuntos_inbox continua lá para ser reimportado. Corrigido
-  // apagando também (best-effort, nunca bloqueia a remoção do assunto em si) o
-  // documento de origem em assuntos_inbox, se existir — apagar um doc inexistente no
-  // Firestore é um no-op seguro, por isso é seguro tentar sempre, mesmo para assuntos
-  // criados diretamente aqui (nunca tiveram doc em assuntos_inbox).
+  // 🐛 Bug real corrigido (2026-09-25) e completado (2026-09-30): apagar um assunto
+  // importado do telemóvel (assuntos_inbox) fazia-o REAPARECER no próximo sync — em modo
+  // nuvem o sincronizarAssuntosInbox ignora `processado` de propósito (ver comentário na
+  // função) e só evitava reimportar quem já existia pelo `id`. Ao apagar, o escritório
+  // removia o assunto mas deixava o documento de origem em assuntos_inbox pronto a
+  // reimportar. A correção de 2026-09-25 apagava assuntos_inbox/{id}, mas só funcionava
+  // quando o id do assunto era o próprio id do documento — o que não acontecia com
+  // assuntos importados ANTES da migração (id gerado `assunto-…`). Agora apaga pelo
+  // `inboxId` (link guardado no assunto) e, sem ele, pelo id — best-effort, nunca
+  // bloqueia a remoção do assunto em si (apagar um doc inexistente é um no-op seguro).
   const removerComLimpezaInbox = async (id) => {
+    const alvo = assuntos.find((a) => a.id === id);
+    const inboxId = (alvo && alvo.inboxId) || id;
     const resultado = nuvemAtiva ? await nuvem.remover(id) : local.remover(id);
-    try { await firebaseDb.collection("assuntos_inbox").doc(String(id)).delete(); } catch {}
+    try { await firebaseDb.collection("assuntos_inbox").doc(String(inboxId)).delete(); } catch {}
     return resultado;
   };
 
@@ -11645,8 +11663,7 @@ function AssuntosView() {
     if (!firebaseUser) return;
     if (nuvemAtiva && aCarregarNuvem) return;
     (async () => {
-      const idsExistentes = new Set(assuntos.map((a) => a.id));
-      const { importados } = await sincronizarAssuntosInbox(adicionar, nuvemAtiva, idsExistentes);
+      const { importados } = await sincronizarAssuntosInbox(adicionar, atualizar, nuvemAtiva, assuntos);
       if (importados > 0) {
         setAvisoSync(`☁️ ${importados} assunto${importados === 1 ? "" : "s"} novo${importados === 1 ? "" : "s"} do telemóvel importado${importados === 1 ? "" : "s"}.`);
         setTimeout(() => setAvisoSync(""), 8000);
@@ -13200,16 +13217,20 @@ function CampanhaPorProdutoView() {
         {campanhasGuardadas && campanhasGuardadas.length > 0 && (
           <div className="space-y-1.5">
             <label className="text-xs text-neutral-500">Reabrir campanha guardada (sem repetir pedidos ao Jev):</label>
-            <div className="flex flex-wrap gap-1.5">
+            <select value={campanhaAbertaId || ""} onChange={(e) => {
+                const c = campanhasGuardadas.find((x) => x.id === e.target.value);
+                if (c) abrirCampanhaGuardada(c);
+              }}
+              title="Reabrir sem gastar pedidos ao Jev"
+              className="w-full px-3 py-2 rounded-md border border-neutral-300 text-sm">
+              <option value="">— escolher campanha guardada —</option>
               {campanhasGuardadas.map((c) => (
-                <button key={c.id} onClick={() => abrirCampanhaGuardada(c)}
-                  title={c.desatualizadoSemFaturas ? "Calculada antes de as faturas entrarem no pedido — reabrir só mostra o ranking antigo." : "Reabrir sem gastar pedidos ao Jev"}
-                  className={`text-xs px-2 py-1 rounded-md border ${campanhaAbertaId === c.id ? "border-red-400 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"}`}>
+                <option key={c.id} value={c.id}>
                   {c.descricao} · {new Date(c.criadoEm).toLocaleString("pt-PT")}
-                  {c.desatualizadoSemFaturas && <span className="text-amber-700"> ⚠ sem faturas</span>}
-                </button>
+                  {c.desatualizadoSemFaturas ? " — ⚠ sem faturas" : ""}
+                </option>
               ))}
-            </div>
+            </select>
             {campanhaAbertaId && (
               <div className="text-[11px] text-neutral-400">
                 A mostrar a campanha reaberta — as pontuações são as que ficaram gravadas nessa altura.
