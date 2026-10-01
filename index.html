@@ -1997,6 +1997,25 @@ async function lerJsonDadosPrivados(handleProjeto, nomeFicheiro) {
   }
 }
 
+// Escreve (ou cria) um ficheiro JSON em dados-privados/ — best-effort, nunca lança.
+// Usado para manter o catálogo de produtos sincronizado quando se adiciona uma campanha
+// a partir do dashboard (a nuvem é a fonte principal; o ficheiro local serve o Claude
+// Code e a sincronização por iCloud entre os Macs).
+async function guardarJsonDadosPrivados(handleProjeto, nomeFicheiro, dados) {
+  if (!handleProjeto) return false;
+  try {
+    const pasta = await handleProjeto.getDirectoryHandle("dados-privados", { create: true });
+    const fileHandle = await pasta.getFileHandle(nomeFicheiro, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(JSON.stringify(dados, null, 2));
+    await writable.close();
+    return true;
+  } catch (e) {
+    console.warn(`Não foi possível gravar ${nomeFicheiro}:`, e.message);
+    return false;
+  }
+}
+
 
 
 
@@ -2468,7 +2487,7 @@ function gerarExcelAnaliseTarifarios(nomeCliente, linhas, decisoes, dadosAutonom
     })),
     // Blocos em branco já preparados para produtos NOVOS (que o cliente ainda não
     // tem) — pedido explícito do utilizador (2026-09-12). Mesma estrutura dos blocos
-    // reais para o leitor (lerNovosTarifariosDoExcel) não precisar de caso especial.
+    // reais.
     ...Array.from({ length: 5 }, (_, i) => ({
       numero: `NOVO-${i + 1}`,
       tarifarioAtual: "",
@@ -2796,62 +2815,6 @@ function pastaOrigemProduto(produto, categoriaSubpastas) {
 // A gravação em si (verificar existência prévia + escrever) vive em
 // AdicionarPdfProduto, porque precisa de pedir confirmação ao utilizador ANTES de
 // substituir um ficheiro — ver esse componente.
-
-// Lê a folha "Novos Tarifários" tal como `gerarExcelAnaliseTarifarios` a escreveu —
-// reescrito 2026-09-12 para a estrutura por bloco (item a item + "— SUBTOTAL —"), nunca
-// por nome de cabeçalho (propositadamente não pensados para re-leitura automática).
-// Devolve UMA linha por bloco (Nº/Serviço) — o consumidor (Dar seguimento / resumo para
-// a skill) continua a apresentar por bloco, nunca item a item, usando o SUBTOTAL como
-// "Mensalidade nova" do bloco. "Ação"/"Tarifário proposto" são agregados dos itens: se
-// todos os itens tiverem a mesma Ação, usa-se essa; senão junta-se com " + " (caso raro
-// de bloco com decisões mistas — a validação de "incompleta" cobre-o à mesma).
-function lerNovosTarifariosDoExcel(wb) {
-  const ws = wb.Sheets["Novos Tarifários"];
-  if (!ws) return null;
-  const valor = (r, c) => { const cel = ws[XLSX.utils.encode_cell({ r, c })]; return cel ? cel.v : undefined; };
-  const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
-  const blocos = [];
-  let bloco = null;
-  for (let r = 4; r <= range.e.r; r++) { // linha Excel 5 (0-indexed 4) = 1º cabeçalho de bloco
-    const colA = valor(r, 0); // cabeçalho de bloco é uma linha de 1 só célula — cai na coluna A, não B
-    const colB = valor(r, 1);
-    if (typeof colA === "string" && colA.startsWith("▶ ")) {
-      const texto = colA.slice(2);
-      const separador = texto.indexOf(" — ");
-      bloco = {
-        numero: separador === -1 ? texto : texto.slice(0, separador),
-        tarifarioAtual: separador === -1 ? "" : texto.slice(separador + 3),
-        itens: [],
-      };
-      continue;
-    }
-    if (bloco && colB === "— SUBTOTAL —") {
-      const acoesItens = [...new Set(bloco.itens.map((it) => it.acao))];
-      const propostosItens = [...new Set(bloco.itens.map((it) => it.tarifarioProposto).filter(Boolean))];
-      const numFn = (c) => { const v = valor(r, c); return typeof v === "number" ? v : null; };
-      blocos.push({
-        numero: bloco.numero,
-        tarifarioAtual: bloco.tarifarioAtual,
-        custoAtual: numFn(5),
-        acao: acoesItens.length === 1 ? acoesItens[0] : acoesItens.join(" + "),
-        tarifarioProposto: propostosItens.join("; "),
-        mensalidadeNova: numFn(6),
-        poupanca: numFn(7),
-        observacao: valor(r, 8) || "",
-        // Um item com Ação "por decidir" (nem Manter nem Anular) sem Mensalidade nova
-        // própria — o SUBTOTAL sozinho não chega para detetar isto (soma ignora blanks).
-        incompleta: bloco.itens.some((it) => it.acao !== "Manter" && it.acao !== "Anular" && it.mensalidadeNova === null),
-      });
-      bloco = null;
-      continue;
-    }
-    if (bloco && colB) {
-      const v = valor(r, 6);
-      bloco.itens.push({ acao: valor(r, 2) || "Manter", tarifarioProposto: valor(r, 4) || "", mensalidadeNova: typeof v === "number" ? v : null });
-    }
-  }
-  return blocos;
-}
 
 // IMPORTANTE: handle.requestPermission() só funciona quando chamado a partir de um
 // clique real do utilizador ("user activation"). Chamá-lo sozinho ao abrir a página
@@ -12016,6 +11979,156 @@ async function guardarPdfProdutoNuvem(subpasta, file) {
   await firebaseStorage.ref(`produtos_vodafone/${subpasta}/${file.name}`).put(file, { contentType: "application/pdf" });
 }
 
+/* ===== CAMPANHAS EM VIGOR — quadrado automático (2026-10-01, opções 3+4) =====
+   Decisão explícita de Augusto: nas Campanhas, carregar um ficheiro (PDF ou HTML) cria
+   logo o quadrado, SEM passar pelo Claude Code — nome e data derivados do nome do
+   ficheiro. Funciona com a pasta ligada E na nuvem (sem pasta), para poder ser usado no
+   Citrix. Nunca altera os quadrados técnicos das outras categorias. */
+const SUBPASTA_CAMPANHAS = "10 - Campanhas em Vigor";
+
+function tipoFicheiroPorExtensao(nome) {
+  const e = String(nome || "").toLowerCase();
+  if (e.endsWith(".pdf")) return "application/pdf";
+  if (e.endsWith(".html") || e.endsWith(".htm")) return "text/html";
+  return "application/octet-stream";
+}
+
+async function guardarFicheiroProdutoNuvem(subpasta, file) {
+  await firebaseStorage.ref(`produtos_vodafone/${subpasta}/${file.name}`)
+    .put(file, { contentType: file.type || tipoFicheiroPorExtensao(file.name) });
+}
+
+// Nome + data de uma campanha a partir do nome do ficheiro. Ex.:
+// "03_Campanha_Leads_Upgrade_Infinity_Start_2026-08-06.pdf"
+//  → nome "Campanha Leads Upgrade Infinity Start", data "2026-08-06".
+// Nunca usa IA: tira a extensão e o prefixo numérico, troca "_" por espaços e extrai a
+// data AAAA-MM-DD se existir.
+function nomeEDataDeCampanha(nomeFicheiro) {
+  let base = String(nomeFicheiro || "").replace(/\.[^.]+$/, "");
+  base = base.replace(/^\s*\d{1,3}\s*[-_.]\s*/, "").replace(/_+/g, " ").replace(/\s+/g, " ").trim();
+  let data = null;
+  const m = base.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+  if (m) {
+    data = `${m[1]}-${String(m[2]).padStart(2, "0")}-${String(m[3]).padStart(2, "0")}`;
+    base = base.replace(m[0], "").replace(/\s+/g, " ").replace(/[-–,\s]+$/, "").trim();
+  }
+  return { nome: base || String(nomeFicheiro || "").replace(/\.[^.]+$/, ""), data };
+}
+
+// Acrescenta 1 entrada ao catálogo (nuvem e/ou ficheiro local).
+async function adicionarProdutoAoCatarogo(entry, handleProjeto, nuvemAtiva) {
+  const agora = new Date().toISOString().slice(0, 10);
+  let gravou = false;
+  if (nuvemAtiva) {
+    const d = (await lerProdutosCaracteristicasNuvem()) || { produtos: [] };
+    d.produtos = [...(d.produtos || []), entry];
+    d.atualizadoEm = agora;
+    await firebaseDb.collection("meta").doc("produtos_caracteristicas").set(d);
+    gravou = true;
+  }
+  if (handleProjeto) {
+    const d = (await lerJsonDadosPrivados(handleProjeto, "produtos-caracteristicas.json")) || { produtos: [] };
+    d.produtos = [...(d.produtos || []), entry];
+    d.atualizadoEm = agora;
+    await guardarJsonDadosPrivados(handleProjeto, "produtos-caracteristicas.json", d);
+    gravou = true;
+  }
+  return gravou;
+}
+
+async function removerProdutoDoCatalogo(produto, handleProjeto, nuvemAtiva) {
+  const chave = (p) => `${p.categoriaId}|${p.nome}|${(p.ficheiro && p.ficheiro.nome) || ""}`;
+  const alvo = chave(produto);
+  const agora = new Date().toISOString().slice(0, 10);
+  if (nuvemAtiva) {
+    const d = (await lerProdutosCaracteristicasNuvem()) || { produtos: [] };
+    d.produtos = (d.produtos || []).filter((p) => chave(p) !== alvo);
+    d.atualizadoEm = agora;
+    await firebaseDb.collection("meta").doc("produtos_caracteristicas").set(d);
+  }
+  if (handleProjeto) {
+    const d = (await lerJsonDadosPrivados(handleProjeto, "produtos-caracteristicas.json")) || { produtos: [] };
+    d.produtos = (d.produtos || []).filter((p) => chave(p) !== alvo);
+    d.atualizadoEm = agora;
+    await guardarJsonDadosPrivados(handleProjeto, "produtos-caracteristicas.json", d);
+  }
+  if (produto.ficheiro && produto.ficheiro.nome) {
+    try { await firebaseStorage.ref(`produtos_vodafone/${SUBPASTA_CAMPANHAS}/${produto.ficheiro.nome}`).delete(); } catch {}
+  }
+}
+
+async function abrirFicheiroCampanha(produto, handleProjeto) {
+  const nome = produto && produto.ficheiro && produto.ficheiro.nome;
+  if (!nome) return;
+  if (firebaseAuth.currentUser) {
+    try { window.open(await firebaseStorage.ref(`produtos_vodafone/${SUBPASTA_CAMPANHAS}/${nome}`).getDownloadURL(), "_blank"); return; } catch {}
+  }
+  if (handleProjeto) {
+    try {
+      const pasta09 = await handleProjeto.getDirectoryHandle("09_Produtos Vodafone", { create: false });
+      const destino = await obterPastaAninhadaSemCriar(pasta09, SUBPASTA_CAMPANHAS);
+      const fh = await destino.getFileHandle(nome);
+      window.open(URL.createObjectURL(await fh.getFile()), "_blank");
+    } catch {}
+  }
+}
+
+// Controlo "+ Adicionar campanha" (PDF ou HTML) na categoria Campanhas — cria o quadrado
+// logo, sem Claude Code. Precisa da nuvem (login) ou da pasta do projeto ligada.
+function AdicionarCampanha({ handleProjeto, nuvemAtiva, onAdicionado }) {
+  const [aEnviar, setAEnviar] = useState(false);
+  const [estado, setEstado] = useState("");
+  const [mensagemErro, setMensagemErro] = useState("");
+  const inputRef = React.useRef(null);
+  const podeGuardar = nuvemAtiva || !!handleProjeto;
+
+  const enviar = async (ficheiros) => {
+    if (!ficheiros || !ficheiros.length) return;
+    if (!podeGuardar) { setEstado("erro"); setMensagemErro("inicia sessão (nuvem) ou liga a pasta do projeto"); return; }
+    setAEnviar(true); setEstado(""); setMensagemErro("");
+    try {
+      for (const f of ficheiros) {
+        if (nuvemAtiva) await guardarFicheiroProdutoNuvem(SUBPASTA_CAMPANHAS, f);
+        if (handleProjeto) {
+          const pasta09 = await handleProjeto.getDirectoryHandle("09_Produtos Vodafone", { create: true });
+          const destino = await obterPastaAninhada(pasta09, SUBPASTA_CAMPANHAS);
+          const fh = await destino.getFileHandle(f.name, { create: true });
+          const w = await fh.createWritable(); await w.write(f); await w.close();
+        }
+        const { nome, data } = nomeEDataDeCampanha(f.name);
+        const entry = {
+          nome, categoriaId: "campanhas-em-vigor",
+          subtitulo: data ? `Válida até ${formatarDataIsoPT(data)}` : "",
+          caracteristicas: [], nota: "",
+          dataCampanha: data || "",
+          ficheiro: { nome: f.name, tipo: tipoFicheiroPorExtensao(f.name) },
+        };
+        await adicionarProdutoAoCatarogo(entry, handleProjeto, nuvemAtiva);
+      }
+      setEstado("sucesso");
+      if (onAdicionado) await onAdicionado();
+    } catch (e) {
+      console.warn("Não foi possível adicionar a campanha:", e);
+      setEstado("erro"); setMensagemErro(e && e.message ? e.message : "erro desconhecido");
+    }
+    setAEnviar(false);
+  };
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <input ref={inputRef} type="file" accept=".pdf,.html,.htm,application/pdf,text/html" multiple className="hidden"
+        onChange={(e) => { enviar([...e.target.files]); e.target.value = ""; }} />
+      <button onClick={() => inputRef.current && inputRef.current.click()} disabled={aEnviar || !podeGuardar}
+        title={podeGuardar ? "PDF ou HTML — cria o quadrado automaticamente" : "Inicia sessão ou liga a pasta do projeto"}
+        className="text-xs px-2.5 py-1.5 rounded-md border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50 whitespace-nowrap">
+        {aEnviar ? "A adicionar…" : "+ Adicionar campanha (PDF ou HTML)"}
+      </button>
+      {estado === "sucesso" && <span className="text-xs text-emerald-700">✓ Campanha(s) adicionada(s).</span>}
+      {estado === "erro" && <span className="text-xs text-red-600">Não consegui guardar ({mensagemErro}).</span>}
+    </div>
+  );
+}
+
 // Percorre "09_Produtos Vodafone/" inteira (recursivo) — usado só pela migração, para
 // encontrar todos os PDFs reais independentemente de estarem ou não hoje mapeados em
 // PASTA_POR_CATEGORIA_PRODUTOS (nunca deixar ficheiros de fora da migração por causa
@@ -12207,8 +12320,11 @@ function VerPdfOrigemProduto({ handleProjeto, subpasta, nuvemAtiva }) {
   );
 }
 
-function CartaoProdutoVodafone({ produto, categoriaLabel, handleProjeto, categoriaSubpastas, nuvemAtiva }) {
+function CartaoProdutoVodafone({ produto, categoriaLabel, handleProjeto, categoriaSubpastas, nuvemAtiva, onAlterado }) {
   const subpastaUpload = pastaOrigemProduto(produto, categoriaSubpastas);
+  // Quadrado de CAMPANHA (tem `ficheiro`): nome + data + abrir ficheiro, sem
+  // características nem botões de PDF (ver AdicionarCampanha).
+  const ehCampanha = !!(produto.ficheiro && produto.ficheiro.nome);
   return (
     <div className="bg-white border border-neutral-200 rounded-lg p-4 flex flex-col"
       style={{ borderTopWidth: "3px", borderTopColor: "#DC2626" }}>
@@ -12228,10 +12344,26 @@ function CartaoProdutoVodafone({ produto, categoriaLabel, handleProjeto, categor
         </div>
       )}
       {produto.nota && <div className="text-xs text-neutral-400 italic mt-3">{produto.nota}</div>}
-      <div className="mt-3 pt-3 border-t border-neutral-100 flex flex-col gap-1.5">
-        <VerPdfOrigemProduto handleProjeto={handleProjeto} subpasta={subpastaUpload} nuvemAtiva={nuvemAtiva} />
-        <AdicionarPdfProduto handleProjeto={handleProjeto} subpasta={subpastaUpload} semTopo nuvemAtiva={nuvemAtiva} />
-      </div>
+      {ehCampanha ? (
+        <div className="mt-3 pt-3 border-t border-neutral-100 flex items-center gap-2 flex-wrap">
+          <button onClick={() => abrirFicheiroCampanha(produto, handleProjeto)}
+            className="text-xs px-2.5 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700">
+            Abrir campanha
+          </button>
+          <span className="text-[11px] text-neutral-400">{produto.ficheiro.tipo === "text/html" ? "HTML" : "PDF"}</span>
+          <button onClick={async () => {
+              if (!window.confirm("Remover esta campanha do catálogo?")) return;
+              await removerProdutoDoCatalogo(produto, handleProjeto, nuvemAtiva);
+              if (onAlterado) onAlterado();
+            }}
+            title="Remover campanha" className="text-[11px] text-neutral-400 hover:text-red-600 ml-auto">✕ remover</button>
+        </div>
+      ) : (
+        <div className="mt-3 pt-3 border-t border-neutral-100 flex flex-col gap-1.5">
+          <VerPdfOrigemProduto handleProjeto={handleProjeto} subpasta={subpastaUpload} nuvemAtiva={nuvemAtiva} />
+          <AdicionarPdfProduto handleProjeto={handleProjeto} subpasta={subpastaUpload} semTopo nuvemAtiva={nuvemAtiva} />
+        </div>
+      )}
     </div>
   );
 }
@@ -12395,6 +12527,12 @@ function ProdutosVodafoneView({ ligacaoPasta }) {
     if (ok) { const lidos = await lerProdutosCaracteristicasNuvem(); setDados(lidos); }
     setASincronizarCatalogo(false);
   };
+  // Relê o catálogo da mesma fonte que a vista usa (nuvem ou ficheiro local) — usado
+  // depois de adicionar/remover uma campanha.
+  const recarregarCatalogo = async () => {
+    if (nuvemAtivaProdutos) setDados(await lerProdutosCaracteristicasNuvem());
+    else if (ligacaoPasta.pronto) setDados(await lerJsonDadosPrivados(ligacaoPasta.handle, "produtos-caracteristicas.json"));
+  };
 
   useEffect(() => {
     (async () => {
@@ -12489,26 +12627,35 @@ function ProdutosVodafoneView({ ligacaoPasta }) {
 
         {categoriaSel !== "todos" && (
           <div className="flex items-start gap-4 pb-2.5">
-            {subpastasCategoria ? (
-              <a href={linkAtualizar}
-                title={
-                  !caminhoProjeto ? 'Sem o caminho da pasta do projeto (separador Propostas), o link não propõe a pasta certa.'
-                  : (subpastasCategoria.length > 1 || subpastasCategoria.some((s) => s.excluir || s.apenas))
-                    ? `Pastas revistas: ${subpastasCategoria.map(descreverPastaCategoria).join(" · ")}`
-                  : ""
-                }
-                className="text-xs text-red-600 hover:underline whitespace-nowrap">
-                🔄 Atualizar a partir da pasta{subpastasCategoria.length > 1 ? ` (${subpastasCategoria.length} pastas)` : ""}
-              </a>
+            {categoriaSel === "campanhas-em-vigor" ? (
+              /* Campanhas: quadrado automático a partir do ficheiro (PDF ou HTML), sem
+                 Claude Code e a funcionar também na nuvem (sem pasta) — ver AdicionarCampanha. */
+              <AdicionarCampanha handleProjeto={ligacaoPasta.pronto ? ligacaoPasta.handle : null}
+                nuvemAtiva={nuvemAtivaProdutos} onAdicionado={recarregarCatalogo} />
             ) : (
-              <span title={`Ainda não há uma subpasta de "09_Produtos Vodafone/" confirmada para "${categoriaLabel(categoriaSel)}" — pede à Claude para confirmar antes de ligar o botão.`}
-                className="text-xs text-neutral-300 whitespace-nowrap cursor-not-allowed">
-                🔄 Atualizar a partir da pasta
-              </span>
-            )}
-            {subpastasCategoria && ligacaoPasta.pronto && (
-              <NovoProdutoCategoria handleProjeto={ligacaoPasta.handle} categoriaId={categoriaSel}
-                categoriaLabel={categoriaLabel(categoriaSel)} subpastas={subpastasCategoria} caminhoProjeto={caminhoProjeto} nuvemAtiva={nuvemAtivaProdutos} />
+              <>
+                {subpastasCategoria ? (
+                  <a href={linkAtualizar}
+                    title={
+                      !caminhoProjeto ? 'Sem o caminho da pasta do projeto (separador Propostas), o link não propõe a pasta certa.'
+                      : (subpastasCategoria.length > 1 || subpastasCategoria.some((s) => s.excluir || s.apenas))
+                        ? `Pastas revistas: ${subpastasCategoria.map(descreverPastaCategoria).join(" · ")}`
+                      : ""
+                    }
+                    className="text-xs text-red-600 hover:underline whitespace-nowrap">
+                    🔄 Atualizar a partir da pasta{subpastasCategoria.length > 1 ? ` (${subpastasCategoria.length} pastas)` : ""}
+                  </a>
+                ) : (
+                  <span title={`Ainda não há uma subpasta de "09_Produtos Vodafone/" confirmada para "${categoriaLabel(categoriaSel)}" — pede à Claude para confirmar antes de ligar o botão.`}
+                    className="text-xs text-neutral-300 whitespace-nowrap cursor-not-allowed">
+                    🔄 Atualizar a partir da pasta
+                  </span>
+                )}
+                {subpastasCategoria && ligacaoPasta.pronto && (
+                  <NovoProdutoCategoria handleProjeto={ligacaoPasta.handle} categoriaId={categoriaSel}
+                    categoriaLabel={categoriaLabel(categoriaSel)} subpastas={subpastasCategoria} caminhoProjeto={caminhoProjeto} nuvemAtiva={nuvemAtivaProdutos} />
+                )}
+              </>
             )}
           </div>
         )}
@@ -12523,7 +12670,7 @@ function ProdutosVodafoneView({ ligacaoPasta }) {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {produtosFiltrados.map((p) => (
               <CartaoProdutoVodafone key={p.nome} produto={p} categoriaLabel={categoriaLabel(p.categoriaId)}
-                handleProjeto={ligacaoPasta.pronto ? ligacaoPasta.handle : null} categoriaSubpastas={PASTA_POR_CATEGORIA_PRODUTOS[p.categoriaId]} nuvemAtiva={nuvemAtivaProdutos} />
+                handleProjeto={ligacaoPasta.pronto ? ligacaoPasta.handle : null} categoriaSubpastas={PASTA_POR_CATEGORIA_PRODUTOS[p.categoriaId]} nuvemAtiva={nuvemAtivaProdutos} onAlterado={recarregarCatalogo} />
             ))}
           </div>
         )}
