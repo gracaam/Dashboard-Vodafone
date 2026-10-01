@@ -1575,7 +1575,8 @@ function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
   .btnprint{position:fixed;right:20px;bottom:20px;background:var(--ink);color:#fff;border:0;border-radius:999px;padding:12px 20px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 8px 24px rgba(16,24,40,.3);transition:.15s}
   .btnprint:hover{background:var(--vf)}
   .hidden{display:none}
-  @media print{.btnprint,.tabs{display:none}.hidden{display:block!important}.scroll{max-height:none}}`;
+  @media print{.btnprint,.tabs{display:none}.hidden{display:block!important}.scroll{max-height:none;overflow:visible}th{position:static}.card,.ins,.kpi,.chartbox{break-inside:avoid;page-break-inside:avoid}.chartbox{height:250px!important}.chartbox.t{height:300px!important}}
+  @page{margin:10mm}`;
 
   const tabsHtml = [`<button data-v="geral" class="on">Visão geral</button>`]
     .concat(contasInfo.map((c) => `<button data-v="c${c.idDom}">${escaparHtml(c.rotulo)} · ${escaparHtml(c.conta)}</button>`))
@@ -1738,27 +1739,32 @@ Chart.defaults.plugins.tooltip.cornerRadius = 8;
 const base = { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false } };
 const money = { callback: (v) => v.toLocaleString("pt-PT") + " €" };
 const CORES = ["#e60000", "#0057b8", "#0d8a4f", "#b97700", "#98a0aa"];
+// Guarda os gráficos criados para os poder redimensionar antes de imprimir (um gráfico
+// desenhado numa aba escondida, com largura 0, sai em branco no PDF — ver prepararImpressao).
+const CHARTS = [];
+const _ocultasImpressao = [];
+const criar = (id, cfg) => { const alvo = el(id); if (!alvo) return null; const c = new Chart(alvo, cfg); CHARTS.push(c); return c; };
 
-new Chart(el("gEvo"), { type: "line", data: { labels: DADOS.totalPorMes.map(m => m.label), datasets: [
+criar("gEvo", { type: "line", data: { labels: DADOS.totalPorMes.map(m => m.label), datasets: [
   { label: "Total (todas as contas)", data: DADOS.totalPorMes.map(m => m.valor), borderColor: "#101317", backgroundColor: "rgba(16,19,23,.06)", fill: true, tension: .35, pointRadius: 4, pointHoverRadius: 6, borderWidth: 2.5 }] },
   options: { ...base, plugins: { tooltip: { callbacks: { label: c => eur(c.parsed.y) } } },
   scales: { y: { ticks: money, grid: { color: "#eef0f3" }, border: { display: false } }, x: { grid: { display: false }, border: { display: false } } } } });
 
 function donut(id, labels, vals, cores) {
   if (!vals.some(v => v > 0)) return;
-  new Chart(el(id), { type: "doughnut", data: { labels, datasets: [{ data: vals, backgroundColor: cores, borderWidth: 3, borderColor: "#fff", hoverOffset: 8 }] },
+  criar(id, { type: "doughnut", data: { labels, datasets: [{ data: vals, backgroundColor: cores, borderWidth: 3, borderColor: "#fff", hoverOffset: 8 }] },
     options: { ...base, cutout: "64%", plugins: { legend: { position: "bottom", labels: { usePointStyle: true, padding: 14, pointStyleWidth: 10 } }, tooltip: { callbacks: { label: c => c.label + ": " + c.parsed } } } } });
 }
 
 DADOS.contas.forEach((c, i) => {
   if (el("gEvo" + c.idDom)) {
-    new Chart(el("gEvo" + c.idDom), { type: "line", data: { labels: c.evolucao.map(m => m.label), datasets: [
+    criar("gEvo" + c.idDom, { type: "line", data: { labels: c.evolucao.map(m => m.label), datasets: [
       { label: "Fatura (s/IVA)", data: c.evolucao.map(m => m.total), borderColor: CORES[i % CORES.length], backgroundColor: CORES[i % CORES.length] + "12", fill: true, tension: .35, pointRadius: 4, pointHoverRadius: 6, borderWidth: 2.5 }] },
       options: { ...base, plugins: { tooltip: { callbacks: { label: c2 => eur(c2.parsed.y) } } },
       scales: { y: { ticks: money, grid: { color: "#eef0f3" }, border: { display: false } }, x: { grid: { display: false }, border: { display: false } } } } });
   }
   if (el("gTop" + c.idDom) && c.top10.length) {
-    new Chart(el("gTop" + c.idDom), { type: "bar", data: { labels: c.top10.map(t => t.numero),
+    criar("gTop" + c.idDom, { type: "bar", data: { labels: c.top10.map(t => t.numero),
       datasets: [{ label: "GB usados", data: c.top10.map(t => t.gb), backgroundColor: c.top10.map(t => t.esgotado ? "#e60000" : "#c9dcf1"), borderRadius: 6, maxBarThickness: 26 }] },
       options: { ...base, indexAxis: "y", plugins: { legend: { display: false }, tooltip: { callbacks: { label: c2 => c2.parsed.x + " GB" } } },
       scales: { x: { ticks: { callback: v => v + " GB" }, grid: { color: "#eef0f3" }, border: { display: false } }, y: { grid: { display: false }, border: { display: false } } } } });
@@ -1787,6 +1793,20 @@ DADOS.contas.forEach((c, i) => {
     }));
     render();
   }
+});
+
+// prepararImpressao(): mostra todas as abas (para o layout existir), redimensiona os
+// gráficos e deixa-os prontos a imprimir. É chamada pelo botão do próprio ficheiro E
+// pelo dashboard (iframe) antes de window.print(). afterprint volta a esconder as abas.
+window.prepararImpressao = function () {
+  _ocultasImpressao.length = 0;
+  document.querySelectorAll(".hidden").forEach((e) => { _ocultasImpressao.push(e); e.classList.remove("hidden"); });
+  CHARTS.forEach((c) => { try { c.resize(); } catch (e) {} });
+};
+window.addEventListener("beforeprint", () => window.prepararImpressao());
+window.addEventListener("afterprint", () => {
+  _ocultasImpressao.forEach((e) => e.classList.add("hidden"));
+  _ocultasImpressao.length = 0;
 });
 
 const vistas = { geral: "v-geral" };
@@ -7878,9 +7898,18 @@ function AnaliseFaturasView() {
     setTimeout(() => setAvisoSucesso(""), 8000);
     // Diálogo de impressão do browser sobre o MESMO conteúdo já em ecrã (iframe) —
     // nunca um ficheiro/janela à parte, para nunca divergir do que Augusto está a ver.
-    // window.print() é SÍNCRONO no Chrome (bloqueia o separador até o diálogo fechar),
-    // por isso fica como última operação — já não há limpeza nenhuma a fazer a seguir.
-    if (iframeRef.current && iframeRef.current.contentWindow) iframeRef.current.contentWindow.print();
+    // Antes de imprimir, avisa o painel para mostrar todas as abas e redimensionar os
+    // gráficos (senão os das abas escondidas saíam em branco no PDF) — daí a pequena
+    // espera antes do print. window.print() é SÍNCRONO no Chrome (bloqueia o separador
+    // até o diálogo fechar).
+    try {
+      if (iframeRef.current && iframeRef.current.contentWindow && iframeRef.current.contentWindow.prepararImpressao) {
+        iframeRef.current.contentWindow.prepararImpressao();
+      }
+    } catch (e) {}
+    setTimeout(() => {
+      if (iframeRef.current && iframeRef.current.contentWindow) iframeRef.current.contentWindow.print();
+    }, 300);
   };
 
   const argumentosClick = async () => {
@@ -8612,7 +8641,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     tfoot td { font-weight: bold; border-top: 2px solid #ccc; border-bottom: 0; }
     @media print { .btnprint { display: none; } }
   </style></head><body>
-  <button class="btnprint" onclick="window.print()">Imprimir / PDF</button>
+<button class="btnprint" onclick="window.prepararImpressao();setTimeout(function(){window.print();},250)">Imprimir / PDF</button>
   <h1>Proposta — ${escaparHtml(nomeAlvo || "")}</h1>
   <div class="sub">${new Date(data).toLocaleDateString("pt-PT", { day: "2-digit", month: "long", year: "numeric" })}</div>
   <table>
