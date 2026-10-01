@@ -7720,7 +7720,8 @@ function AnaliseFaturasView() {
   // sem dizer de quando é.
   const [analisadoEm, setAnalisadoEm] = useState(null);
   // Cache gravada por uma versão anterior de VERSAO_LOGICA_ANALISE_FATURAS (ou sem o
-  // campo, ficheiros de antes deste controlo existir) — ver carregarAnalisePersistida.
+  // campo, ficheiros de antes deste controlo existir). Estado mantido para a vista nunca
+  // apresentar uma análise antiga como válida; a vista começa sempre limpa (2026-10-01).
   const [analiseVersaoAntiga, setAnaliseVersaoAntiga] = useState(false);
   // Aviso de fallback para local (2026-09-26, bug real reportado por Augusto: CORS do
   // Storage bloqueia uploads a partir do site público) — ver anexarFicheiros abaixo.
@@ -7750,31 +7751,20 @@ function AnaliseFaturasView() {
     } catch { setFaturas([]); }
   };
 
-  // Tenta reaproveitar uma análise já gravada (Fase E: disco; Fase 3/Passo 2: Firestore
-  // quando a nuvem estiver ativa) — evita reprocessar todos os PDFs sempre que se
-  // reabre o cliente. Sem fonte disponível, simplesmente não mostra nada — nunca
-  // bloqueia a vista.
-  // Controlo de versão (2026-09-17): se a cache foi gravada por uma versão anterior da
-  // lógica de análise (ou não tem versaoLogica nenhuma, ficheiros de antes deste controlo
-  // existir), NUNCA mostrar o resumo antigo como se fosse válido — o caso real que motivou
-  // isto foi a correção de tolerância de IVA em reconciliarRubricas ficar "escondida" atrás
-  // de uma análise já gravada antes da correção. Marca analiseVersaoAntiga em vez disso,
-  // para a UI mostrar um aviso claro a pedir para analisar de novo (nunca 2 versões da
-  // lógica de apresentação — reaproveita o mesmo estado "sem resumo" já existente).
-  const carregarAnalisePersistida = async (nif) => {
-    const cliente = todosClientes.find((c) => c.n === nif);
-    if (!cliente) return;
-    const guardado = nuvemAtivaAnalise ? await lerAnaliseFaturasCacheNuvem(nif) : null;
-    // `finalizado` (Opção B, 2026-09-29): análise já exportada — fica guardada na nuvem
-    // para alimentar a Campanha por Produto / "Produtos para este cliente", mas nunca é
-    // reapresentada aqui como trabalho em curso (a vista começa limpa, para um ciclo novo).
-    if (guardado && guardado.resumo && !guardado.finalizado) {
-      if (guardado.versaoLogica === VERSAO_LOGICA_ANALISE_FATURAS) {
-        setResumo(guardado.resumo);
-        setAnalisadoEm(guardado.analisadoEm || null);
-      } else {
-        setAnaliseVersaoAntiga(true);
+  // Limpa o "histórico" de um cliente ao selecioná-lo (2026-10-01, pedido de Augusto): as
+  // faturas anexadas desse cliente são removidas (nuvem e local) e a análise anterior não
+  // é reapresentada — a vista começa do zero. A cache na nuvem (analise_faturas_cache)
+  // NÃO é tocada: continua a alimentar a Campanha por Produto / "Produtos para este cliente".
+  const limparHistoricoDoCliente = async (nif) => {
+    try {
+      if (nuvemAtivaAnalise) {
+        const daNuvem = await listarFaturasAnaliseNuvem(nif);
+        for (const f of daNuvem) await removerFaturaAnaliseAnexadaNuvem(f.id);
       }
+      const doLocal = await listarFaturasAnaliseDoCliente(nif);
+      for (const f of doLocal) await removerFaturaAnaliseAnexada(f.id);
+    } catch (e) {
+      console.warn("Não foi possível limpar o histórico de faturas:", e && e.message);
     }
   };
 
@@ -7782,7 +7772,8 @@ function AnaliseFaturasView() {
     setAvisoSucesso(""); setNifSelecionado(nif); setResumo(null); setAnalisadoEm(null); setAnaliseVersaoAntiga(false);
     setContasVisiveis(null); setMostrarEmail(false); setMostrarAvisos(false);
     setMostrarArgumentos(false); setTextoArgumentos(""); // nunca mostrar os argumentos de um cliente anterior
-    if (nif) { carregarFaturas(nif); carregarAnalisePersistida(nif); } else setFaturas([]);
+    setFaturas([]); // começa sempre limpo — ver limparHistoricoDoCliente
+    if (nif) limparHistoricoDoCliente(nif);
   };
 
   // Grava também uma cópia na pasta do projeto (Faturas/), mesma convenção já usada em
@@ -7878,9 +7869,10 @@ function AnaliseFaturasView() {
     const novoResumo = { nFaturas: faturas.length, nFaturasAnalisadas: porFatura.length, gastoTotal, contas, avisos: avisosGerais };
     setResumo(novoResumo);
     setAnaliseVersaoAntiga(false); // acabou de recalcular com a lógica atual — já não é "antiga"
-    // Fase E — grava logo a seguir a analisar, para a próxima vez que o cliente for
-    // reaberto não ter de reprocessar os PDFs (ver carregarAnalisePersistida). Só com a
-    // nuvem ativa — sem login, o resumo fica só em ecrã. versaoLogica identifica QUAL versão da lógica de
+    // Grava logo a seguir a analisar — é esta cache que alimenta a Campanha por Produto /
+    // "Produtos para este cliente" (a vista da Análise de Faturas já não a reapresenta:
+    // começa limpa). Só com a nuvem ativa — sem login, o resumo fica só em ecrã.
+    // versaoLogica identifica QUAL versão da lógica de
     // análise gerou este resumo — controlo de versão de cache (2026-09-17), ver
     // VERSAO_LOGICA_ANALISE_FATURAS.
     const agora = new Date().toISOString();
