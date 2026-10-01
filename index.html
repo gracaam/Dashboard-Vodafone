@@ -8667,11 +8667,13 @@ function tipoAutomaticoProposta(l) {
 }
 function tipoServicoProposta(l) { return l.tipo || tipoAutomaticoProposta(l); }
 
+// Mais-valia Vodafone por área. Genérico de propósito: nunca nomeia serviços que
+// podem não estar na proposta (os tarifários propostos aparecem por baixo de cada bloco).
 const SOLUCOES_PROPOSTA_TEXTO = {
-  "Fixo": "Internet por fibra ótica, voz fixa e soluções de central telefónica para os locais da empresa.",
-  "Móvel": "Voz e dados móveis para a equipa, com tarifários empresariais e gestão centralizada dos cartões.",
-  "Banda Larga Móvel": "Internet móvel para equipamentos e locais sem rede fixa, com dados dedicados.",
-  "IoT/ICT": "Equipamentos ligados (IoT) e serviços de TI, como cloud, Microsoft 365, email empresarial e segurança.",
+  "Fixo": "Ligações estáveis e de alta disponibilidade para os locais da empresa, suportadas na rede fixa e de fibra ótica da Vodafone, com apoio técnico empresarial 24x7.",
+  "Móvel": "A equipa ligada na rede móvel Vodafone, com cobertura nacional e 5G, tarifários empresariais ajustados à utilização real e gestão centralizada.",
+  "Banda Larga Móvel": "Internet de alta velocidade na rede 4G/5G Vodafone, para manter a empresa ligada em qualquer local, com ativação rápida e sem obras.",
+  "IoT/ICT": "Soluções tecnológicas com o suporte de um operador internacional, integradas com as comunicações da empresa e com um único interlocutor.",
 };
 
 function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
@@ -8692,7 +8694,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
   if (ehProspeto) {
     const total = totalProposta(linhas, true);
     kpis = `<div class="kpis"><div class="kpi destaque"><span>Total mensal proposto</span><b>${euro(total)}</b><small>${euro(total * 12)} por ano</small></div></div>`;
-    tabela = `<table><thead><tr><th>Serviço</th><th>Tarifário proposto</th><th class="r">Valor (un.)</th><th class="r">Qtd.</th><th class="r">Valor mensal</th><th>Duração</th></tr></thead>
+    tabela = `<table class="tp"><colgroup><col class="s"><col class="t"><col class="v"><col class="q"><col class="v"><col class="d"></colgroup><thead><tr><th>Serviço</th><th>Tarifário proposto</th><th class="r">Valor (un.)</th><th class="r">Qtd.</th><th class="r">Valor mensal</th><th>Duração</th></tr></thead>
       <tbody>${ls.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(l.produtoAtual || "")}</td><td class="r">${euro(numProposta(l.valorMensal))}</td><td class="r">${quantidadeLinhaProposta(l)}</td><td class="r"><b>${euro(valorLinhaProspeto(l))}</b></td><td>${dur(l.duracao)}</td></tr>`).join("")}</tbody>
       <tfoot><tr><td colspan="4">Total mensal</td><td class="r">${euro(total)}</td><td></td></tr></tfoot></table>`;
   } else {
@@ -8703,10 +8705,10 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
       <div class="kpi"><span>Paga hoje por estes serviços</span><b>${euro(totAtual)}</b><small>por mês</small></div>
       <div class="kpi"><span>Com esta proposta</span><b>${euro(totNovo)}</b><small>por mês</small></div>
       <div class="kpi destaque"><span>${poup >= 0 ? "Poupança" : "Investimento adicional"}</span><b>${euro(Math.abs(poup))}/mês</b><small>${euro(Math.abs(poup) * 12)} por ano</small></div></div>`;
-    tabela = `<table><thead><tr><th>Serviço</th><th>Tarifário atual</th><th class="r">Valor atual</th><th>Tarifário proposto</th><th class="r">Valor proposto</th><th>Duração</th></tr></thead>
+    tabela = `<table class="tv"><colgroup><col class="s"><col class="t"><col class="v"><col class="t"><col class="v"><col class="d"></colgroup><thead><tr><th>Serviço</th><th>Tarifário atual</th><th class="r">Atual</th><th>Tarifário proposto</th><th class="r">Proposto</th><th>Duração</th></tr></thead>
       <tbody>${ls.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(l.produtoAtual || "")}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td><td>${esc(novoTarifarioLinhaProposta(l) || l.produtoAtual || "")}</td><td class="r"><b>${euro(valorLinhaProposta(l))}</b></td><td>${dur(l.duracao)}</td></tr>`).join("")}</tbody>
       <tfoot><tr><td colspan="2">Total mensal</td><td class="r">${euro(ls.reduce((s, l) => s + (valorAtualLinhaProposta(l) || 0), 0))}</td><td></td><td class="r">${euro(totNovo)}</td><td></td></tr></tfoot></table>`;
-    if (apagar.length) cancelar = `<h3>Serviços a desativar</h3><table><tbody>${apagar.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(l.produtoAtual || "")}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td></tr>`).join("")}</tbody></table>`;
+    if (apagar.length) cancelar = `<h3>Serviços a desativar</h3><table class="tv"><colgroup><col class="s"><col style="width:68%"><col style="width:15%"></colgroup><tbody>${apagar.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(l.produtoAtual || "")}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td></tr>`).join("")}</tbody></table>`;
   }
 
   // ---- Soluções: só os blocos com serviços.
@@ -8728,8 +8730,8 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     body { font-family: "Source Sans 3", "Segoe UI", Calibri, sans-serif; color: #1a1a1a; margin: 0; background: #e9e9e9; }
     .capa { width: 210mm; height: 297mm; margin: 0 auto 14px; position: relative; overflow: hidden; page-break-after: always; break-after: page; background: #fff; }
     .corpo { width: 210mm; margin: 0 auto; background: #fff; padding: 0 15mm 15mm; display: flex; flex-direction: column; gap: 14px; }
-    .sec { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; } .sec + .sec { border-top: 1px solid #e2e2e2; padding-top: 12px; }
-    .bloco, .kpis, .nums, tr, .contacto { break-inside: avoid; } h1 { break-after: avoid; }
+    .sec { display: flex; flex-direction: column; gap: 14px; padding-top: 6px; } .sec + .sec { border-top: 1px solid #e2e2e2; margin-top: 10px; padding-top: 18px; }
+    .bloco, .kpis, .nums, tr, .contacto { break-inside: avoid; } h1 { break-after: avoid; } .cond h1 + ul { break-before: avoid; } .cond ul { columns: 2; column-gap: 22px; display: block; } .cond li { font-size: 11.5px; break-inside: avoid; margin-bottom: 4px; } .cond p, .cond .contacto { font-size: 11.5px; }
     .faixa { height: 8px; background: ${V}; margin: 0 -15mm 4px; flex: none; }
     .capa { padding: 0; } .capa img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .capa .info { position: absolute; left: 15mm; right: 15mm; bottom: 62mm; background: #fff; padding: 22px 26px; border-top: 8px solid ${V}; }
@@ -8740,10 +8742,11 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     .ind div { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #e2e2e2; font-size: 15px; } .ind b { color: ${V}; margin-right: 8px; }
     .nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; } .num { border-top: 3px solid ${V}; padding-top: 6px; }
     .num b { display: block; font-size: 24px; color: ${V}; } .num span { font-size: 12px; color: #444; }
-    .mapa { width: 42%; align-self: center; } .duas { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } .duas b { display: block; }
-    .bloco { border: 1px solid #e2e2e2; padding: 14px 18px; display: flex; flex-direction: column; gap: 6px; }
+    .mapa { width: 40%; align-self: center; } .duas { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } .duas b { display: block; }
+    .bloco { border: 1px solid #e2e2e2; padding: 10px 16px; display: flex; flex-direction: column; gap: 4px; }
     .bt { font-size: 17px; font-weight: 800; color: ${V}; } .bm { font-size: 12px; color: #444; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+    td, th { overflow-wrap: anywhere; } .tv col.s { width: 17%; } .tv col.t { width: 25%; } .tv col.v { width: 11%; } .tv col.d { width: 11%; } .tp col.s { width: 16%; } .tp col.t { width: 34%; } .tp col.v { width: 13%; } .tp col.q { width: 8%; } .tp col.d { width: 16%; }
     th, td { border-bottom: 1px solid #e2e2e2; padding: 7px 6px; text-align: left; vertical-align: top; }
     th { background: #f4f4f4; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #444; }
     .r { text-align: right; } tfoot td { font-weight: 700; border-top: 2px solid #bbb; border-bottom: 0; }
@@ -8774,7 +8777,6 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     <p>O maior operador internacional de comunicações, com rede própria móvel e fixa em Portugal e uma estrutura dedicada às empresas.</p>
     <div class="nums">${PROPOSTA_NUMEROS_VODAFONE.map((n) => `<div class="num"><b>${esc(n.valor)}</b><span>${esc(n.texto)}</span></div>`).join("")}</div>
     <img class="mapa" src="${PROPOSTA_IMG_MAPA}" alt="Presença global da Vodafone">
-    <div class="duas"><p><b>Rede</b>Rede móvel 4G+ e 5G, fibra ótica e rede empresarial de alta disponibilidade.</p><p><b>Apoio</b>Linha 16916 com acompanhamento de cada incidente até à resolução.</p></div>
   </section>
 
   <section class="sec">
@@ -8790,7 +8792,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     <p class="nota">Valores mensais, sem IVA. Proposta válida por 30 dias.</p>
   </section>
 
-  <section class="sec">
+  <section class="sec cond">
     <h1>5 · Condições e contacto</h1>
     <ul>
       <li>Proposta válida por 30 dias.</li>
