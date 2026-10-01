@@ -1866,53 +1866,76 @@ function gerarEmailAnaliseFaturas(nomeCliente, contas, dataAnalise, nomeContacto
   return { assunto, corpo: linhas.join("\n") };
 }
 
-// Argumentos de reunião — ficheiro Markdown SEPARADO do HTML (decisão explícita do
-// utilizador, tal como no exemplo Cliente C), com os pontos mais acionáveis para a
-// conversa com o cliente. Só afirma o que os dados já confirmam — nunca uma
-// recomendação de produto/tarifário (isso é trabalho da skill de propostas, não desta
-// análise).
+// Argumentos de reunião — reescrito (2026-10-01, pedido de Augusto: os anteriores eram
+// fracos, só enumeravam números). Agora é um texto **geral, comercial e pronto a usar
+// num email ao cliente**: fala de valor, previsibilidade e oportunidades (sem listas de
+// números internos nem jargão como "plafond"/"reconciliado"/"fidelização"). Continua a
+// afirmar SÓ o que os dados confirmam (tudo derivado de calcularKpisEInsights) e nunca
+// recomenda um produto/tarifário concreto — sugere apenas onde há margem para rever.
+// O ficheiro continua a ser .md, mas o conteúdo é texto corrido pronto a colar.
 function gerarArgumentosReuniao(nomeCliente, contas, dataAnalise) {
   const kpis = calcularKpisEInsights(contas);
-  const linhas = [];
-  linhas.push(`# Argumentos de reunião — ${nomeCliente}`, "");
-  linhas.push(`**Data da análise:** ${dataAnalise.toLocaleDateString("pt-PT")} · **Elaborado por:** Augusto Graça, Vodafone Business`, "");
-  linhas.push("## Números-chave", "");
-  if (kpis.gastoMesRecente !== null) linhas.push(`- Gasto do mês mais recente (${kpis.mesRecenteLabel}): **${formatEuro(kpis.gastoMesRecente)}** sem IVA.`);
-  if (kpis.mediaMensal !== null) linhas.push(`- Média mensal (${kpis.totalPorMes.length} mês(es) analisados): **${formatEuro(kpis.mediaMensal)}**.`);
-  if (kpis.custoFixoPercent !== null) linhas.push(`- **${kpis.custoFixoPercent}%** do custo é fixo (mensalidades + suplementares) — o resto varia com o consumo.`);
-  linhas.push(`- **${kpis.nLinhasRecente}** acessos ativos no mês mais recente.`, "");
+  const nContas = contas.length;
+  const L = [];
+  const P = (s) => L.push(s);
 
-  if (kpis.insights.length) {
-    linhas.push("## Pontos de atenção", "");
-    kpis.insights.forEach((i) => linhas.push(`- **${i.rotulo}** (${i.valor}) — ${i.texto}.`));
-    linhas.push("");
+  P(`Análise de comunicações Vodafone Business — ${nomeCliente}`);
+  P(`${dataAnalise.toLocaleDateString("pt-PT")} · Augusto Graça, Vodafone Business`);
+  P("");
+  P("Segue o resumo da análise às vossas comunicações Vodafone Business, com as principais oportunidades de otimização identificadas.");
+  P("");
+
+  // ---- Resumo (um parágrafo, interpretado) ----
+  const r = [];
+  if (kpis.totalPorMes.length > 1 && kpis.mediaMensal !== null) {
+    r.push(`Nos últimos ${kpis.totalPorMes.length} meses${nContas > 1 ? ` (${nContas} contas)` : ""}, o valor mensal situou-se, em média, em ${formatEuro(kpis.mediaMensal)} (sem IVA)${kpis.gastoMesRecente !== null ? `, com a fatura mais recente em ${formatEuro(kpis.gastoMesRecente)}` : ""}.`);
+  } else if (kpis.gastoMesRecente !== null) {
+    r.push(`A fatura mais recente${nContas > 1 ? ` (${nContas} contas)` : ""} totalizou ${formatEuro(kpis.gastoMesRecente)} (sem IVA).`);
+  }
+  if (kpis.nLinhasRecente) r.push(`O conjunto integra ${kpis.nLinhasRecente} acessos ativos${kpis.custoPorLinha !== null ? `, com um custo médio de ${formatEuro(kpis.custoPorLinha)} por acesso` : ""}.`);
+  if (kpis.custoFixoPercent !== null) r.push(`Cerca de ${kpis.custoFixoPercent}% do custo é fixo (mensalidades e serviços) e ${kpis.custoVariavelPercent}% corresponde a consumo variável.`);
+  P("Em resumo");
+  P(r.join(" "));
+  P("");
+
+  // ---- Números que interessam ao cliente ----
+  P("Dados principais");
+  if (kpis.gastoMesRecente !== null) P(`• Fatura mais recente${kpis.mesRecenteLabel ? ` (${kpis.mesRecenteLabel})` : ""}: ${formatEuro(kpis.gastoMesRecente)} sem IVA.`);
+  if (kpis.mediaMensal !== null && kpis.totalPorMes.length > 1) P(`• Média dos ${kpis.totalPorMes.length} meses analisados: ${formatEuro(kpis.mediaMensal)}/mês.`);
+  if (kpis.nLinhasRecente) P(`• Acessos ativos: ${kpis.nLinhasRecente}.`);
+  if (kpis.custoFixoPercent !== null) P(`• Composição do custo: ${kpis.custoFixoPercent}% fixo / ${kpis.custoVariavelPercent}% variável.`);
+  P("");
+
+  // ---- Oportunidades: cada ponto já traz a alternativa que elimina o custo extra ----
+  const atencao = kpis.insights.find((i) => i.rotulo === "Atenção");
+  const concentracao = kpis.insights.find((i) => i.rotulo === "Concentração");
+  const estavel = kpis.insights.find((i) => i.rotulo === "Estável");
+  const oportunidades = [];
+  if (atencao) oportunidades.push(`${atencao.valor} ultrapassaram o limite de dados incluído no último mês, originando custos adicionais. Solução: rever o perfil desses acessos e ajustar o plano de dados por forma a incluí-los, eliminando esses custos.`);
+  if (kpis.custoVariavelPercent !== null && kpis.custoVariavelPercent >= 30) oportunidades.push(`Cerca de ${kpis.custoVariavelPercent}% do custo corresponde a consumo variável, o que torna a fatura menos previsível. Propõe-se estudar um plano que enquadre o consumo real e transfira esses valores para a componente fixa — mais estável e, habitualmente, mais económico.`);
+  else if (kpis.custoVariavelPercent === 0) oportunidades.push(`O custo é praticamente todo fixo e previsível. Esta base permite reequilibrar o conjunto e melhorar as condições.`);
+  if (concentracao) oportunidades.push(`O consumo de dados concentra-se em poucos acessos (${concentracao.valor} representam ${concentracao.texto.replace(/^=\s*/, "")}). Em alternativa a alterar o conjunto, propõe-se ajustar apenas esses perfis, corrigindo o desequilíbrio sem custo adicional.`);
+  if (estavel && kpis.totalPorMes.length > 1) oportunidades.push(`Os valores têm-se mantido estáveis (${estavel.valor}), o que confere previsibilidade e constitui um argumento para negociar melhores condições no conjunto.`);
+  if (kpis.custoPorLinha !== null && kpis.nLinhasRecente && oportunidades.length < 4) oportunidades.push(`O custo médio por acesso (${formatEuro(kpis.custoPorLinha)}) sugere margem para reequilibrar o conjunto — a análise acesso a acesso permite identificar onde existe espaço para poupar.`);
+  if (oportunidades.length) {
+    P("Onde há margem para melhorar");
+    oportunidades.forEach((o) => P(`• ${o}`));
+    P("");
   }
 
-  contas.forEach((c) => {
-    const periodoRecente = c.periodos[c.periodos.length - 1];
-    const linhasRecentes = (periodoRecente && periodoRecente.linhas) || [];
-    const detalhe = calcularDetalhePorAcesso(linhasRecentes);
-    const esgotados = detalhe.filter((d) => d.estado === "Esgotado");
-    linhas.push(`## Conta ${c.conta}`, "");
-    if (periodoRecente && periodoRecente.rubricas.totais) {
-      linhas.push(`- Fatura mais recente (${periodoRecente.label}): **${formatEuro(periodoRecente.rubricas.totais.total)}** sem IVA, ${linhasRecentes.length} acesso(s).`);
-    }
-    if (esgotados.length) {
-      linhas.push(`- **${esgotados.length} acesso(s) esgotaram o plafond de dados** no mês mais recente: ${esgotados.map((d) => d.numero).join(", ")}.`);
-    }
-    // Aviso de reconciliação removido daqui (2026-09-30, pedido de Augusto: não quer
-    // este texto). O estado de reconciliação continua visível na coluna ✓/⚠ de "Ver
-    // detalhes técnicos" e no dropdown "a confirmar" do painel.
-    if (periodoRecente && periodoRecente.reconciliacao && periodoRecente.reconciliacao.confirmado) {
-      linhas.push(`- Valores reconciliados matematicamente, sem divergências.`);
-    }
-    linhas.push("");
-  });
+  // ---- Próximos passos (ações concretas — nunca reuniões nem contratos a terminar) ----
+  const passos = [];
+  if (atencao) passos.push("Rever os acessos que ultrapassaram o limite de dados e ajustar o plano para eliminar custos adicionais.");
+  if (kpis.custoVariavelPercent !== null && kpis.custoVariavelPercent >= 30) passos.push("Estudar um plano que enquadre o consumo variável e torne o custo mais previsível.");
+  if (concentracao) passos.push("Ajustar os acessos com consumo mais elevado, sem alterar o restante conjunto.");
+  if (passos.length) {
+    P("Próximos passos");
+    passos.forEach((p) => P(`• ${p}`));
+    P("");
+  }
 
-  linhas.push("## Notas de rigor", "");
-  linhas.push('- "—" nas tabelas do painel significa que a fatura não detalha esse valor — nunca foi suposto ou estimado.');
-  linhas.push("- Todos os totais apresentados foram cruzados automaticamente contra a tabela agregada da própria fatura antes de entrarem neste documento.");
-  return linhas.join("\n");
+  P("Esta análise resulta apenas dos dados das vossas faturas Vodafone Business. Fico ao dispor para apresentar uma simulação das alternativas indicadas.");
+  return L.join("\n");
 }
 
 // Categoriza um serviço pelo nome do tarifário — heurística simples por palavras-
