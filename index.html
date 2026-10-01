@@ -1520,7 +1520,7 @@ function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
   }
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
-  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   header{background:linear-gradient(135deg,#14161b 0%,#1d2128 60%,#23272f 100%);color:#fff;padding:0 30px;position:relative;overflow:hidden}
   header::after{content:"";position:absolute;right:-60px;top:-60px;width:280px;height:280px;border-radius:50%;background:radial-gradient(circle,rgba(230,0,0,.28),transparent 65%)}
   .h-in{max-width:1200px;margin:0 auto;padding:26px 0 22px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:14px;position:relative}
@@ -1593,7 +1593,7 @@ function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
   .btnprint{position:fixed;right:20px;bottom:20px;background:var(--ink);color:#fff;border:0;border-radius:999px;padding:12px 20px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 8px 24px rgba(16,24,40,.3);transition:.15s}
   .btnprint:hover{background:var(--vf)}
   .hidden{display:none}
-  @media print{.btnprint,.tabs{display:none}.hidden{display:block!important}.scroll{max-height:none;overflow:visible}th{position:static}.card,.ins,.kpi,.chartbox{break-inside:avoid;page-break-inside:avoid}.chartbox{height:250px!important}.chartbox.t{height:300px!important}}
+  @media print{.btnprint,.tabs{display:none}.hidden{display:block!important}.scroll{max-height:none;overflow:visible}th{position:static}.card,.ins,.kpi,.chartbox{break-inside:avoid;page-break-inside:avoid}*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
   @page{margin:10mm}`;
 
   const tabsHtml = [`<button data-v="geral" class="on">Visão geral</button>`]
@@ -1823,13 +1823,42 @@ DADOS.contas.forEach((c, i) => {
 // prepararImpressao(): mostra todas as abas (para o layout existir), redimensiona os
 // gráficos e deixa-os prontos a imprimir. É chamada pelo botão do próprio ficheiro E
 // pelo dashboard (iframe) antes de window.print(). afterprint volta a esconder as abas.
+const _imgsImpressao = [];
+// Converte cada gráfico (canvas) numa imagem antes de imprimir — o canvas pode não
+// sair no PDF de alguns ambientes (ex. Citrix), mas uma imagem sai sempre.
+function _graficosParaImagem() {
+  if (_imgsImpressao.length) return;
+  CHARTS.forEach((c) => {
+    try {
+      const canvas = c.canvas;
+      c.resize();
+      const img = document.createElement("img");
+      img.src = canvas.toDataURL("image/png");
+      img.style.width = (canvas.clientWidth || canvas.width) + "px";
+      img.style.height = (canvas.clientHeight || canvas.height) + "px";
+      img.style.display = "block";
+      canvas.parentNode.insertBefore(img, canvas);
+      const antes = canvas.style.display;
+      canvas.style.display = "none";
+      _imgsImpressao.push({ img, canvas, antes });
+    } catch (e) {}
+  });
+}
+function _restaurarGraficos() {
+  _imgsImpressao.forEach(({ img, canvas, antes }) => {
+    try { if (img.parentNode) img.parentNode.removeChild(img); } catch (e) {}
+    try { canvas.style.display = antes || ""; } catch (e) {}
+  });
+  _imgsImpressao.length = 0;
+}
 window.prepararImpressao = function () {
   _ocultasImpressao.length = 0;
   document.querySelectorAll(".hidden").forEach((e) => { _ocultasImpressao.push(e); e.classList.remove("hidden"); });
-  CHARTS.forEach((c) => { try { c.resize(); } catch (e) {} });
+  _graficosParaImagem();
 };
 window.addEventListener("beforeprint", () => window.prepararImpressao());
 window.addEventListener("afterprint", () => {
+  _restaurarGraficos();
   _ocultasImpressao.forEach((e) => e.classList.add("hidden"));
   _ocultasImpressao.length = 0;
 });
