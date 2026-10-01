@@ -8588,7 +8588,7 @@ function gerarPropostaExcel(nomeAlvo, linhas, data, ehProspeto) {
     dados = linhasPropostaPdf(linhas, true).map((l) => [
       l.servico || "",
       numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
-      l.produtoAtual || "",
+      nomeTarifarioCurto(l.produtoAtual),
       quantidadeLinhaProposta(l),
       valorLinhaProspeto(l) != null ? valorLinhaProspeto(l) : "",
       l.duracao || "",
@@ -8604,9 +8604,9 @@ function gerarPropostaExcel(nomeAlvo, linhas, data, ehProspeto) {
         l.fim ? diasEntreDatasIso(hoje, l.fim) : "",
         numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
         numProposta(l.desconto) != null ? numProposta(l.desconto) : "",
-        l.produtoAtual || "",
+        nomeTarifarioCurto(l.produtoAtual),
         l.acao || "Inalterado",
-        novoTarifarioLinhaProposta(l),
+        nomeTarifarioCurto(novoTarifarioLinhaProposta(l)),
         novoVal && numProposta(l.novoValor) != null ? numProposta(l.novoValor) : "",
         l.duracao || "",
         valorLinhaProposta(l) != null ? valorLinhaProposta(l) : "",
@@ -8676,7 +8676,11 @@ const SOLUCOES_PROPOSTA_TEXTO = {
   "IoT/ICT": "Soluções tecnológicas com o suporte de um operador internacional, integradas com as comunicações da empresa e com um único interlocutor.",
 };
 
-function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
+// Nome do tarifário como aparece ao cliente: só até ao primeiro " - "
+// ("BLM Ind All included_abr2023 - 100102234 - REG4X" → "BLM Ind All included_abr2023").
+function nomeTarifarioCurto(t) { return String(t || "").split(" - ")[0].trim(); }
+
+function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
   const esc = escaparHtml;
   const V = "#e60000";
   const euro = (v) => (v === null || v === undefined ? "—" : formatEuro(v));
@@ -8695,7 +8699,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     const total = totalProposta(linhas, true);
     kpis = `<div class="kpis"><div class="kpi destaque"><span>Total mensal proposto</span><b>${euro(total)}</b><small>${euro(total * 12)} por ano</small></div></div>`;
     tabela = `<table class="tp"><colgroup><col class="s"><col class="t"><col class="v"><col class="q"><col class="v"><col class="d"></colgroup><thead><tr><th>Serviço</th><th>Tarifário proposto</th><th class="r">Valor (un.)</th><th class="r">Qtd.</th><th class="r">Valor mensal</th><th>Duração</th></tr></thead>
-      <tbody>${ls.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(l.produtoAtual || "")}</td><td class="r">${euro(numProposta(l.valorMensal))}</td><td class="r">${quantidadeLinhaProposta(l)}</td><td class="r"><b>${euro(valorLinhaProspeto(l))}</b></td><td>${dur(l.duracao)}</td></tr>`).join("")}</tbody>
+      <tbody>${ls.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(numProposta(l.valorMensal))}</td><td class="r">${quantidadeLinhaProposta(l)}</td><td class="r"><b>${euro(valorLinhaProspeto(l))}</b></td><td>${dur(l.duracao)}</td></tr>`).join("")}</tbody>
       <tfoot><tr><td colspan="4">Total mensal</td><td class="r">${euro(total)}</td><td></td></tr></tfoot></table>`;
   } else {
     const totAtual = [...ls, ...apagar].reduce((s, l) => s + (valorAtualLinhaProposta(l) || 0), 0);
@@ -8706,25 +8710,28 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
       <div class="kpi"><span>Com esta proposta</span><b>${euro(totNovo)}</b><small>por mês</small></div>
       <div class="kpi destaque"><span>${poup >= 0 ? "Poupança" : "Investimento adicional"}</span><b>${euro(Math.abs(poup))}/mês</b><small>${euro(Math.abs(poup) * 12)} por ano</small></div></div>`;
     tabela = `<table class="tv"><colgroup><col class="s"><col class="t"><col class="v"><col class="t"><col class="v"><col class="d"></colgroup><thead><tr><th>Serviço</th><th>Tarifário atual</th><th class="r">Atual</th><th>Tarifário proposto</th><th class="r">Proposto</th><th>Duração</th></tr></thead>
-      <tbody>${ls.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(l.produtoAtual || "")}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td><td>${esc(novoTarifarioLinhaProposta(l) || l.produtoAtual || "")}</td><td class="r"><b>${euro(valorLinhaProposta(l))}</b></td><td>${dur(l.duracao)}</td></tr>`).join("")}</tbody>
+      <tbody>${ls.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td><td>${esc(nomeTarifarioCurto(novoTarifarioLinhaProposta(l) || l.produtoAtual))}</td><td class="r"><b>${euro(valorLinhaProposta(l))}</b></td><td>${dur(l.duracao)}</td></tr>`).join("")}</tbody>
       <tfoot><tr><td colspan="2">Total mensal</td><td class="r">${euro(ls.reduce((s, l) => s + (valorAtualLinhaProposta(l) || 0), 0))}</td><td></td><td class="r">${euro(totNovo)}</td><td></td></tr></tfoot></table>`;
-    if (apagar.length) cancelar = `<h3>Serviços a desativar</h3><table class="tv"><colgroup><col class="s"><col style="width:68%"><col style="width:15%"></colgroup><tbody>${apagar.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(l.produtoAtual || "")}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td></tr>`).join("")}</tbody></table>`;
+    if (apagar.length) cancelar = `<h3>Serviços a desativar</h3><table class="tv"><colgroup><col class="s"><col style="width:68%"><col style="width:15%"></colgroup><tbody>${apagar.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td></tr>`).join("")}</tbody></table>`;
   }
 
   // Proposta grande: Soluções ficam na sua própria folha e Valores+Condições noutra,
   // para manter o mesmo espaço entre áreas (até 4 páginas). Pequena: 3 páginas.
   const nBlocos = TIPOS_SERVICO_PROPOSTA.filter((t) => ls.some((l) => tipoServicoProposta(l) === t)).length;
-  const grande = nBlocos >= 3 || ls.length + apagar.length >= 5 || (nBlocos >= 2 && ls.length + apagar.length >= 4);
+  const grande = ls.length + apagar.length >= 8 || (nBlocos >= 3 && ls.length + apagar.length >= 6);
   // ---- Soluções: só os blocos com serviços.
   const blocos = TIPOS_SERVICO_PROPOSTA.map((tipo) => {
     const doTipo = ls.filter((l) => tipoServicoProposta(l) === tipo);
     if (!doTipo.length) return "";
     const n = ehProspeto ? doTipo.reduce((s, l) => s + quantidadeLinhaProposta(l), 0) : doTipo.length;
-    const tars = [...new Set(doTipo.map((l) => (ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual) || "").filter(Boolean))];
-    const lista = doTipo.map((l) => `<li><b>${esc(l.servico || "")}</b>${(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual) ? " · " + esc(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual) : ""}${ehProspeto && quantidadeLinhaProposta(l) > 1 ? " × " + quantidadeLinhaProposta(l) : ""}${l.duracao ? " · " + dur(l.duracao) : ""}</li>`).join("");
+    const tars = [...new Set(doTipo.map((l) => nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual)).filter(Boolean))];
+    const lista = doTipo.map((l) => `<li><b>${esc(l.servico || "")}</b>${nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual) ? " · " + esc(nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual)) : ""}${ehProspeto && quantidadeLinhaProposta(l) > 1 ? " × " + quantidadeLinhaProposta(l) : ""}${l.duracao ? " · " + dur(l.duracao) : ""}</li>`).join("");
     return `<div class="bloco"><div class="bt">${tipo}</div><p>${SOLUCOES_PROPOSTA_TEXTO[tipo]}</p>${grande ? `<ul class="bl">${lista}</ul>` : `<div class="bm">${n} serviço${n === 1 ? "" : "s"}${tars.length ? " · " + tars.map(esc).join(", ") : ""}</div>`}</div>`;
   }).join("");
 
+  const noticiaHtml = noticia && (noticia.titulo || noticia.texto || noticia.imagem)
+    ? `<div class="noticia"><div class="nk">Novidades Vodafone</div>${noticia.titulo ? `<div class="nt">${esc(noticia.titulo)}</div>` : ""}${noticia.imagem ? `<img src="${noticia.imagem}" alt="">` : ""}${noticia.texto ? `<p>${esc(noticia.texto)}</p>` : ""}</div>`
+    : "";
   const contacto = `<b>${esc(ASSINATURA_EMAIL[1].texto)}</b><br>${esc(ASSINATURA_EMAIL[2].texto)} · Vodafone Business<br>${esc(ASSINATURA_EMAIL[3].texto)} · augusto.graca@vodafone.com<br><span class="cinza">Apoio a Clientes Empresariais 16914 · Suporte Técnico 16916 (24x7)</span>`;
   const indice = ["Objetivo da proposta", "Vodafone Business", "Soluções propostas", "Valores propostos", "Condições e contacto"];
 
@@ -8739,7 +8746,8 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     .folha { min-height: 265mm; display: flex; flex-direction: column; justify-content: space-between; } .folha + .folha { break-before: page; page-break-before: always; } .solo > .sec { flex: 1; } .solo .bloco { padding: 20px 22px; gap: 10px; margin: auto 0; } .solo .bt { font-size: 20px; } .solo .bloco p, .solo .bl li { font-size: 13.5px; }
     .folha > .sec + .sec, .folha + .folha > .sec:first-child { margin-top: 0; }
     @media screen { .folha { min-height: auto; } .folha + .folha { border-top: 1px solid #e2e2e2; margin-top: 12px; padding-top: 20px; } } .fim { margin-top: 6px; } .contacto b { display: block; margin-bottom: 4px; }
-    .bloco, .kpis, .nums, tr, .contacto { break-inside: avoid; } h1 { break-after: avoid; } .cond h1 + ul { break-before: avoid; } .condgrid { display: grid; grid-template-columns: 1.7fr 1fr; gap: 26px; align-items: start; } .cond ul { display: block; } .cond li { font-size: 11px; break-inside: avoid; margin-bottom: 4px; } .cond p, .cond .contacto { font-size: 11.5px; }
+    .bloco, .kpis, .nums, tr, .contacto { break-inside: avoid; } h1 { break-after: avoid; } .cond h1 + ul { break-before: avoid; } .condpilha { display: flex; flex-direction: column; gap: 26px; } .cond ul { columns: 2; column-gap: 24px; display: block; } .folhafim > .cond { flex: 1; } .folhafim .condpilha { flex: 1; } .folhafim .contacto { margin-top: auto; }
+    .noticia { border: 1px solid #e2e2e2; border-left: 6px solid ${V}; padding: 18px 22px; display: flex; flex-direction: column; gap: 8px; break-inside: avoid; } .noticia .nk { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: ${V}; } .noticia .nt { font-size: 18px; font-weight: 800; } .noticia p { font-size: 13px; white-space: pre-line; } .noticia img { max-width: 100%; max-height: 90mm; object-fit: contain; align-self: flex-start; } .cond li { font-size: 11px; break-inside: avoid; margin-bottom: 4px; } .cond p, .cond .contacto { font-size: 11.5px; }
     .faixa { height: 8px; background: ${V}; margin: 0 -15mm 4px; flex: none; }
     .capa { padding: 0; } .capa img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .capa .info { position: absolute; left: 15mm; right: 15mm; bottom: 62mm; background: #fff; padding: 22px 26px; border-top: 8px solid ${V}; }
@@ -8803,16 +8811,18 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     <p class="nota">Valores mensais, sem IVA. Proposta válida por 30 dias.</p>
   </section>
 
+  </div>
+  <div class="folha folhafim">
   <section class="sec cond">
     <h1>5 · Condições e contacto</h1>
-    <div class="condgrid"><ul>
+    <div class="condpilha"><ul>
       <li>Proposta válida por 30 dias. Valores sem IVA.</li>
       <li>Faturação mensal, pagamento a 30 dias.</li>
       <li>Duração de cada serviço conforme a tabela. A desistência antecipada implica o pagamento das mensalidades em falta.</li>
       <li>Valores sujeitos a ajuste por alterações de campanhas ou de mercado.</li>
       <li>Documento confidencial, para uso exclusivo de ${cliente}.</li>
       <li>Na adjudicação: Pedido de Ativação de Serviços, certidão comercial, NIF e identificação do representante legal.</li>
-    </ul><div class="contacto">${contacto}</div></div>
+    </ul>${noticiaHtml}<div class="contacto">${contacto}</div></div>
     
   </section>
   </div>
@@ -8835,6 +8845,38 @@ function PropostasView() {
   const [pdfHtml, setPdfHtml] = useState("");
   const [pedidoPdf, setPedidoPdf] = useState(false);
   const iframePdfRef = React.useRef(null);
+  // Notícia Vodafone que o Augusto escreve e aparece em todas as propostas (entre as
+  // condições e o contacto) até a mudar. Guardada na nuvem: meta/proposta_noticia.
+  const [noticia, setNoticia] = useState({ titulo: "", texto: "", imagem: "" });
+  const [noticiaAberta, setNoticiaAberta] = useState(false);
+  const [noticiaEstado, setNoticiaEstado] = useState("");
+  useEffect(() => {
+    if (!firebaseUser) return;
+    firebaseDb.collection("meta").doc("proposta_noticia").get()
+      .then((d) => { if (d.exists) { const v = d.data() || {}; setNoticia({ titulo: v.titulo || "", texto: v.texto || "", imagem: v.imagem || "" }); } })
+      .catch(() => {});
+  }, [firebaseUser]);
+  const guardarNoticia = async () => {
+    if (!firebaseUser) { setNoticiaEstado("Entra com o login para guardar a notícia na nuvem."); return; }
+    try {
+      await firebaseDb.collection("meta").doc("proposta_noticia").set({ ...noticia, atualizadoEm: new Date().toISOString() });
+      setNoticiaEstado("Notícia guardada. Vai aparecer em todas as propostas.");
+    } catch (e) { setNoticiaEstado(`Não foi possível guardar: ${e.message}`); }
+  };
+  const escolherImagemNoticia = (file) => {
+    if (!file) return;
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const esc = Math.min(1, 900 / img.width);
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * esc); c.height = Math.round(img.height * esc);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      setNoticia((n) => ({ ...n, imagem: c.toDataURL("image/jpeg", 0.75) }));
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  };
 
   const lista = alvo === "cliente" ? todosClientes : todosProspetos;
   const nifNorm = nifInput.trim();
@@ -8907,7 +8949,7 @@ function PropostasView() {
   };
   const apresentarPdf = () => {
     if (!podeGerar) return;
-    setPdfHtml(gerarPropostaHtml(nomeAlvo, linhas, new Date(), ehProspeto));
+    setPdfHtml(gerarPropostaHtml(nomeAlvo, linhas, new Date(), ehProspeto, noticia));
   };
 
   // "Proposta Entregue" (2026-09-30) — regista na ficha do CLIENTE que esta proposta
@@ -9092,7 +9134,7 @@ function PropostasView() {
                             <td className="p-2">
                               {l.manual
                                 ? <input value={l.produtoAtual} onChange={(e) => atualizarLinha(l.key, { produtoAtual: e.target.value })} placeholder="Produto atual" className="w-36 px-2 py-1 rounded border border-neutral-300 text-xs" />
-                                : <span>{l.produtoAtual || "—"}</span>}
+                                : <span title={l.produtoAtual || ""}>{nomeTarifarioCurto(l.produtoAtual) || "—"}</span>}
                             </td>
                             <td className="p-2">
                               <select value={l.acao} onChange={(e) => atualizarLinha(l.key, { acao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs">
@@ -9142,6 +9184,33 @@ function PropostasView() {
           </div>
         </div>
       )}
+
+      <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-3">
+        <button onClick={() => setNoticiaAberta((v) => !v)} className="text-sm font-medium text-neutral-800">
+          {noticiaAberta ? "▾" : "▸"} Notícia Vodafone na proposta {noticia.titulo || noticia.texto || noticia.imagem ? <span className="text-xs text-green-700 ml-2">(ativa)</span> : <span className="text-xs text-neutral-400 ml-2">(vazia, não aparece)</span>}
+        </button>
+        {noticiaAberta && (
+          <div className="space-y-2">
+            <label className="block text-xs text-neutral-500">Título
+              <input value={noticia.titulo} onChange={(e) => setNoticia({ ...noticia, titulo: e.target.value })} className="mt-1 w-full px-3 py-2 rounded-md border border-neutral-300 text-sm" />
+            </label>
+            <label className="block text-xs text-neutral-500">Texto
+              <textarea value={noticia.texto} onChange={(e) => setNoticia({ ...noticia, texto: e.target.value })} rows={4} className="mt-1 w-full px-3 py-2 rounded-md border border-neutral-300 text-sm" />
+            </label>
+            <div className="flex items-center gap-2 text-xs text-neutral-500">
+              <label className="cursor-pointer px-3 py-1.5 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50">Imagem (opcional)
+                <input type="file" accept="image/*" className="hidden" onChange={(e) => escolherImagemNoticia(e.target.files && e.target.files[0])} />
+              </label>
+              {noticia.imagem && <><img src={noticia.imagem} alt="" className="h-10 rounded" /><button onClick={() => setNoticia({ ...noticia, imagem: "" })} className="hover:text-red-600">Remover imagem</button></>}
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={guardarNoticia} className="text-sm px-3.5 py-1.5 rounded-md bg-neutral-900 text-white">Guardar notícia</button>
+              <button onClick={() => setNoticia({ titulo: "", texto: "", imagem: "" })} className="text-sm px-3.5 py-1.5 rounded-md border border-neutral-300 text-neutral-700">Limpar</button>
+              {noticiaEstado && <span className="text-xs text-neutral-500">{noticiaEstado}</span>}
+            </div>
+          </div>
+        )}
+      </div>
 
       {pdfHtml && (
         <div className="fixed inset-0 z-50 bg-black/60 flex flex-col p-4 gap-3">
