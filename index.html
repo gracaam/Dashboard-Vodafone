@@ -8657,19 +8657,21 @@ function valorAtualLinhaProposta(l) {
 
 // Tipo de serviço para o bloco "Soluções propostas" do PDF: o que o Augusto escolher na
 // coluna "Tipo" ganha sempre; vazio = classificação automática pelo nome do serviço/tarifário.
-const TIPOS_SERVICO_PROPOSTA = ["Móvel", "Fixo e Internet", "Outros"];
+const TIPOS_SERVICO_PROPOSTA = ["Fixo", "Móvel", "Banda Larga Móvel", "IoT/ICT"];
 function tipoAutomaticoProposta(l) {
   const t = `${l.servico || ""} ${l.produtoAtual || ""} ${l.novoTarifario || ""}`.toLowerCase();
-  if (/fibra|fixo|fixa|internet|adsl|ethernet|vpn|one ?net|central|pabx|voip|net premium|router|gpon/.test(t)) return "Fixo e Internet";
-  if (/m[oó]vel|movel|voz|gsm|cart[aã]o|\bsim\b|unlimited|\bgb\b|dados|biz|smartphone|telem/.test(t)) return "Móvel";
-  return "Outros";
+  if (/\bblm\b|banda larga|mifi|router 4g|router 5g|hotspot/.test(t)) return "Banda Larga Móvel";
+  if (/\biot\b|m2m|\bict\b|cloud|office|microsoft|\bm365\b|365|segur|firewall|email|e-mail|alojamento|dom[ií]nio|backup|google/.test(t)) return "IoT/ICT";
+  if (/fibra|fixo|fixa|internet|adsl|ethernet|vpn|one ?net|central|pabx|voip|net premium|dmz|\bip\b|mbps|gbps|gpon/.test(t)) return "Fixo";
+  return "Móvel";
 }
 function tipoServicoProposta(l) { return l.tipo || tipoAutomaticoProposta(l); }
 
 const SOLUCOES_PROPOSTA_TEXTO = {
+  "Fixo": "Internet por fibra ótica, voz fixa e soluções de central telefónica para os locais da empresa.",
   "Móvel": "Voz e dados móveis para a equipa, com tarifários empresariais e gestão centralizada dos cartões.",
-  "Fixo e Internet": "Internet por fibra ótica, voz fixa e soluções de central telefónica para os locais da empresa.",
-  "Outros": "Serviços complementares, como cloud, email empresarial e segurança.",
+  "Banda Larga Móvel": "Internet móvel para equipamentos e locais sem rede fixa, com dados dedicados.",
+  "IoT/ICT": "Equipamentos ligados (IoT) e serviços de TI, como cloud, Microsoft 365, email empresarial e segurança.",
 };
 
 function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
