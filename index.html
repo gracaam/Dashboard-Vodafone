@@ -2809,14 +2809,25 @@ function descarregarFicheiroTexto(nomeFicheiro, conteudo, mimeType) {
 // imprimir). Injeta o html2pdf (CDN) no documento do iframe do painel e captura o
 // conteúdo já preparado (abas todas visíveis + gráficos convertidos em imagem).
 function carregarHtml2PdfNoIframe(win) {
+  // cdnjs primeiro (é o CDN que o dashboard já usa para React/Babel — funciona no Citrix,
+  // onde o jsdelivr está bloqueado); jsdelivr como alternativa.
+  const fontes = [
+    "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js",
+    "https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js",
+  ];
   return new Promise((resolve, reject) => {
     if (!win) return reject(new Error("sem painel"));
     if (win.html2pdf) return resolve();
-    const s = win.document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js";
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error("Não foi possível carregar o gerador de PDF."));
-    win.document.head.appendChild(s);
+    let i = 0;
+    const tentar = () => {
+      if (i >= fontes.length) return reject(new Error("Não foi possível carregar o gerador de PDF."));
+      const s = win.document.createElement("script");
+      s.src = fontes[i++];
+      s.onload = () => resolve();
+      s.onerror = () => { try { if (s.parentNode) s.parentNode.removeChild(s); } catch (e) {} tentar(); };
+      win.document.head.appendChild(s);
+    };
+    tentar();
   });
 }
 
