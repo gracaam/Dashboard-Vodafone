@@ -8711,13 +8711,18 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     if (apagar.length) cancelar = `<h3>Serviços a desativar</h3><table class="tv"><colgroup><col class="s"><col style="width:68%"><col style="width:15%"></colgroup><tbody>${apagar.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(l.produtoAtual || "")}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td></tr>`).join("")}</tbody></table>`;
   }
 
+  // Proposta grande: Soluções ficam na sua própria folha e Valores+Condições noutra,
+  // para manter o mesmo espaço entre áreas (até 4 páginas). Pequena: 3 páginas.
+  const nBlocos = TIPOS_SERVICO_PROPOSTA.filter((t) => ls.some((l) => tipoServicoProposta(l) === t)).length;
+  const grande = nBlocos >= 3 || ls.length + apagar.length >= 5 || (nBlocos >= 2 && ls.length + apagar.length >= 4);
   // ---- Soluções: só os blocos com serviços.
   const blocos = TIPOS_SERVICO_PROPOSTA.map((tipo) => {
     const doTipo = ls.filter((l) => tipoServicoProposta(l) === tipo);
     if (!doTipo.length) return "";
     const n = ehProspeto ? doTipo.reduce((s, l) => s + quantidadeLinhaProposta(l), 0) : doTipo.length;
     const tars = [...new Set(doTipo.map((l) => (ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual) || "").filter(Boolean))];
-    return `<div class="bloco"><div class="bt">${tipo}</div><p>${SOLUCOES_PROPOSTA_TEXTO[tipo]}</p><div class="bm">${n} serviço${n === 1 ? "" : "s"}${tars.length ? " · " + tars.map(esc).join(", ") : ""}</div></div>`;
+    const lista = doTipo.map((l) => `<li><b>${esc(l.servico || "")}</b>${(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual) ? " · " + esc(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual) : ""}${ehProspeto && quantidadeLinhaProposta(l) > 1 ? " × " + quantidadeLinhaProposta(l) : ""}${l.duracao ? " · " + dur(l.duracao) : ""}</li>`).join("");
+    return `<div class="bloco"><div class="bt">${tipo}</div><p>${SOLUCOES_PROPOSTA_TEXTO[tipo]}</p>${grande ? `<ul class="bl">${lista}</ul>` : `<div class="bm">${n} serviço${n === 1 ? "" : "s"}${tars.length ? " · " + tars.map(esc).join(", ") : ""}</div>`}</div>`;
   }).join("");
 
   const contacto = `<b>${esc(ASSINATURA_EMAIL[1].texto)}</b><br>${esc(ASSINATURA_EMAIL[2].texto)} · Vodafone Business<br>${esc(ASSINATURA_EMAIL[3].texto)} · augusto.graca@vodafone.com<br><span class="cinza">Apoio a Clientes Empresariais 16914 · Suporte Técnico 16916 (24x7)</span>`;
@@ -8730,8 +8735,11 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     body { font-family: "Source Sans 3", "Segoe UI", Calibri, sans-serif; color: #1a1a1a; margin: 0; background: #e9e9e9; }
     .capa { width: 210mm; height: 297mm; margin: 0 auto 14px; position: relative; overflow: hidden; page-break-after: always; break-after: page; background: #fff; }
     .corpo { width: 210mm; margin: 0 auto; background: #fff; padding: 0 15mm 15mm; display: flex; flex-direction: column; gap: 14px; }
-    .sec { display: flex; flex-direction: column; gap: 14px; padding-top: 6px; } .sec + .sec { border-top: 1px solid #e2e2e2; margin-top: 10px; padding-top: 18px; }
-    .bloco, .kpis, .nums, tr, .contacto { break-inside: avoid; } h1 { break-after: avoid; } .cond h1 + ul { break-before: avoid; } .cond ul { columns: 2; column-gap: 22px; display: block; } .cond li { font-size: 11.5px; break-inside: avoid; margin-bottom: 4px; } .cond p, .cond .contacto { font-size: 11.5px; }
+    .sec { display: flex; flex-direction: column; gap: 14px; padding-top: 6px; } .sec + .sec { border-top: 1px solid #e2e2e2; margin-top: 22px; padding-top: 26px; } .sec { gap: 18px !important; }
+    .folha { min-height: 265mm; display: flex; flex-direction: column; justify-content: space-between; } .folha + .folha { break-before: page; page-break-before: always; } .solo > .sec { flex: 1; } .solo .bloco { padding: 20px 22px; gap: 10px; margin: auto 0; } .solo .bt { font-size: 20px; } .solo .bloco p, .solo .bl li { font-size: 13.5px; }
+    .folha > .sec + .sec, .folha + .folha > .sec:first-child { margin-top: 0; }
+    @media screen { .folha { min-height: auto; } .folha + .folha { border-top: 1px solid #e2e2e2; margin-top: 12px; padding-top: 20px; } } .fim { margin-top: 6px; } .contacto b { display: block; margin-bottom: 4px; }
+    .bloco, .kpis, .nums, tr, .contacto { break-inside: avoid; } h1 { break-after: avoid; } .cond h1 + ul { break-before: avoid; } .condgrid { display: grid; grid-template-columns: 1.7fr 1fr; gap: 26px; align-items: start; } .cond ul { display: block; } .cond li { font-size: 11px; break-inside: avoid; margin-bottom: 4px; } .cond p, .cond .contacto { font-size: 11.5px; }
     .faixa { height: 8px; background: ${V}; margin: 0 -15mm 4px; flex: none; }
     .capa { padding: 0; } .capa img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .capa .info { position: absolute; left: 15mm; right: 15mm; bottom: 62mm; background: #fff; padding: 22px 26px; border-top: 8px solid ${V}; }
@@ -8743,8 +8751,8 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     .nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; } .num { border-top: 3px solid ${V}; padding-top: 6px; }
     .num b { display: block; font-size: 24px; color: ${V}; } .num span { font-size: 12px; color: #444; }
     .mapa { width: 40%; align-self: center; } .duas { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } .duas b { display: block; }
-    .bloco { border: 1px solid #e2e2e2; padding: 10px 16px; display: flex; flex-direction: column; gap: 4px; }
-    .bt { font-size: 17px; font-weight: 800; color: ${V}; } .bm { font-size: 12px; color: #444; }
+    .bloco { border: 1px solid #e2e2e2; padding: 14px 18px; display: flex; flex-direction: column; gap: 6px; }
+    .bl { margin: 4px 0 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; } .bl li { font-size: 12px; color: #333; } .bt { font-size: 17px; font-weight: 800; color: ${V}; } .bm { font-size: 12px; color: #444; }
     table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
     td, th { overflow-wrap: anywhere; } .tv col.s { width: 17%; } .tv col.t { width: 25%; } .tv col.v { width: 11%; } .tv col.d { width: 11%; } .tp col.s { width: 16%; } .tp col.t { width: 34%; } .tp col.v { width: 13%; } .tp col.q { width: 8%; } .tp col.d { width: 16%; }
     th, td { border-bottom: 1px solid #e2e2e2; padding: 7px 6px; text-align: left; vertical-align: top; }
@@ -8764,6 +8772,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     <div class="info"><div class="k">Proposta comercial</div><div class="c">${cliente}</div><div class="d">${dataTxt} · ${esc(ASSINATURA_EMAIL[1].texto)}, ${esc(ASSINATURA_EMAIL[2].texto)}</div></div></section>
 
   <main class="corpo">${faixa}
+  <div class="folha">
   <section class="sec">
     <h1>Índice</h1>
     <div class="ind">${indice.map((t, i) => `<div><span><b>${i + 1}</b>${t}</span></div>`).join("")}</div>
@@ -8779,10 +8788,12 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
     <img class="mapa" src="${PROPOSTA_IMG_MAPA}" alt="Presença global da Vodafone">
   </section>
 
+  </div>
+  <div class="folha${grande ? " solo" : ""}">
   <section class="sec">
     <h1>3 · Soluções propostas</h1>
     ${blocos || "<p>Sem serviços na proposta.</p>"}
-  </section>
+  </section>${grande ? '\n  </div>\n  <div class="folha">' : ""}
 
   <section class="sec">
     <h1>4 · Valores propostos</h1>
@@ -8794,15 +8805,17 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto) {
 
   <section class="sec cond">
     <h1>5 · Condições e contacto</h1>
-    <ul>
-      <li>Proposta válida por 30 dias.</li>
-      <li>Valores sem IVA. Faturação mensal, pagamento a 30 dias após a emissão da fatura.</li>
-      <li>A duração de cada serviço é a indicada na tabela de valores. Em caso de desistência antes do fim do prazo, aplica-se uma penalização igual à soma das mensalidades em falta.</li>
-      <li>A Vodafone pode ajustar os valores em função de alterações de campanhas ou de mercado.</li>
-      <li>Documento confidencial, destinado exclusivamente a ${cliente}.</li>
-    </ul>
-    <div class="duas fim"><div><h3>Documentos para adjudicação</h3><p>Pedido de Ativação de Serviços · Certidão do Registo Comercial atualizada · NIF da empresa · Documento de identificação do representante legal</p></div><div class="contacto">${contacto}</div></div>
+    <div class="condgrid"><ul>
+      <li>Proposta válida por 30 dias. Valores sem IVA.</li>
+      <li>Faturação mensal, pagamento a 30 dias.</li>
+      <li>Duração de cada serviço conforme a tabela. A desistência antecipada implica o pagamento das mensalidades em falta.</li>
+      <li>Valores sujeitos a ajuste por alterações de campanhas ou de mercado.</li>
+      <li>Documento confidencial, para uso exclusivo de ${cliente}.</li>
+      <li>Na adjudicação: Pedido de Ativação de Serviços, certidão comercial, NIF e identificação do representante legal.</li>
+    </ul><div class="contacto">${contacto}</div></div>
+    
   </section>
+  </div>
   </main>
   </body></html>`;
 }
