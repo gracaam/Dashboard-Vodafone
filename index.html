@@ -8669,9 +8669,11 @@ function tipoServicoProposta(l) { return l.tipo || tipoAutomaticoProposta(l); }
 
 // Mais-valia Vodafone por área. Genérico de propósito: nunca nomeia serviços que
 // podem não estar na proposta (os tarifários propostos aparecem por baixo de cada bloco).
+// Textos aprovados pelo Augusto + frases tiradas da proposta-modelo Vodafone (Word).
+// Nada inventado: não acrescentar afirmações sem fonte.
 const SOLUCOES_PROPOSTA_TEXTO = {
-  "Fixo": "Ligações estáveis e de alta disponibilidade para os locais da empresa, suportadas na rede fixa e de fibra ótica da Vodafone, com apoio técnico empresarial 24x7.",
-  "Móvel": "A equipa ligada na rede móvel Vodafone, com cobertura nacional e 5G, tarifários empresariais ajustados à utilização real e gestão centralizada.",
+  "Fixo": "Ligações estáveis e de alta disponibilidade para os locais da empresa, suportadas na rede fixa e de fibra ótica da Vodafone, com apoio técnico empresarial 24x7. Uma rede empresarial que garante a máxima qualidade de serviço para as aplicações mais críticas, com capacidade de expansão em caso de aumento de necessidades.",
+  "Móvel": "A equipa ligada na rede móvel Vodafone, com cobertura nacional e 5G, tarifários empresariais ajustados à utilização real e gestão centralizada. Voz e dados em simultâneo e a alta velocidade, com controlo de custos.",
   "Banda Larga Móvel": "Internet de alta velocidade na rede 4G/5G Vodafone, para manter a empresa ligada em qualquer local, com ativação rápida e sem obras.",
   "IoT/ICT": "Soluções tecnológicas com o suporte de um operador internacional, integradas com as comunicações da empresa e com um único interlocutor.",
 };
@@ -8718,15 +8720,14 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
   // Proposta grande: Soluções ficam na sua própria folha e Valores+Condições noutra,
   // para manter o mesmo espaço entre áreas (até 4 páginas). Pequena: 3 páginas.
   const nBlocos = TIPOS_SERVICO_PROPOSTA.filter((t) => ls.some((l) => tipoServicoProposta(l) === t)).length;
-  const grande = ls.length + apagar.length >= 8 || (nBlocos >= 3 && ls.length + apagar.length >= 6);
+  const grande = false; // Soluções nunca ficam sozinhas numa folha (pedido do Augusto)
   // ---- Soluções: só os blocos com serviços.
   const blocos = TIPOS_SERVICO_PROPOSTA.map((tipo) => {
     const doTipo = ls.filter((l) => tipoServicoProposta(l) === tipo);
     if (!doTipo.length) return "";
     const n = ehProspeto ? doTipo.reduce((s, l) => s + quantidadeLinhaProposta(l), 0) : doTipo.length;
     const tars = [...new Set(doTipo.map((l) => nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual)).filter(Boolean))];
-    const lista = doTipo.map((l) => `<li><b>${esc(l.servico || "")}</b>${nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual) ? " · " + esc(nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual)) : ""}${ehProspeto && quantidadeLinhaProposta(l) > 1 ? " × " + quantidadeLinhaProposta(l) : ""}${l.duracao ? " · " + dur(l.duracao) : ""}</li>`).join("");
-    return `<div class="bloco"><div class="bt">${tipo}</div><p>${SOLUCOES_PROPOSTA_TEXTO[tipo]}</p>${grande ? `<ul class="bl">${lista}</ul>` : `<div class="bm">${n} serviço${n === 1 ? "" : "s"}${tars.length ? " · " + tars.map(esc).join(", ") : ""}</div>`}</div>`;
+    return `<div class="bloco"><div class="bt">${tipo}</div><p>${SOLUCOES_PROPOSTA_TEXTO[tipo]}</p></div>`;
   }).join("");
 
   const noticiaHtml = noticia && (noticia.titulo || noticia.texto || noticia.imagem)
