@@ -1746,11 +1746,11 @@ ${seccaoContaHtml}
 <button class="btnprint" onclick="window.print()">Imprimir / PDF</button>
 <script>
 // Este botão fica escondido quando o painel é mostrado dentro do dashboard (iframe da
-// vista "Análise de Faturas", que já tem o seu próprio "🖨️ Imprimir/PDF e HTML" na barra
-// de ações, também responsável por gravar o ficheiro — 2 botões a fazer o mesmo seria
-// confuso). Continua visível quando este ficheiro .html exportado é aberto sozinho, fora
-// do dashboard, sem nenhuma barra de ações disponível — decisão explícita do utilizador,
-// 2026-09-17. window.self !== window.top é o sinal técnico "estou dentro de um iframe",
+// vista "Análise de Faturas", que já tem o seu próprio "Imprimir / PDF" na barra de
+// ações — 2 botões a fazer o mesmo seria confuso). Continua visível se algum dia este
+// HTML for aberto sozinho, fora do dashboard, sem barra de ações disponível — decisão
+// explícita do utilizador, 2026-09-17. window.self !== window.top é o sinal técnico
+// "estou dentro de um iframe",
 // nunca uma flag passada à parte — evita 2 versões da mesma função geradora.
 if (window.self !== window.top) { const bp = document.querySelector(".btnprint"); if (bp) bp.style.display = "none"; }
 const DADOS = ${JSON.stringify(dadosParaScript)};
@@ -7935,19 +7935,10 @@ function AnaliseFaturasView() {
   const imprimirClick = async () => {
     if (!htmlPainel) return;
     setAImprimir(true);
-    const sufixoData = dataISOCurta(dataAnalise);
-    const nomeFicheiroHtml = `_Analise_Faturas_${sufixoData}.html`;
-    // Descarrega SEMPRE o ficheiro HTML (2026-10-01, pedido de Augusto): em Citrix/nuvem
-    // o botão só gravava no Storage e nunca dava o ficheiro — agora o download acontece
-    // nos dois modos, e a gravação na nuvem passa a ser um extra (backup), não o único.
-    descarregarFicheiroTexto(nomeFicheiroHtml, htmlPainel, "text/html");
-    let aviso = `Ficheiro ${nomeFicheiroHtml} descarregado.`;
-    if (nuvemAtivaAnalise) {
-      const ok = await guardarExportAnaliseFaturasNuvem(nifSelecionado, nomeFicheiroHtml, htmlPainel, "text/html");
-      aviso += ok ? " Também gravado na nuvem." : " (Não foi possível gravar na nuvem.)";
-    }
-    aviso += " Abre-se o diálogo de impressão — a análise mantém-se em ecrã.";
-    setAvisoSucesso(aviso);
+    // Só PDF (2026-10-01, pedido de Augusto): deixou de se exportar/descarregar o
+    // ficheiro .html — abre-se apenas o diálogo de impressão, onde ele escolhe
+    // "Guardar como PDF". O painel já imprime com cores e gráficos (ver prepararImpressao).
+    setAvisoSucesso('Abre-se o diálogo de impressão — escolhe "Guardar como PDF". A análise mantém-se em ecrã.');
     setAImprimir(false);
     setTimeout(() => setAvisoSucesso(""), 8000);
     // Diálogo de impressão do browser sobre o MESMO conteúdo já em ecrã (iframe) —
@@ -8252,7 +8243,7 @@ function AnaliseFaturasView() {
                 <div className="flex items-center gap-2 flex-wrap pt-1">
                   <button onClick={imprimirClick} disabled={aImprimir}
                     className="text-sm px-3.5 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-40 whitespace-nowrap"><Icone nome="impressora" className="w-4 h-4 shrink-0" />
-                    {aImprimir ? "A gravar…" : "Imprimir/PDF e HTML"}
+                    {aImprimir ? "A preparar…" : "Imprimir / PDF"}
                   </button>
                   <button onClick={argumentosClick}
                     className="text-sm px-3.5 py-2 rounded-md bg-neutral-900 text-white font-medium hover:bg-neutral-800 whitespace-nowrap"><Icone nome="conversa" className="w-4 h-4 shrink-0" />
