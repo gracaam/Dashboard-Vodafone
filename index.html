@@ -1593,6 +1593,7 @@ function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
   .btnprint{position:fixed;right:20px;bottom:20px;background:var(--ink);color:#fff;border:0;border-radius:999px;padding:12px 20px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 8px 24px rgba(16,24,40,.3);transition:.15s}
   .btnprint:hover{background:var(--vf)}
   .hidden{display:none}
+  body.captura .tabs,body.captura .btnprint{display:none!important}
   @media print{.btnprint,.tabs{display:none}.hidden{display:block!important}.scroll{max-height:none;overflow:visible}th{position:static}.card,.ins,.kpi,.chartbox{break-inside:avoid;page-break-inside:avoid}*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
   @page{margin:10mm}`;
 
@@ -1853,15 +1854,20 @@ function _restaurarGraficos() {
 }
 window.prepararImpressao = function () {
   _ocultasImpressao.length = 0;
+  document.body.classList.add("captura"); // esconde a barra de abas e o botão na captura/impressão
   document.querySelectorAll(".hidden").forEach((e) => { _ocultasImpressao.push(e); e.classList.remove("hidden"); });
   _graficosParaImagem();
 };
 window.addEventListener("beforeprint", () => window.prepararImpressao());
-window.addEventListener("afterprint", () => {
+// terminarImpressao(): repõe tudo como estava (usado depois da geração de PDF pelo
+// dashboard, em vez do afterprint do browser).
+window.terminarImpressao = function () {
   _restaurarGraficos();
   _ocultasImpressao.forEach((e) => e.classList.add("hidden"));
   _ocultasImpressao.length = 0;
-});
+  document.body.classList.remove("captura");
+};
+window.addEventListener("afterprint", () => window.terminarImpressao());
 
 const vistas = { geral: "v-geral" };
 DADOS.contas.forEach((c) => { vistas["c" + c.idDom] = "v-c" + c.idDom; });
@@ -2796,6 +2802,22 @@ function descarregarFicheiroTexto(nomeFicheiro, conteudo, mimeType) {
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
   return { nomeFicheiro };
+}
+
+// Gera um PDF a partir do painel da Análise de Faturas, DENTRO do dashboard (2026-10-01,
+// pedido de Augusto: o PDF saía com o URL/data/título que o browser acrescenta ao
+// imprimir). Injeta o html2pdf (CDN) no documento do iframe do painel e captura o
+// conteúdo já preparado (abas todas visíveis + gráficos convertidos em imagem).
+function carregarHtml2PdfNoIframe(win) {
+  return new Promise((resolve, reject) => {
+    if (!win) return reject(new Error("sem painel"));
+    if (win.html2pdf) return resolve();
+    const s = win.document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js";
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("Não foi possível carregar o gerador de PDF."));
+    win.document.head.appendChild(s);
+  });
 }
 
 // Fase 3, Passo 3 (2026-09-20) — grava o Excel de decisão ("Novos Tarifários") na
@@ -7935,26 +7957,34 @@ function AnaliseFaturasView() {
   const imprimirClick = async () => {
     if (!htmlPainel) return;
     setAImprimir(true);
-    // Só PDF (2026-10-01, pedido de Augusto): deixou de se exportar/descarregar o
-    // ficheiro .html — abre-se apenas o diálogo de impressão, onde ele escolhe
-    // "Guardar como PDF". O painel já imprime com cores e gráficos (ver prepararImpressao).
-    setAvisoSucesso('Abre-se o diálogo de impressão — escolhe "Guardar como PDF". A análise mantém-se em ecrã.');
-    setAImprimir(false);
-    setTimeout(() => setAvisoSucesso(""), 8000);
-    // Diálogo de impressão do browser sobre o MESMO conteúdo já em ecrã (iframe) —
-    // nunca um ficheiro/janela à parte, para nunca divergir do que Augusto está a ver.
-    // Antes de imprimir, avisa o painel para mostrar todas as abas e redimensionar os
-    // gráficos (senão os das abas escondidas saíam em branco no PDF) — daí a pequena
-    // espera antes do print. window.print() é SÍNCRONO no Chrome (bloqueia o separador
-    // até o diálogo fechar).
+    // Geração de PDF DENTRO do dashboard (2026-10-01, pedido de Augusto): o ficheiro sai
+    // criado pelo painel, sem diálogo de impressão e sem o URL/data/título que o browser
+    // acrescenta ao imprimir. Fallback: se a geração falhar, abre o diálogo de impressão.
+    const win = iframeRef.current && iframeRef.current.contentWindow;
+    const nomePdf = `Analise_Faturas_${sanitizarNomePasta(clienteAtual ? clienteAtual.e : "Cliente")}_${dataISOCurta(dataAnalise)}.pdf`;
     try {
-      if (iframeRef.current && iframeRef.current.contentWindow && iframeRef.current.contentWindow.prepararImpressao) {
-        iframeRef.current.contentWindow.prepararImpressao();
-      }
-    } catch (e) {}
-    setTimeout(() => {
-      if (iframeRef.current && iframeRef.current.contentWindow) iframeRef.current.contentWindow.print();
-    }, 300);
+      if (!win) throw new Error("painel indisponível");
+      if (win.prepararImpressao) win.prepararImpressao();
+      await new Promise((r) => setTimeout(r, 250));
+      await carregarHtml2PdfNoIframe(win);
+      await win.html2pdf().set({
+        margin: [10, 10, 12, 10],
+        filename: nomePdf,
+        image: { type: "jpeg", quality: 0.95 },
+        html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff", windowWidth: win.document.body.scrollWidth },
+        jsPDF: { unit: "pt", format: "a4", orientation: "portrait" },
+        pagebreak: { mode: ["css", "legacy"], avoid: [".card", ".ins", ".kpi", ".chartbox", "tr"] },
+      }).from(win.document.body).save();
+      setAvisoSucesso(`PDF gerado e descarregado (${nomePdf}) — sem cabeçalhos do browser. A análise mantém-se em ecrã.`);
+    } catch (e) {
+      console.warn("Não foi possível gerar o PDF no dashboard — a abrir o diálogo de impressão:", e && e.message);
+      setAvisoSucesso("Não consegui gerar o PDF automaticamente — abre-se o diálogo de impressão.");
+      try { if (win) win.print(); } catch (e2) {}
+    } finally {
+      try { if (win && win.terminarImpressao) win.terminarImpressao(); } catch (e) {}
+      setAImprimir(false);
+      setTimeout(() => setAvisoSucesso(""), 8000);
+    }
   };
 
   const argumentosClick = async () => {
