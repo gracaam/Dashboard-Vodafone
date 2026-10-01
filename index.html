@@ -8890,7 +8890,6 @@ function PropostasView() {
   };
   const apresentarPdf = () => {
     if (!podeGerar) return;
-    setPedidoPdf(true);
     setPdfHtml(gerarPropostaHtml(nomeAlvo, linhas, new Date(), ehProspeto));
   };
 
@@ -9128,9 +9127,15 @@ function PropostasView() {
       )}
 
       {pdfHtml && (
-        <iframe ref={iframePdfRef} srcDoc={pdfHtml} title="Proposta PDF"
-          style={{ position: "absolute", width: "1px", height: "1px", opacity: 0, left: "-9999px", pointerEvents: "none" }}
-          onLoad={() => { if (pedidoPdf && iframePdfRef.current && iframePdfRef.current.contentWindow) { iframePdfRef.current.contentWindow.print(); setPedidoPdf(false); } }} />
+        <div className="fixed inset-0 z-50 bg-black/60 flex flex-col p-4 gap-3">
+          <div className="flex items-center gap-2 bg-white rounded-lg px-4 py-2">
+            <div className="text-sm font-medium">Proposta — {nomeAlvo}</div>
+            <button onClick={() => { const w = iframePdfRef.current && iframePdfRef.current.contentWindow; if (w) { w.focus(); w.print(); } }}
+              className="ml-auto text-sm px-3.5 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700">Imprimir / Guardar PDF</button>
+            <button onClick={() => setPdfHtml("")} className="text-sm px-3.5 py-1.5 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50">Fechar</button>
+          </div>
+          <iframe ref={iframePdfRef} srcDoc={pdfHtml} title="Proposta PDF" className="flex-1 w-full bg-white rounded-lg" />
+        </div>
       )}
     </div>
   );
