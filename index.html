@@ -7863,16 +7863,16 @@ function AnaliseFaturasView() {
     setAImprimir(true);
     const sufixoData = dataISOCurta(dataAnalise);
     const nomeFicheiroHtml = `_Analise_Faturas_${sufixoData}.html`;
-    let aviso;
+    // Descarrega SEMPRE o ficheiro HTML (2026-10-01, pedido de Augusto): em Citrix/nuvem
+    // o botão só gravava no Storage e nunca dava o ficheiro — agora o download acontece
+    // nos dois modos, e a gravação na nuvem passa a ser um extra (backup), não o único.
+    descarregarFicheiroTexto(nomeFicheiroHtml, htmlPainel, "text/html");
+    let aviso = `Ficheiro ${nomeFicheiroHtml} descarregado.`;
     if (nuvemAtivaAnalise) {
       const ok = await guardarExportAnaliseFaturasNuvem(nifSelecionado, nomeFicheiroHtml, htmlPainel, "text/html");
-      aviso = ok
-        ? `Painel gravado na nuvem (${nomeFicheiroHtml}). Abre-se o diálogo de impressão — a análise mantém-se em ecrã.`
-        : `Não foi possível gravar o painel na nuvem. Abre-se na mesma o diálogo de impressão — a análise mantém-se em ecrã.`;
-    } else {
-      const r = descarregarFicheiroTexto(nomeFicheiroHtml, htmlPainel, "text/html");
-      aviso = `Painel descarregado: ${r.nomeFicheiro}. Abre-se o diálogo de impressão — a análise mantém-se em ecrã.`;
+      aviso += ok ? " Também gravado na nuvem." : " (Não foi possível gravar na nuvem.)";
     }
+    aviso += " Abre-se o diálogo de impressão — a análise mantém-se em ecrã.";
     setAvisoSucesso(aviso);
     setAImprimir(false);
     setTimeout(() => setAvisoSucesso(""), 8000);
@@ -7891,16 +7891,15 @@ function AnaliseFaturasView() {
     const nomeFicheiroMd = `_Argumentos_Reuniao_${sufixoData}.md`;
     setTextoArgumentos(md);
     setMostrarArgumentos(true);
-    let aviso;
+    // Descarrega SEMPRE o ficheiro .md (2026-10-01) — mesma correção do HTML: em
+    // Citrix/nuvem o botão só gravava no Storage e nunca dava o ficheiro.
+    descarregarFicheiroTexto(nomeFicheiroMd, md, "text/markdown");
+    let aviso = `Ficheiro ${nomeFicheiroMd} descarregado.`;
     if (nuvemAtivaAnalise) {
       const ok = await guardarExportAnaliseFaturasNuvem(nifSelecionado, nomeFicheiroMd, md, "text/markdown");
-      aviso = ok
-        ? `Argumentos gravados na nuvem (${nomeFicheiroMd}). A análise mantém-se em ecrã.`
-        : `Não foi possível gravar os argumentos na nuvem. A análise mantém-se em ecrã.`;
-    } else {
-      const r = descarregarFicheiroTexto(nomeFicheiroMd, md, "text/markdown");
-      aviso = `Argumentos descarregados: ${r.nomeFicheiro}. A análise mantém-se em ecrã.`;
+      aviso += ok ? " Também gravado na nuvem." : " (Não foi possível gravar na nuvem.)";
     }
+    aviso += " A análise mantém-se em ecrã.";
     setAvisoSucesso(aviso);
     setTimeout(() => setAvisoSucesso(""), 8000);
     // O painel de argumentos (textoArgumentos/mostrarArgumentos) aparece por baixo do
