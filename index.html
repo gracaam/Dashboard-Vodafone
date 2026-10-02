@@ -3524,13 +3524,23 @@ const CABECALHOS_CONTRATO = [
 // Excel ou CSV (2026-10-02). O CSV lê-se como texto (UTF-8; se tiver caracteres
 // inválidos, Windows-1252 — o que o Excel PT grava) e com `raw: true`, para as datas
 // dd/mm/aaaa ficarem texto e nunca serem lidas à americana (mm/dd). O separador
-// (";" ou ",") é detetado pelo SheetJS.
+// (";", "," ou tabulação) é detetado pelo SheetJS.
 async function lerWorkbookContratos(f) {
   const buf = await f.arrayBuffer();
   if (!/\.csv$/i.test(f.name || "")) return XLSX.read(buf, { type: "array" });
+  // UTF-16 (2026-10-02): os CSV exportados pelo sistema de contratos vêm em UTF-16
+  // (com ou sem BOM — muitos bytes nulos) e separados por tabulação.
+  const bytes = new Uint8Array(buf);
+  const amostra = bytes.subarray(0, 400);
+  const nulosPares = amostra.filter((b, i) => i % 2 === 0 && b === 0).length;
+  const nulosImpares = amostra.filter((b, i) => i % 2 === 1 && b === 0).length;
   let texto;
-  try { texto = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
-  catch (e) { texto = new TextDecoder("windows-1252").decode(buf); }
+  if ((bytes[0] === 0xFF && bytes[1] === 0xFE) || nulosImpares > amostra.length / 4) texto = new TextDecoder("utf-16le").decode(buf);
+  else if ((bytes[0] === 0xFE && bytes[1] === 0xFF) || nulosPares > amostra.length / 4) texto = new TextDecoder("utf-16be").decode(buf);
+  else {
+    try { texto = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+    catch (e) { texto = new TextDecoder("windows-1252").decode(buf); }
+  }
   return XLSX.read(texto.replace(/^\uFEFF/, ""), { type: "string", raw: true });
 }
 
