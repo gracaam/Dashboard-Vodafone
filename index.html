@@ -5563,6 +5563,15 @@ const CACHE_EXTRAS_NUVEM = new Map();
 // para Cliente, e misturar as duas caches podia mostrar extras da coleção errada.
 const CACHE_EXTRAS_NUVEM_PROSPETOS = new Map();
 
+// Nomes de Clientes e Prospetos sempre em MAIÚSCULAS (pedido do Augusto, 2026-10-02).
+// Aplicado ao ler as listas (local e nuvem) e ao gravar, por isso aparece igual em
+// todo o dashboard, nas propostas e nos emails, sem mexer à mão nos registos antigos.
+function nomeEmMaiusculas(r) {
+  if (!r || typeof r.e !== "string") return r;
+  const e = r.e.toLocaleUpperCase("pt-PT");
+  return e === r.e ? r : { ...r, e };
+}
+
 function useClientesNovos() {
   const firebaseUser = useFirebaseAuthUser();
   const { feita: nuvemMigrada, marcar: marcarMigrado } = useMigracaoNuvem("clientes", firebaseUser);
@@ -5594,17 +5603,17 @@ function useClientesNovos() {
   // Linhas do Excel sem NIF ficam de fora da lista principal (nunca aparecem no
   // seletor) — vivem à parte em `clientesSemNif`, mostradas na secção "Sem NIF".
   const todosClientesLocal = useMemo(
-    () => [...clientesExcel.filter((c) => c.n), ...clientesNovos].sort((a, b) => a.e.localeCompare(b.e)),
+    () => [...clientesExcel.filter((c) => c.n), ...clientesNovos].map(nomeEmMaiusculas).sort((a, b) => a.e.localeCompare(b.e)),
     [clientesExcel, clientesNovos]
   );
-  const todosClientesNuvem = useMemo(() => [...nuvem.itens].sort((a, b) => a.e.localeCompare(b.e)), [nuvem.itens]);
+  const todosClientesNuvem = useMemo(() => nuvem.itens.map(nomeEmMaiusculas).sort((a, b) => a.e.localeCompare(b.e)), [nuvem.itens]);
   const todosClientes = nuvemAtiva ? todosClientesNuvem : todosClientesLocal;
   // A migração já copiou todos os registos COM NIF (é a chave do documento no
   // Firestore) — "sem NIF" deixa de fazer sentido depois de migrado.
-  const clientesSemNifLocal = useMemo(() => clientesExcel.filter((c) => !c.n), [clientesExcel]);
+  const clientesSemNifLocal = useMemo(() => clientesExcel.filter((c) => !c.n).map(nomeEmMaiusculas), [clientesExcel]);
   const clientesSemNif = nuvemAtiva ? [] : clientesSemNifLocal;
 
-  const adicionar = nuvemAtiva ? nuvem.definir : adicionarLocal;
+  const adicionar = (r, ...resto) => (nuvemAtiva ? nuvem.definir : adicionarLocal)(nomeEmMaiusculas(r), ...resto);
   const removerAutoCriado = nuvemAtiva
     ? (nif, linhaExcel) => {
         const alvo = nuvem.itens.find((c) => c.n === nif && c.autoOrigemLinhaExcel === linhaExcel);
@@ -9292,14 +9301,14 @@ function useProspetosNovos() {
         telDaCarteira: !p.tel && !!o.tel,
         emailDaCarteira: !p.email && !!o.email,
       };
-    }).sort((a, b) => a.e.localeCompare(b.e));
+    }).map(nomeEmMaiusculas).sort((a, b) => a.e.localeCompare(b.e));
   }, [prospetosExcel, prospetosNovos, contactoOverrides]);
-  const todosProspetosNuvem = useMemo(() => [...nuvem.itens].sort((a, b) => a.e.localeCompare(b.e)), [nuvem.itens]);
+  const todosProspetosNuvem = useMemo(() => nuvem.itens.map(nomeEmMaiusculas).sort((a, b) => a.e.localeCompare(b.e)), [nuvem.itens]);
   const todosProspetos = nuvemAtiva ? todosProspetosNuvem : todosProspetosLocal;
-  const prospetosSemNifLocal = useMemo(() => prospetosExcel.filter((p) => !p.n), [prospetosExcel]);
+  const prospetosSemNifLocal = useMemo(() => prospetosExcel.filter((p) => !p.n).map(nomeEmMaiusculas), [prospetosExcel]);
   const prospetosSemNif = nuvemAtiva ? [] : prospetosSemNifLocal;
 
-  const adicionar = nuvemAtiva ? nuvem.definir : adicionarLocal;
+  const adicionar = (r, ...resto) => (nuvemAtiva ? nuvem.definir : adicionarLocal)(nomeEmMaiusculas(r), ...resto);
 
   const [aMigrar, setAMigrar] = useState(false);
   const migrarParaNuvem = async () => {
