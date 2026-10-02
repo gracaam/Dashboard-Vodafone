@@ -3521,6 +3521,19 @@ const CABECALHOS_CONTRATO = [
 
 // Lê 1 ficheiro (workbook SheetJS) → { conta, contratos, avisos, erro }. O cabeçalho
 // encontra-se pela linha onde aparece "ID Contrato" (nunca por posição fixa).
+// Excel ou CSV (2026-10-02). O CSV lê-se como texto (UTF-8; se tiver caracteres
+// inválidos, Windows-1252 — o que o Excel PT grava) e com `raw: true`, para as datas
+// dd/mm/aaaa ficarem texto e nunca serem lidas à americana (mm/dd). O separador
+// (";" ou ",") é detetado pelo SheetJS.
+async function lerWorkbookContratos(f) {
+  const buf = await f.arrayBuffer();
+  if (!/\.csv$/i.test(f.name || "")) return XLSX.read(buf, { type: "array" });
+  let texto;
+  try { texto = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+  catch (e) { texto = new TextDecoder("windows-1252").decode(buf); }
+  return XLSX.read(texto.replace(/^\uFEFF/, ""), { type: "string", raw: true });
+}
+
 function lerContratosPermanenciaDeWorkbook(wb) {
   for (const nomeFolha of wb.SheetNames) {
     const sheet = wb.Sheets[nomeFolha];
@@ -3528,7 +3541,9 @@ function lerContratosPermanenciaDeWorkbook(wb) {
     const linhas = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true, blankrows: true });
     const idxCab = linhas.findIndex((l) => (l || []).some((c) => normalizarTextoContrato(c) === "id contrato"));
     if (idxCab < 0) continue;
-    const conta = extrairContaPrimeiraLinha(linhas[0]);
+    // A conta na 1ª linha é opcional (2026-10-02): se não existir (ou se a 1ª linha já
+    // for o cabeçalho), fica vazia e Augusto escreve-a na caixa "Conta" do ecrã.
+    const conta = idxCab > 0 ? extrairContaPrimeiraLinha(linhas[0]) : "";
     const colunas = {};
     (linhas[idxCab] || []).forEach((c, i) => {
       const h = normalizarTextoContrato(c);
@@ -6897,7 +6912,7 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
     for (const f of files) {
       const base = { chave: `${f.name}-${f.size}-${Math.random()}`, ficheiro: f.name, confirmado: false };
       try {
-        lidos.push({ ...base, ...lerContratosPermanenciaDeWorkbook(XLSX.read(await f.arrayBuffer(), { type: "array" })) });
+        lidos.push({ ...base, ...lerContratosPermanenciaDeWorkbook(await lerWorkbookContratos(f)) });
       } catch (e) {
         lidos.push({ ...base, conta: "", contratos: [], avisos: [], erro: "Não foi possível ler o ficheiro: " + e.message });
       }
@@ -6993,9 +7008,9 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
             onDragLeave={() => setAArrastar(false)}
             onDrop={(e) => { e.preventDefault(); setAArrastar(false); const fs = [...e.dataTransfer.files]; if (fs.length) lerFicheiros(fs); }}
             className={`border border-dashed rounded-md px-2.5 py-2 cursor-pointer text-center text-xs ${aArrastar ? "border-red-500 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-400 hover:border-neutral-400"}`}>
-            <input ref={inputRef} type="file" accept=".xlsx,.xls" multiple className="hidden"
+            <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" multiple className="hidden"
               onChange={(e) => { const fs = [...e.target.files]; if (fs.length) lerFicheiros(fs); e.target.value = ""; }} />
-            {aLer ? "A ler…" : "📤 Arrasta um ou vários ficheiros de contratos (um por conta), ou clica para escolher"}
+            {aLer ? "A ler…" : "📤 Arrasta um ou vários ficheiros de contratos — Excel ou CSV, um por conta — ou clica para escolher"}
           </div>
 
           {aviso && <div className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-2.5 py-2">{aviso}</div>}
@@ -7013,7 +7028,7 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
                   <div className="flex items-center gap-2 text-xs">
                     <label className="text-neutral-500">Conta:</label>
                     <input value={it.conta} onChange={(e) => mudarItem(it.chave, { conta: e.target.value, confirmado: false })}
-                      placeholder="Nº de conta (a 1ª linha não tinha)" className={`px-2 py-1 rounded border text-xs w-56 ${a.conta ? "border-neutral-300" : "border-red-400"}`} />
+                      placeholder="Escreve o nº de conta" className={`px-2 py-1 rounded border text-xs w-56 ${a.conta ? "border-neutral-300" : "border-red-400"}`} />
                   </div>
                   {!a.conta && <div className="text-xs text-red-700">Falta o nº de conta — escreve-o acima (não é possível gravar sem conta).</div>}
                   {a.repetida && <div className="text-xs text-red-700">Outro ficheiro deste lote é da mesma conta ({a.conta}) — descarta um deles.</div>}
