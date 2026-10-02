@@ -6890,6 +6890,22 @@ async function gravarContratosConta(nif, conta, contratos, removerDeNif) {
   }
 }
 
+// Corrige o nº de uma conta já gravada (2026-10-02, pedido de Augusto — engano ao
+// escrever a conta). Move os contratos e a data de importação para o nº novo e apaga o
+// antigo, numa só escrita (nunca fica a conta duplicada nem perdida a meio).
+async function mudarNumeroContaContratos(nif, antiga, nova, dados) {
+  await firebaseDb.collection(COLECAO_CONTRATOS).doc(nif).update({
+    [`contas.${nova}`]: dados,
+    [`contas.${antiga}`]: firebase.firestore.FieldValue.delete(),
+  });
+}
+
+// Apaga uma conta inteira (todos os seus contratos) da ficha (2026-10-02, pedido de
+// Augusto — conta gravada por engano). Só depois de confirmar no ecrã.
+async function apagarContaContratos(nif, conta) {
+  await firebaseDb.collection(COLECAO_CONTRATOS).doc(nif).update({ [`contas.${conta}`]: firebase.firestore.FieldValue.delete() });
+}
+
 function LinhaContratoResumo({ c, extra }) {
   // Mostra o Produto do contrato por linha (2026-09-30, pedido de Augusto) — é o
   // "tarifário atual" usado depois na Proposta. `produto` (coluna "Produto") ou `tipo`
@@ -6910,7 +6926,41 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
   const [aArrastar, setAArrastar] = useState(false);
   const inputRef = React.useRef(null);
 
-  useEffect(() => { setItens([]); setAviso(""); }, [nif]);
+  const [editarConta, setEditarConta] = useState(null); // { antiga, nova, erro }
+  useEffect(() => { setItens([]); setAviso(""); setEditarConta(null); }, [nif]);
+
+  const [apagarConta, setApagarConta] = useState(null); // nº da conta a confirmar
+  const confirmarApagarConta = async () => {
+    const conta = apagarConta;
+    try {
+      await apagarContaContratos(nif, conta);
+      setApagarConta(null);
+      setAviso(`Conta ${conta} apagada desta ficha.`);
+      setTimeout(() => setAviso(""), 10000);
+    } catch (e) {
+      setApagarConta(null);
+      setAviso("Erro ao apagar: " + (e.message || e));
+    }
+  };
+
+  const confirmarMudarConta = async () => {
+    const { antiga } = editarConta;
+    const nova = String(editarConta.nova || "").replace(/\D/g, "");
+    if (!nova) { setEditarConta({ ...editarConta, erro: "Escreve o nº de conta correto." }); return; }
+    if (nova === antiga) { setEditarConta(null); return; }
+    const contas = (mapa.get(nif) && mapa.get(nif).contas) || {};
+    if (contas[nova]) { setEditarConta({ ...editarConta, erro: `Este cliente já tem a conta ${nova}.` }); return; }
+    const outro = [...mapa.entries()].find(([n, d]) => n !== nif && d && d.contas && d.contas[nova]);
+    if (outro) { setEditarConta({ ...editarConta, erro: `A conta ${nova} já está noutro cliente (NIF ${outro[0]}).` }); return; }
+    try {
+      await mudarNumeroContaContratos(nif, antiga, nova, contas[antiga]);
+      setEditarConta(null);
+      setAviso(`Conta ${antiga} alterada para ${nova}.`);
+      setTimeout(() => setAviso(""), 10000);
+    } catch (e) {
+      setEditarConta({ ...editarConta, erro: "Erro ao gravar: " + (e.message || e) });
+    }
+  };
 
   const docAtual = mapa.get(nif) || null;
   const contasAtuais = Object.entries((docAtual && docAtual.contas) || {}).sort((a, b) => a[0].localeCompare(b[0]));
@@ -6994,7 +7044,28 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
                       <span className="font-medium">Conta {conta}</span>
                       <span className="text-xs text-neutral-500">{(dados.contratos || []).length} contrato(s) · importado em {dados.atualizadoEm ? new Date(dados.atualizadoEm).toLocaleDateString("pt-PT") : "—"}</span>
                       {desatualizada && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ desatualizada{dias !== null ? ` (há ${dias} dias)` : ""} — volta a importar</span>}
+                      <button onClick={(e) => { e.preventDefault(); setEditarConta({ antiga: conta, nova: conta, erro: "" }); }}
+                        className="ml-auto text-[11px] text-neutral-500 hover:text-red-600 underline" title="Corrigir o nº desta conta">✏ Mudar nº de conta</button>
+                      <button onClick={(e) => { e.preventDefault(); setApagarConta(conta); }}
+                        className="text-sm leading-none text-neutral-400 hover:text-red-600 px-1" title="Apagar esta conta e todos os seus contratos">✕</button>
                     </summary>
+                    {apagarConta === conta && (
+                      <div className="mt-1.5 flex items-center gap-2 flex-wrap text-xs text-red-800 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+                        <span>Apagar a conta {conta} e os seus {(dados.contratos || []).length} contrato(s) desta ficha? Não dá para desfazer (só voltando a importar o ficheiro).</span>
+                        <button onClick={confirmarApagarConta} className="px-2 py-1 rounded bg-red-600 text-white">Apagar</button>
+                        <button onClick={() => setApagarConta(null)} className="px-2 py-1 rounded border border-neutral-300 bg-white">Cancelar</button>
+                      </div>
+                    )}
+                    {editarConta && editarConta.antiga === conta && (
+                      <div className="mt-1.5 flex items-center gap-2 flex-wrap text-xs">
+                        <span className="text-neutral-500">Nº correto:</span>
+                        <input value={editarConta.nova} onChange={(e) => setEditarConta({ ...editarConta, nova: e.target.value, erro: "" })}
+                          className="px-2 py-1 rounded border border-neutral-300 text-xs w-44" />
+                        <button onClick={confirmarMudarConta} className="px-2 py-1 rounded bg-red-600 text-white">Gravar</button>
+                        <button onClick={() => setEditarConta(null)} className="px-2 py-1 rounded border border-neutral-300">Cancelar</button>
+                        {editarConta.erro && <span className="text-red-700 w-full">{editarConta.erro}</span>}
+                      </div>
+                    )}
                     {/* Janela com scroll (2026-09-30, pedido de Augusto): mostra ~10
                         contratos de cada vez; com mais, rola por baixo dentro da própria
                         conta. Antes listava os 156 de uma vez. */}
