@@ -7044,9 +7044,9 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
                       <span className="font-medium">Conta {conta}</span>
                       <span className="text-xs text-neutral-500">{(dados.contratos || []).length} contrato(s) · importado em {dados.atualizadoEm ? new Date(dados.atualizadoEm).toLocaleDateString("pt-PT") : "—"}</span>
                       {desatualizada && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ desatualizada{dias !== null ? ` (há ${dias} dias)` : ""} — volta a importar</span>}
-                      <button onClick={(e) => { e.preventDefault(); setEditarConta({ antiga: conta, nova: conta, erro: "" }); }}
+                      <button onClick={(e) => { e.preventDefault(); const dt = e.currentTarget.closest("details"); if (dt) dt.open = true; setEditarConta({ antiga: conta, nova: conta, erro: "" }); }}
                         className="ml-auto text-[11px] text-neutral-500 hover:text-red-600 underline" title="Corrigir o nº desta conta">✏ Mudar nº de conta</button>
-                      <button onClick={(e) => { e.preventDefault(); setApagarConta(conta); }}
+                      <button onClick={(e) => { e.preventDefault(); const dt = e.currentTarget.closest("details"); if (dt) dt.open = true; setApagarConta(conta); }}
                         className="text-sm leading-none text-neutral-400 hover:text-red-600 px-1" title="Apagar esta conta e todos os seus contratos">✕</button>
                     </summary>
                     {apagarConta === conta && (
@@ -8787,6 +8787,51 @@ const SOLUCOES_PROPOSTA_TEXTO = {
 // ("BLM Ind All included_abr2023 - 100102234 - REG4X" → "BLM Ind All included_abr2023").
 function nomeTarifarioCurto(t) { return String(t || "").split(" - ")[0].trim(); }
 
+// Descritivo dos tarifários propostos (2026-10-02, pedido do Augusto): só características,
+// nunca preços. Fonte: Portal Comercial Vodafone (Voz Móvel Biz, data de início
+// 17-08-2026; Pacotes Biz Start/Pro/Top 2025-2026; One Net; Voz Fixa Biz), extraído a
+// 02-10-2026. Reconhece o tarifário pelo nome (o que vem antes do primeiro " - ");
+// tarifário não reconhecido não aparece no descritivo — nunca se inventa texto.
+// A ordem importa: os padrões mais específicos (Infinity, pacotes) vêm primeiro.
+const DESCRITIVO_TARIFARIOS = [
+  { re: /infinity prime|\bi ?prime\b|∞ ?prime/, nome: "Biz Infinity Prime", texto: "Chamadas, SMS e MMS ilimitados; internet no telemóvel ilimitada até 1 Gbps (5G); 2.000 min/SMS internacionais para Europa, EUA, Canadá, PALOP, China, Brasil, EAU e Japão; 10 GB de banda larga móvel individual incluídos; roaming fora da UE com 100 GB/ano + 200 minutos; Nº Fixo no Telemóvel + One Net e Suporte Especializado incluídos." },
+  { re: /infinity max|\bi ?max\b|∞ ?max/, nome: "Biz Infinity Max", texto: "Chamadas, SMS e MMS ilimitados; internet no telemóvel ilimitada até 1 Gbps; 1.000 min/SMS internacionais para Europa, EUA, Canadá e Brasil (partilháveis na conta); 5 GB de banda larga móvel individual incluídos; roaming fora da UE com 50 GB/ano + 100 minutos; Nº Fixo no Telemóvel + One Net e Suporte Especializado incluídos." },
+  { re: /infinity start|\bi ?start\b|∞ ?start/, nome: "Biz Infinity Start", texto: "Chamadas e SMS ilimitados; internet no telemóvel ilimitada até 1 Gbps; 25 min/SMS para a Europa; Suporte Especializado incluído." },
+  { re: /\b[1-4]p\b|net voz|tv net|\bnet biz\b|pacote/, pacote: true },
+  { re: /v2 ?plus/, nome: "Biz V2 Plus", texto: "5.000 min/SMS nacionais e em roaming na UE; 10 GB de internet no telemóvel até 800 Mbps; Suporte Especializado incluído." },
+  { re: /\bmax\b/, nome: "Biz Max", texto: "5.000 min/SMS nacionais e em roaming na UE; 500 GB de internet no telemóvel + 50 GB partilhados na conta, até 800 Mbps (5G); opção de 500 min/SMS internacionais para Europa, EUA e Canadá; Nº Fixo no Telemóvel + One Net e Suporte Especializado incluídos." },
+  { re: /standard/, nome: "Biz Standard", texto: "5.000 min/SMS nacionais e em roaming na UE; 300 GB de internet no telemóvel + 10 GB partilhados na conta, até 800 Mbps; Nº Fixo no Telemóvel + One Net e Suporte Especializado incluídos." },
+  { re: /\bstart\b/, nome: "Biz Start", texto: "4.000 min/SMS nacionais e em roaming na UE; 150 GB de internet no telemóvel até 600 Mbps (5G); Suporte Especializado incluído." },
+  { re: /e-?fax/, nome: "One Net — Número de e-Fax", texto: "Receção e envio de fax diretamente no computador/email, sem equipamento de fax." },
+  { re: /n[rº.]* ?empresa|n[uú]mero de empresa/, nome: "One Net — Número de Empresa", texto: "Número único da empresa, apresentado nas chamadas feitas pelos utilizadores (fixo, móvel ou PC); as chamadas para este número são encaminhadas para os utilizadores da empresa." },
+  { re: /n[aã]o geogr[aá]fico|\b80[08]\b|\b70[07]\b/, nome: "One Net — Número Não Geográfico", texto: "Número 800/808/700 para contacto dos clientes com a empresa, encaminhado para os utilizadores One Net." },
+  { re: /one ?net.*(user|utilizador).*fixo|utilizador fixo/, nome: "One Net — Utilizador Fixo", texto: "Extensão da central telefónica na nuvem One Net, com telefone fixo, chamadas para redes nacionais e para a rede fixa de destinos internacionais, e Google Workspace Business Starter." },
+  { re: /one ?net.*(user|utilizador).*m[oó]vel|utilizador m[oó]vel/, nome: "One Net — Utilizador Móvel", texto: "Integra o telemóvel na central telefónica One Net (extensão, transferência de chamadas e número fixo no telemóvel)." },
+  { re: /voz fixa biz|canal de voz|rede fixa biz/, nome: "Voz Fixa Biz", texto: "Canal de voz fixa empresarial com minutos incluídos para as redes fixas nacionais." },
+];
+function descreverPacoteProposta(t) {
+  const nivel = (t.match(/\b([1-4])p\b/) || [])[1] || (/tv net voz/.test(t) ? "3" : /net voz/.test(t) ? "2" : /\bnet\b/.test(t) ? "1" : null);
+  const gama = /pro ?light/.test(t) ? "Pro Light" : /\btop\b/.test(t) ? "Top" : /\bpro\b/.test(t) ? "Pro" : /\bstart\b/.test(t) ? "Start" : null;
+  if (!nivel || !gama) return null;
+  const partes = [];
+  partes.push(gama === "Top" ? "Internet fibra até 1,2/1,2 Gbps com Smart Router 10 Gbps Wi-Fi 6" : "Internet fibra até 1/1 Gbps com Smart Router Wi-Fi 7");
+  if (nivel >= "2") partes.push(gama === "Start" ? "voz fixa com 2.000 min para redes nacionais e rede fixa de 31 destinos internacionais" : `voz fixa One Net com ${gama === "Top" ? "5.000" : "2.000"} min para redes nacionais e rede fixa de 31 destinos internacionais`);
+  if (nivel >= "3") partes.push("televisão com 170 canais e plataformas de streaming incluídas");
+  if (nivel === "4") partes.push("cartão de voz móvel incluído");
+  if (gama === "Start") partes.push("Suporte Especializado incluído");
+  const tipo = { "1": "Net", "2": "Net Voz", "3": "TV Net Voz", "4": "TV Net Voz + Móvel" }[nivel];
+  return { nome: `Pacote ${tipo} Biz ${gama}`, texto: partes.join("; ").replace(/^./, (c) => c.toUpperCase()) + "." };
+}
+function descritivoTarifario(nome) {
+  const t = nomeTarifarioCurto(nome).toLowerCase();
+  if (!t) return null;
+  for (const d of DESCRITIVO_TARIFARIOS) {
+    if (!d.re.test(t)) continue;
+    return d.pacote ? descreverPacoteProposta(t) : { nome: d.nome, texto: d.texto };
+  }
+  return null;
+}
+
 function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
   const esc = escaparHtml;
   const V = "#e60000";
@@ -8821,6 +8866,14 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
       <tfoot><tr><td colspan="2">Total mensal</td><td class="r">${euro(ls.reduce((s, l) => s + (valorAtualLinhaProposta(l) || 0), 0))}</td><td></td><td class="r">${euro(totNovo)}</td><td></td></tr></tfoot></table>`;
     if (apagar.length) cancelar = `<h3>Serviços a desativar</h3><table class="tv"><colgroup><col class="s"><col style="width:68%"><col style="width:15%"></colgroup><tbody>${apagar.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td></tr>`).join("")}</tbody></table>`;
   }
+
+  // Descritivo: 1 entrada por tarifário reconhecido (sem repetir), pela ordem da tabela.
+  const vistosDesc = new Set();
+  const descritivos = ls.map((l) => descritivoTarifario(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual))
+    .filter((d) => d && !vistosDesc.has(d.nome) && vistosDesc.add(d.nome));
+  const descritivoHtml = descritivos.length
+    ? `<h3>Descritivo dos tarifários propostos</h3><div class="desc">${descritivos.map((d) => `<p><b>${esc(d.nome)}</b> — ${esc(d.texto)}</p>`).join("")}</div>`
+    : "";
 
   // Proposta grande: Soluções ficam na sua própria folha e Valores+Condições noutra,
   // para manter o mesmo espaço entre áreas (até 4 páginas). Pequena: 3 páginas.
@@ -8875,7 +8928,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
     .kpis { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 10px; } .kpis:has(.kpi:only-child) { grid-template-columns: 1fr; }
     .kpi { background: #f4f4f4; padding: 12px 14px; } .kpi span, .kpi small { display: block; font-size: 11.5px; color: #555; } .kpi b { font-size: 22px; font-weight: 800; }
     .kpi.destaque { background: #c40000; color: #fff; } .kpi.destaque span, .kpi.destaque small { color: #fff; }
-    .nota { font-size: 11.5px; color: #555; } .cinza { color: #555; font-size: 12px; }
+    .nota { font-size: 11.5px; color: #555; } .desc { display: flex; flex-direction: column; gap: 6px; } .desc p { font-size: 11.5px; line-height: 1.45; break-inside: avoid; } .cinza { color: #555; font-size: 12px; }
     .fim { break-inside: avoid; align-items: start; } .contacto { border-top: 3px solid ${V}; padding-top: 10px; font-size: 13px; line-height: 1.6; }
     .btnprint { position: fixed; top: 12px; right: 12px; padding: 8px 14px; border: 0; background: ${V}; color: #fff; border-radius: 8px; cursor: pointer; z-index: 9; font: inherit; }
     @media print { body { background: #fff; } .capa, .corpo { margin: 0; width: auto; } .corpo { padding: 0; } .faixa { display: none; } .btnprint { display: none; } }
@@ -8915,6 +8968,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
     ${tabela}
     ${cancelar}
     <p class="nota">Valores mensais, sem IVA. Proposta válida por 30 dias.</p>
+    ${descritivoHtml}
   </section>
 
   </div>
