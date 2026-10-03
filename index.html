@@ -5526,8 +5526,7 @@ function sugerirCategorias(analise, clienteAtual) {
 // decisão "ler sempre do Excel ligado") — removido por estar exposto no git.
 const PROSPETOS_BASE = [];
 const PONTOS = [
-  { id: "hoje", label: "Hoje", eyebrow: "Quem contactar", icone: "lista", ready: true },
-  { id: "assuntos", label: "Assuntos em Progresso", eyebrow: "Acompanhamento", icone: "lista", ready: true },
+  { id: "assuntos", label: "Para começar o dia", eyebrow: "Quem contactar e assuntos em progresso", icone: "lista", ready: true },
   { id: "negocios", label: "Negócios do Trimestre", eyebrow: "Pipeline comercial", icone: "grafico", ready: true },
   { id: "comissoes", label: "Comissões", eyebrow: "Remuneração", icone: "euro", ready: true },
   { id: "clientes", label: "Clientes", eyebrow: "Carteira de clientes", icone: "pessoas", ready: true },
@@ -14114,7 +14113,7 @@ function AvisoNuvem({ firebaseUser }) {
 }
 
 function App() {
-  const [pontoAtivo, setPontoAtivo] = useState("hoje");
+  const [pontoAtivo, setPontoAtivo] = useState("assuntos");
   const ligacaoPasta = useLigacaoExcel("pastaProjeto", true);
   const firebaseUser = useFirebaseAuthUser();
   const ponto = PONTOS.find((p) => p.id === pontoAtivo);
@@ -14165,8 +14164,7 @@ function App() {
         {(pontoAtivo === "propostas" || pontoAtivo === "produtos") && <AvisoPastaProjeto ligacaoPasta={ligacaoPasta} />}
 
         <ErrorBoundary key={pontoAtivo}>
-          {pontoAtivo === "hoje" && <HojeView />}
-          {pontoAtivo === "assuntos" && <AssuntosView />}
+          {pontoAtivo === "assuntos" && <><HojeView /><h2 className="font-display font-bold text-xl mt-8 mb-3">Assuntos em Progresso</h2><AssuntosView /></>}
           {pontoAtivo === "negocios" && <NegociosView />}
           {pontoAtivo === "comissoes" && <ComissoesView />}
           {pontoAtivo === "clientes" && <ClientesView />}
