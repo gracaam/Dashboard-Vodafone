@@ -324,7 +324,7 @@ function useColecaoFirestore(nomeColecao, ativo) {
 // fila e envia quando a ligação voltar.
 const chaveCacheMigrado = (chave) => `nuvem-migrado:${chave}`;
 function lerCacheMigrado(chave) { try { return localStorage.getItem(chaveCacheMigrado(chave)) === "1"; } catch (e) { return false; } }
-function avisarEstadoNuvem(ok) { window.dispatchEvent(new CustomEvent("vf-nuvem", { detail: { ok } })); }
+function avisarEstadoNuvem(chave, ok, codigo) { window.dispatchEvent(new CustomEvent("vf-nuvem", { detail: { chave, ok, codigo } })); }
 function useMigracaoNuvem(chave, firebaseUser) {
   const [migrado, setMigrado] = useState(() => lerCacheMigrado(chave));
   const [migradoAgora, setMigradoAgora] = useState(false);
@@ -337,12 +337,13 @@ function useMigracaoNuvem(chave, firebaseUser) {
         const v = !!(doc.exists && doc.data().migrado);
         setMigrado(v);
         try { localStorage.setItem(chaveCacheMigrado(chave), v ? "1" : "0"); } catch (e) {}
-        avisarEstadoNuvem(true);
+        avisarEstadoNuvem(chave, true);
       })
-      .catch(() => {
+      .catch((e) => {
         if (!vivo) return;
+        console.warn(`meta/${chave}:`, e.code, e.message);
         setMigrado(lerCacheMigrado(chave));
-        avisarEstadoNuvem(false);
+        avisarEstadoNuvem(chave, false, e.code);
         timer = setTimeout(ler, 10000);
       });
     ler();
@@ -5525,6 +5526,7 @@ function sugerirCategorias(analise, clienteAtual) {
 // decisão "ler sempre do Excel ligado") — removido por estar exposto no git.
 const PROSPETOS_BASE = [];
 const PONTOS = [
+  { id: "hoje", label: "Hoje", eyebrow: "Quem contactar", icone: "lista", ready: true },
   { id: "assuntos", label: "Assuntos em Progresso", eyebrow: "Acompanhamento", icone: "lista", ready: true },
   { id: "negocios", label: "Negócios do Trimestre", eyebrow: "Pipeline comercial", icone: "grafico", ready: true },
   { id: "comissoes", label: "Comissões", eyebrow: "Remuneração", icone: "euro", ready: true },
@@ -6881,6 +6883,69 @@ function PainelCampanhaEmail({ destinatarios }) {
         </button>
       </div>
     </aside>
+  );
+}
+
+/* ================= PONTO: HOJE (2026-10-03, Fase 1 do plano) =================
+   Lista de quem contactar, calculada só com dados que já existem: fim de permanência
+   (contratos_permanencia) e propostas entregues ainda não fechadas (campo `propostas`
+   da ficha do Cliente). Não grava nada. */
+const DIAS_PROPOSTA_SEM_RESPOSTA = 7;
+function calcularListaHoje(clientes, mapaContratos, hoje = new Date()) {
+  const hojeIso = hoje.toISOString().slice(0, 10);
+  const renovacoes = [], propostas = [];
+  clientes.forEach((c) => {
+    const f = calcularFimMaisProximo(mapaContratos.get(String(c.n)), hoje);
+    if (f && !f.terminado && f.dias <= 183) renovacoes.push({ c, ...f });
+    (Array.isArray(c.propostas) ? c.propostas : []).forEach((p) => {
+      if (p.fechada || !p.entregueEm) return;
+      const dias = diasEntreDatasIso(p.entregueEm.slice(0, 10), hojeIso);
+      if (dias >= DIAS_PROPOSTA_SEM_RESPOSTA) propostas.push({ c, dias, total: p.total, entregueEm: p.entregueEm });
+    });
+  });
+  renovacoes.sort((a, b) => a.dias - b.dias);
+  propostas.sort((a, b) => b.dias - a.dias);
+  return { renovacoes, propostas };
+}
+
+function HojeView() {
+  const firebaseUser = useFirebaseAuthUser();
+  const { todosClientes } = useClientesNovos();
+  const mapaContratos = useContratosPermanencia(firebaseUser);
+  const { renovacoes, propostas } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
+  const grupos = [
+    { titulo: "Permanência termina em menos de 1 mês", itens: renovacoes.filter((x) => x.dias <= 30), cor: "red" },
+    { titulo: "Permanência termina em 1 a 3 meses", itens: renovacoes.filter((x) => x.dias > 30 && x.dias <= 90), cor: "amber" },
+    { titulo: "Permanência termina em 3 a 6 meses", itens: renovacoes.filter((x) => x.dias > 90), cor: "neutral" },
+  ];
+  const Linha = ({ c, children }) => (
+    <div className="flex items-center gap-3 px-3 py-2 border-b border-neutral-100 last:border-0 text-sm">
+      <span className="font-medium flex-1 truncate">{c.e}</span>
+      <span className="text-xs text-neutral-500 whitespace-nowrap">{children}</span>
+    </div>
+  );
+  return (
+    <div className="space-y-5">
+      {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
+      {grupos.map((g) => (
+        <section key={g.titulo} className="border border-neutral-200 rounded-lg bg-white">
+          <div className={`px-3 py-2 border-b border-neutral-200 text-sm font-semibold ${g.cor === "red" ? "text-red-700" : g.cor === "amber" ? "text-amber-700" : "text-neutral-700"}`}>
+            {g.titulo} <span className="font-normal text-neutral-500">({g.itens.length})</span>
+          </div>
+          {g.itens.length ? g.itens.map((x) => (
+            <Linha key={x.c.n} c={x.c}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {x.conta}</Linha>
+          )) : <div className="px-3 py-2 text-xs text-neutral-400">Ninguém neste grupo.</div>}
+        </section>
+      ))}
+      <section className="border border-neutral-200 rounded-lg bg-white">
+        <div className="px-3 py-2 border-b border-neutral-200 text-sm font-semibold text-neutral-700">
+          Propostas entregues sem resposta há {DIAS_PROPOSTA_SEM_RESPOSTA}+ dias <span className="font-normal text-neutral-500">({propostas.length})</span>
+        </div>
+        {propostas.length ? propostas.map((x, i) => (
+          <Linha key={`${x.c.n}-${i}`} c={x.c}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</Linha>
+        )) : <div className="px-3 py-2 text-xs text-neutral-400">Nenhuma proposta à espera de resposta.</div>}
+      </section>
+    </div>
   );
 }
 
@@ -14033,22 +14098,23 @@ function CarteiraFidelizarView() {
 // sem rede, ou a nuvem não respondeu (useMigracaoNuvem).
 function AvisoNuvem({ firebaseUser }) {
   const [semRede, setSemRede] = useState(!navigator.onLine);
-  const [erroNuvem, setErroNuvem] = useState(false);
+  const [falhas, setFalhas] = useState({}); // chave → código do erro (só as que estão a falhar)
   useEffect(() => {
     const on = () => setSemRede(false), off = () => setSemRede(true);
-    const est = (e) => setErroNuvem(!e.detail.ok);
+    const est = (e) => setFalhas((f) => { const { chave, ok, codigo } = e.detail; const n = { ...f }; if (ok) delete n[chave]; else n[chave] = codigo || "erro"; return n; });
     window.addEventListener("online", on); window.addEventListener("offline", off); window.addEventListener("vf-nuvem", est);
     return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); window.removeEventListener("vf-nuvem", est); };
   }, []);
   let msg = null;
   if (!firebaseUser) msg = "Sessão não iniciada: as alterações NÃO vão para a nuvem. Inicia sessão antes de alterar dados.";
-  else if (semRede || erroNuvem) msg = "Sem ligação à nuvem. As alterações ficam em espera e são enviadas quando a ligação voltar — não feches o dashboard até este aviso desaparecer.";
+  else if (semRede) msg = "Sem ligação à internet. As alterações ficam em espera e são enviadas quando a ligação voltar — não feches o dashboard até este aviso desaparecer.";
+  else if (Object.keys(falhas).length) msg = `A nuvem não respondeu para: ${Object.entries(falhas).map(([k, c]) => `${k} (${c})`).join(", ")}. A tentar de novo a cada 10 segundos — não feches o dashboard até este aviso desaparecer.`;
   if (!msg) return null;
   return <div className="mb-5 rounded-md border border-red-300 bg-red-50 text-red-800 text-sm px-3 py-2">⚠ {msg}</div>;
 }
 
 function App() {
-  const [pontoAtivo, setPontoAtivo] = useState("assuntos");
+  const [pontoAtivo, setPontoAtivo] = useState("hoje");
   const ligacaoPasta = useLigacaoExcel("pastaProjeto", true);
   const firebaseUser = useFirebaseAuthUser();
   const ponto = PONTOS.find((p) => p.id === pontoAtivo);
@@ -14099,6 +14165,7 @@ function App() {
         {(pontoAtivo === "propostas" || pontoAtivo === "produtos") && <AvisoPastaProjeto ligacaoPasta={ligacaoPasta} />}
 
         <ErrorBoundary key={pontoAtivo}>
+          {pontoAtivo === "hoje" && <HojeView />}
           {pontoAtivo === "assuntos" && <AssuntosView />}
           {pontoAtivo === "negocios" && <NegociosView />}
           {pontoAtivo === "comissoes" && <ComissoesView />}
