@@ -14115,6 +14115,23 @@ function App() {
   const ligacaoPasta = useLigacaoExcel("pastaProjeto", true);
   const firebaseUser = useFirebaseAuthUser();
   const ponto = PONTOS.find((p) => p.id === pontoAtivo);
+  // Página de entrada (2026-10-03, pedido do Augusto): sem sessão não se vê o dashboard.
+  // `authPronto` evita mostrar o login durante o instante em que o Firebase ainda está a
+  // repor a sessão guardada neste browser.
+  const [authPronto, setAuthPronto] = useState(() => !!firebaseAuth.currentUser);
+  useEffect(() => firebaseAuth.onAuthStateChanged(() => setAuthPronto(true)), []);
+  if (!authPronto) return <div className="min-h-screen flex items-center justify-center text-sm text-neutral-500" style={{ background: "var(--vf-bg)" }}>A ligar à nuvem…</div>;
+  if (!firebaseUser) return (
+    <div className="min-h-screen flex items-center justify-center px-4" style={{ background: "var(--vf-bg)", color: "var(--vf-ink)" }}>
+      <div className="w-full max-w-xl space-y-5">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-display font-extrabold text-lg" style={{ background: "var(--vf-red)" }}>VB</div>
+          <div className="leading-tight"><div className="font-display font-extrabold text-2xl">Dashboard</div><div className="text-sm text-neutral-500">Vodafone Business</div></div>
+        </div>
+        <LoginFirebaseInline mensagem="Entra com a tua conta para abrir o dashboard:" />
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen" style={{ background: "var(--vf-bg)", color: "var(--vf-ink)" }}>
@@ -14145,6 +14162,7 @@ function App() {
             {firebaseUser ? "Sincronizado na nuvem" : "Só neste computador"}
           </div>
           <div className="text-white text-sm font-semibold mt-1.5">Augusto Graça</div>
+          <button onClick={() => firebaseAuth.signOut()} className="text-xs mt-1 underline" style={{ color: "var(--vf-side-text)" }}>Sair</button>
         </div>
       </aside>
 
