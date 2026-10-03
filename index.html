@@ -9161,6 +9161,48 @@ function PropostasView() {
     setContasSel(alvo === "prospeto" ? ["(prospeto)"] : []);
   }, [alvo, nifAlvo]);
 
+  // Proposta em curso (2026-10-03, pedido do Augusto): "Gravar" guarda as linhas e as
+  // contas escolhidas em propostas_rascunho/{alvo}_{nif}; ao voltar a este cliente a
+  // proposta reabre como ficou. Uma por cliente; expira ao fim de DIAS_RASCUNHO_PROPOSTA
+  // dias; apagada em "Cancelar" e em "Proposta Entregue". Declarado DEPOIS do efeito que
+  // limpa a proposta, para repor as linhas por cima (o efeito seguinte, que reconstrói a
+  // partir dos contratos, mantém as linhas existentes pela key).
+  const DIAS_RASCUNHO_PROPOSTA = 30;
+  const idRascunho = nifAlvo ? `${alvo}_${nifAlvo}` : null;
+  const [rascunho, setRascunho] = useState(null);
+  const [confirmarCancelar, setConfirmarCancelar] = useState(false);
+  useEffect(() => {
+    setRascunho(null); setConfirmarCancelar(false);
+    if (!idRascunho || !firebaseUser) return;
+    let vivo = true;
+    firebaseDb.collection("propostas_rascunho").doc(idRascunho).get().then((d) => {
+      if (!vivo || !d.exists) return;
+      const v = d.data() || {};
+      if (!v.gravadoEm || diasDesdeIso(v.gravadoEm) > DIAS_RASCUNHO_PROPOSTA) { d.ref.delete().catch(() => {}); return; }
+      setLinhas(Array.isArray(v.linhas) ? v.linhas : []);
+      setContasSel(Array.isArray(v.contasSel) ? v.contasSel : []);
+      setRascunho({ gravadoEm: v.gravadoEm });
+    }).catch((e) => console.warn("Não foi possível ler a proposta em curso:", e.message));
+    return () => { vivo = false; };
+  }, [idRascunho, firebaseUser]);
+  const gravarRascunho = async () => {
+    if (!idRascunho) return;
+    const gravadoEm = new Date().toISOString();
+    try {
+      // JSON ida-e-volta: o Firestore recusa campos `undefined`.
+      await firebaseDb.collection("propostas_rascunho").doc(idRascunho).set(JSON.parse(JSON.stringify({ alvo, nif: nifAlvo, nome: nomeAlvo, contasSel, linhas, gravadoEm })));
+      setRascunho({ gravadoEm });
+      setAviso(`Proposta em curso gravada. Fica guardada ${DIAS_RASCUNHO_PROPOSTA} dias.`);
+      setTimeout(() => setAviso(""), 6000);
+    } catch (e) { setAviso(`Não foi possível gravar: ${e.message}`); }
+  };
+  const apagarRascunho = () => (idRascunho ? firebaseDb.collection("propostas_rascunho").doc(idRascunho).delete() : Promise.resolve());
+  const cancelarProposta = async () => {
+    try { await apagarRascunho(); } catch (e) { setAviso(`Não foi possível apagar: ${e.message}`); return; }
+    setLinhas([]); setContasSel(alvo === "prospeto" ? ["(prospeto)"] : []);
+    setRascunho(null); setConfirmarCancelar(false);
+  };
+
   // Reconstrói as linhas a partir dos contratos das contas selecionadas, preservando
   // edições já feitas (por key) e as linhas manuais das contas ainda selecionadas.
   useEffect(() => {
@@ -9233,6 +9275,7 @@ function PropostasView() {
     const proposta = { entregueEm: new Date().toISOString(), linhas: retrato, total: totalProposta(linhas), fechada: false, fechadaEm: null, contratosGerados: false };
     try {
       await adicionarProposta(nifAlvo, proposta);
+      apagarRascunho().then(() => setRascunho(null)).catch(() => {});
       setAviso(`Proposta registada como entregue para ${nomeAlvo} (${new Date().toLocaleDateString("pt-PT")}). Vê a ficha do cliente.`);
       setTimeout(() => setAviso(""), 10000);
     } catch (e) {
@@ -9434,6 +9477,17 @@ function PropostasView() {
           })}
 
           <div className="bg-white border border-neutral-200 rounded-lg p-4 flex items-center gap-3 flex-wrap">
+            {rascunho && <div className="w-full text-xs text-neutral-500">Proposta em curso gravada a {new Date(rascunho.gravadoEm).toLocaleString("pt-PT", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}.</div>}
+            <button onClick={gravarRascunho} disabled={!idRascunho || !linhas.length} title="Guarda esta proposta para continuar mais tarde (neste ou noutro computador)"
+              className="text-sm px-3.5 py-2 rounded-md border border-neutral-400 text-neutral-800 font-medium hover:bg-neutral-50 disabled:opacity-40">
+              Gravar proposta em curso
+            </button>
+            {confirmarCancelar
+              ? <span className="text-xs text-red-800 bg-red-50 border border-red-200 rounded px-2 py-1.5 flex items-center gap-2">Apagar esta proposta e começar de novo?
+                  <button onClick={cancelarProposta} className="px-2 py-0.5 rounded bg-red-600 text-white">Apagar</button>
+                  <button onClick={() => setConfirmarCancelar(false)} className="px-2 py-0.5 rounded border border-neutral-300 bg-white">Não</button></span>
+              : <button onClick={() => setConfirmarCancelar(true)} disabled={!linhas.length && !rascunho}
+                  className="text-sm px-3.5 py-2 rounded-md border border-neutral-300 text-neutral-600 hover:bg-neutral-50 disabled:opacity-40">Cancelar proposta</button>}
             <button onClick={gravarExcel} disabled={!podeGerar} className="text-sm px-3.5 py-2 rounded-md bg-neutral-900 text-white font-medium hover:bg-neutral-800 disabled:opacity-40">
               Gravar proposta (Excel)
             </button>
