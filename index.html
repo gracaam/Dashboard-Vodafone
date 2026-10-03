@@ -14096,17 +14096,15 @@ function CarteiraFidelizarView() {
 // Aviso no topo quando os dados podem não estar a ir para a nuvem: sem sessão iniciada,
 // sem rede, ou a nuvem não respondeu (useMigracaoNuvem).
 function AvisoNuvem({ firebaseUser }) {
-  const [semRede, setSemRede] = useState(!navigator.onLine);
   const [falhas, setFalhas] = useState({}); // chave → código do erro (só as que estão a falhar)
   useEffect(() => {
-    const on = () => setSemRede(false), off = () => setSemRede(true);
     const est = (e) => setFalhas((f) => { const { chave, ok, codigo } = e.detail; const n = { ...f }; if (ok) delete n[chave]; else n[chave] = codigo || "erro"; return n; });
-    window.addEventListener("online", on); window.addEventListener("offline", off); window.addEventListener("vf-nuvem", est);
-    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); window.removeEventListener("vf-nuvem", est); };
+    // navigator.onLine não é usado: no Citrix/VPN pode dizer "offline" com a ligação a funcionar.
+    window.addEventListener("vf-nuvem", est);
+    return () => window.removeEventListener("vf-nuvem", est);
   }, []);
   let msg = null;
   if (!firebaseUser) msg = "Sessão não iniciada: as alterações NÃO vão para a nuvem. Inicia sessão antes de alterar dados.";
-  else if (semRede) msg = "Sem ligação à internet. As alterações ficam em espera e são enviadas quando a ligação voltar — não feches o dashboard até este aviso desaparecer.";
   else if (Object.keys(falhas).length) msg = `A nuvem não respondeu para: ${Object.entries(falhas).map(([k, c]) => `${k} (${c})`).join(", ")}. A tentar de novo a cada 10 segundos — não feches o dashboard até este aviso desaparecer.`;
   if (!msg) return null;
   return <div className="mb-5 rounded-md border border-red-300 bg-red-50 text-red-800 text-sm px-3 py-2">⚠ {msg}</div>;
