@@ -317,14 +317,36 @@ function useColecaoFirestore(nomeColecao, ativo) {
 // inferido a partir de "a coleção está vazia" (uma coleção legitimamente vazia depois
 // de migrar não pode voltar a parecer "por migrar"). `migradoAgora` cobre o instante
 // entre migrar com sucesso e o documento meta ainda não ter sido relido.
+// Falha de rede (2026-10-03): antes, um erro a ler meta/{chave} punha `migrado=false` e o
+// dashboard passava sem aviso a gravar só no localStorage. Agora lembra-se do último valor
+// lido com sucesso (por chave, neste browser), volta a tentar a cada 10s e avisa no topo
+// (AvisoNuvem). Com `migrado` em cache as gravações vão para o Firestore, que as guarda em
+// fila e envia quando a ligação voltar.
+const chaveCacheMigrado = (chave) => `nuvem-migrado:${chave}`;
+function lerCacheMigrado(chave) { try { return localStorage.getItem(chaveCacheMigrado(chave)) === "1"; } catch (e) { return false; } }
+function avisarEstadoNuvem(ok) { window.dispatchEvent(new CustomEvent("vf-nuvem", { detail: { ok } })); }
 function useMigracaoNuvem(chave, firebaseUser) {
-  const [migrado, setMigrado] = useState(false);
+  const [migrado, setMigrado] = useState(() => lerCacheMigrado(chave));
   const [migradoAgora, setMigradoAgora] = useState(false);
   useEffect(() => {
-    if (!firebaseUser) { setMigrado(false); return; }
-    firebaseDb.collection("meta").doc(chave).get()
-      .then((doc) => setMigrado(!!(doc.exists && doc.data().migrado)))
-      .catch(() => setMigrado(false));
+    if (!firebaseUser) return;
+    let vivo = true, timer = null;
+    const ler = () => firebaseDb.collection("meta").doc(chave).get()
+      .then((doc) => {
+        if (!vivo) return;
+        const v = !!(doc.exists && doc.data().migrado);
+        setMigrado(v);
+        try { localStorage.setItem(chaveCacheMigrado(chave), v ? "1" : "0"); } catch (e) {}
+        avisarEstadoNuvem(true);
+      })
+      .catch(() => {
+        if (!vivo) return;
+        setMigrado(lerCacheMigrado(chave));
+        avisarEstadoNuvem(false);
+        timer = setTimeout(ler, 10000);
+      });
+    ler();
+    return () => { vivo = false; clearTimeout(timer); };
   }, [firebaseUser, chave]);
   const marcar = async () => {
     await firebaseDb.collection("meta").doc(chave).set({ migrado: true, em: firebase.firestore.FieldValue.serverTimestamp() });
@@ -14007,6 +14029,24 @@ function CarteiraFidelizarView() {
   );
 }
 
+// Aviso no topo quando os dados podem não estar a ir para a nuvem: sem sessão iniciada,
+// sem rede, ou a nuvem não respondeu (useMigracaoNuvem).
+function AvisoNuvem({ firebaseUser }) {
+  const [semRede, setSemRede] = useState(!navigator.onLine);
+  const [erroNuvem, setErroNuvem] = useState(false);
+  useEffect(() => {
+    const on = () => setSemRede(false), off = () => setSemRede(true);
+    const est = (e) => setErroNuvem(!e.detail.ok);
+    window.addEventListener("online", on); window.addEventListener("offline", off); window.addEventListener("vf-nuvem", est);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); window.removeEventListener("vf-nuvem", est); };
+  }, []);
+  let msg = null;
+  if (!firebaseUser) msg = "Sessão não iniciada: as alterações NÃO vão para a nuvem. Inicia sessão antes de alterar dados.";
+  else if (semRede || erroNuvem) msg = "Sem ligação à nuvem. As alterações ficam em espera e são enviadas quando a ligação voltar — não feches o dashboard até este aviso desaparecer.";
+  if (!msg) return null;
+  return <div className="mb-5 rounded-md border border-red-300 bg-red-50 text-red-800 text-sm px-3 py-2">⚠ {msg}</div>;
+}
+
 function App() {
   const [pontoAtivo, setPontoAtivo] = useState("assuntos");
   const ligacaoPasta = useLigacaoExcel("pastaProjeto", true);
@@ -14055,6 +14095,7 @@ function App() {
             <div id="vf-acoes-cabecalho" className="flex items-center gap-2 flex-wrap" />
           </header>
 
+        <AvisoNuvem firebaseUser={firebaseUser} />
         {(pontoAtivo === "propostas" || pontoAtivo === "produtos") && <AvisoPastaProjeto ligacaoPasta={ligacaoPasta} />}
 
         <ErrorBoundary key={pontoAtivo}>
