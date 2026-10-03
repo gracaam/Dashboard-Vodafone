@@ -8871,6 +8871,21 @@ const SOLUCOES_PROPOSTA_TEXTO = {
 
 // Nome do tarifário como aparece ao cliente: só até ao primeiro " - "
 // ("BLM Ind All included_abr2023 - 100102234 - REG4X" → "BLM Ind All included_abr2023").
+// Atualização anual de preços Vodafone (2026-10-03, pedido do Augusto). Um contrato
+// iniciado no ano A leva as atualizações de A+1 até ao ano atual. Taxas deduzidas de
+// faturas reais: 2024→2026 ×1,046 (3,01→3,15; 16,76→17,53) e 2025→2026 ×1,0226
+// (15,00→15,34). Acrescentar o ano novo aqui quando a Vodafone atualizar os preços.
+const ATUALIZACAO_ANUAL_PRECOS = { 2025: 0.0226, 2026: 0.0226 };
+function valorAtualizadoInflacao(valor, inicioIso, hoje = new Date()) {
+  const v = numProposta(valor);
+  if (v === null) return { valor: null, fator: 1, semInicio: false };
+  const anoInicio = inicioIso ? Number(String(inicioIso).slice(0, 4)) : NaN;
+  if (!anoInicio) return { valor: v, fator: 1, semInicio: true };
+  let fator = 1;
+  for (let a = anoInicio + 1; a <= hoje.getFullYear(); a++) fator *= 1 + (ATUALIZACAO_ANUAL_PRECOS[a] || 0);
+  return { valor: Math.round(v * fator * 100) / 100, fator, semInicio: false };
+}
+
 function nomeTarifarioCurto(t) { return String(t || "").split(" - ")[0].trim(); }
 
 // Descritivo dos tarifários propostos (2026-10-02, pedido do Augusto): só características,
@@ -9157,12 +9172,14 @@ function PropostasView() {
         ((dados && dados.contratos) || []).forEach((c) => {
           const key = `${conta}::${c.id}`;
           if (prevByKey.has(key)) { novas.push(prevByKey.get(key)); return; }
+          const atual = valorAtualizadoInflacao(c.multa, c.inicio);
           novas.push({
             key, conta, manual: false,
             servico: c.servico || "",
             fim: c.fim || "",
             produtoAtual: c.produto || c.tipo || "",
-            valorMensal: c.multa !== null && c.multa !== undefined && c.multa !== "" ? c.multa : "",
+            valorMensal: atual.valor !== null ? atual.valor : "",
+            valorContrato: atual.valor !== null ? numProposta(c.multa) : null, fatorInflacao: atual.fator, semInicio: atual.semInicio,
             desconto: "", duracao: "", quantidade: 1, acao: "Inalterado", novoTarifario: "", novoValor: "",
           });
         });
@@ -9375,7 +9392,9 @@ function PropostasView() {
                             </td>
                             <td className="p-2"><select value={l.tipo || ""} onChange={(e) => atualizarLinha(l.key, { tipo: e.target.value })} title="Bloco do PDF (Soluções propostas)" className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">Auto: {tipoAutomaticoProposta(l)}</option>{TIPOS_SERVICO_PROPOSTA.map((t) => <option key={t} value={t}>{t}</option>)}</select></td>
                             <td className="p-2 text-neutral-500">{l.fim ? `${formatarDataIsoPT(l.fim)} (${diasEntreDatasIso(new Date().toISOString().slice(0, 10), l.fim)}d)` : "—"}</td>
-                            <td className="p-2"><input value={l.valorMensal} onChange={(e) => atualizarLinha(l.key, { valorMensal: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
+                            <td className="p-2"><input value={l.valorMensal} onChange={(e) => atualizarLinha(l.key, { valorMensal: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" />
+                              {l.semInicio ? <div className="text-[10px] text-amber-700" title="O ficheiro de contratos não tem Data de Início — valor do contrato sem atualização anual">sem Data de Início</div>
+                                : l.fatorInflacao > 1 ? <div className="text-[10px] text-neutral-500" title="Valor do contrato atualizado com as subidas anuais de preço">contrato {formatEuro(l.valorContrato)} · +{((l.fatorInflacao - 1) * 100).toFixed(1).replace(".", ",")}%</div> : null}</td>
                             <td className="p-2"><input value={l.desconto} onChange={(e) => atualizarLinha(l.key, { desconto: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
                             <td className="p-2">
                               {l.manual
