@@ -7024,17 +7024,59 @@ function listarTarifariosAntigos(clientes, mapaContratos, hoje = new Date()) {
   return out.sort((a, b) => b.itens.length - a.itens.length);
 }
 
+// Emails prontos por grupo (2026-10-04, Fase 2 ponto 4). Texto simples e genérico: nunca
+// promete preços nem campanhas. A assinatura é acrescentada por gerarEmlCampanha.
+// Um só cliente → o cliente vai no "Para" (a regra Para=Augusto + CCO é das campanhas).
+const FECHO_EMAIL = "\n\nFico a aguardar o seu contacto.\n\nCom os melhores cumprimentos,";
+function textoEmailHoje(tipo, c, x) {
+  const nome = c.e;
+  if (tipo === "renovacao") return {
+    assunto: `Renovação dos serviços Vodafone — ${nome}`,
+    corpo: `Bom dia,\n\nO período de permanência de serviços da ${nome} (conta ${x.conta}) termina a ${formatarDataIsoPT(x.fim)}.\n\nGostaria de marcar uma breve conversa para analisarmos a utilização atual e apresentar as condições de renovação, ajustadas às necessidades da empresa.\n\nTem disponibilidade numa das próximas semanas?${FECHO_EMAIL}`,
+  };
+  if (tipo === "proposta") return {
+    assunto: `Seguimento da proposta Vodafone — ${nome}`,
+    corpo: `Bom dia,\n\nNo dia ${new Date(x.entregueEm).toLocaleDateString("pt-PT")} enviei a proposta da Vodafone para a ${nome}.\n\nGostaria de saber se já teve oportunidade de a analisar e se posso esclarecer alguma dúvida ou ajustar algum ponto.${FECHO_EMAIL}`,
+  };
+  if (tipo === "antigo") return {
+    assunto: `Atualização de tarifários Vodafone — ${nome}`,
+    corpo: `Bom dia,\n\nAlguns serviços da ${nome} estão em tarifários que a Vodafone já não comercializa. Existem hoje planos atuais que podem trazer mais vantagens à empresa.\n\nPosso preparar uma proposta de atualização, sem compromisso?${FECHO_EMAIL}`,
+  };
+  if (tipo === "passo") return {
+    assunto: `Seguimento — ${nome}`,
+    corpo: `Bom dia,\n\nNa sequência do nosso último contacto${x.ultimo && x.ultimo.proximoPasso ? ` (${x.ultimo.proximoPasso})` : ""}, venho dar seguimento ao assunto.${FECHO_EMAIL}`,
+  };
+  return {
+    assunto: `Ponto de situação — ${nome}`,
+    corpo: `Bom dia,\n\nHá algum tempo que não falamos e gostaria de saber se está tudo bem com os serviços Vodafone da ${nome}.\n\nSe precisar de alguma alteração ou quiser rever as condições atuais, estou ao dispor.${FECHO_EMAIL}`,
+  };
+}
+async function gerarEmailHoje(c, { assunto, corpo }, obterExtras) {
+  let email = "";
+  try { email = ((await obterExtras(c.n)) || {}).email || ""; } catch (e) {}
+  const blob = await gerarEmlCampanha({ para: email, assunto, corpo });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${nomeFicheiroSeguro(assunto)}.eml`;
+  a.click();
+  registarContacto(c.n, { tipo: "Email", nota: assunto }).catch(() => {});
+  return email;
+}
+
 // Fora do HojeView de propósito: definido lá dentro, cada re-render recriava o
 // componente e fechava o formulário aberto.
-function LinhaHoje({ c, children }) {
+function LinhaHoje({ c, children, email, obterExtras }) {
   const [aberto, setAberto] = useState(false);
+  const [semEmail, setSemEmail] = useState(false);
   return (
     <div className="px-3 py-2 border-b border-neutral-100 last:border-0 text-sm space-y-2">
       <div className="flex items-center gap-3">
         <span className="font-medium flex-1 truncate">{c.e}</span>
         <span className="text-xs text-neutral-500 whitespace-nowrap">{children}</span>
+        {email && <button onClick={async () => setSemEmail(!(await gerarEmailHoje(c, email, obterExtras)))} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap">Gerar email</button>}
         <button onClick={() => setAberto((v) => !v)} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap">{aberto ? "Fechar" : "Registar contacto"}</button>
       </div>
+      {semEmail && <div className="text-[11px] text-amber-700">A ficha deste cliente não tem email — escreve-o no Outlook (ou no campo Email da ficha, para as próximas vezes).</div>}
       {aberto && <RegistoContactoForm nif={c.n} onFeito={() => setAberto(false)} />}
     </div>
   );
@@ -7053,16 +7095,17 @@ function GrupoHoje({ titulo, cor, itens, vazio, render }) {
 
 function HojeView() {
   const firebaseUser = useFirebaseAuthUser();
-  const { todosClientes } = useClientesNovos();
+  const { todosClientes, obterExtras } = useClientesNovos();
   const mapaContratos = useContratosPermanencia(firebaseUser);
   const { renovacoes, propostas, passos, semContacto } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const antigos = useMemo(() => listarTarifariosAntigos(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
-  const renov = (x) => <LinhaHoje key={x.c.n} c={x.c}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {x.conta}</LinhaHoje>;
+  const em = (tipo, x) => ({ email: textoEmailHoje(tipo, x.c, x), obterExtras });
+  const renov = (x) => <LinhaHoje key={x.c.n} c={x.c} {...em("renovacao", x)}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {x.conta}</LinhaHoje>;
   return (
     <div className="space-y-5">
       {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
       <GrupoHoje titulo="Próximos passos para hoje ou atrasados" cor="red" itens={passos} vazio="Nenhum próximo passo para hoje."
-        render={(x) => <LinhaHoje key={x.c.n} c={x.c}>{x.ultimo.proximoPasso || "próximo passo"} · {x.atraso ? `atrasado ${x.atraso} dias` : "hoje"}</LinhaHoje>} />
+        render={(x) => <LinhaHoje key={x.c.n} c={x.c} {...em("passo", x)}>{x.ultimo.proximoPasso || "próximo passo"} · {x.atraso ? `atrasado ${x.atraso} dias` : "hoje"}</LinhaHoje>} />
       <GrupoHoje titulo="Permanência termina em menos de 1 mês" cor="red" itens={renovacoes.filter((x) => x.dias <= 30)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 1 a 3 meses" cor="amber" itens={renovacoes.filter((x) => x.dias > 30 && x.dias <= 90)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 3 a 6 meses" itens={renovacoes.filter((x) => x.dias > 90)} vazio="Ninguém neste grupo." render={renov} />
@@ -7073,15 +7116,15 @@ function HojeView() {
           // Sem "sobe/desce" (2026-10-04): a "Multa Mensal" do contrato não é a mensalidade
           // e o preço de tabela ignora descontos — a diferença dava valores enganadores.
           return (
-            <LinhaHoje key={x.c.n} c={x.c}>
+            <LinhaHoje key={x.c.n} c={x.c} {...em("antigo", x)}>
               {Object.entries(porSug).map(([sug, g]) => `${g.n}× ${[...g.produtos].slice(0, 2).join(", ")} → ${sug}`).join(" · ")}
             </LinhaHoje>
           );
         }} />
       <GrupoHoje titulo={`Propostas entregues sem resposta há ${DIAS_PROPOSTA_SEM_RESPOSTA}+ dias`} itens={propostas} vazio="Nenhuma proposta à espera de resposta."
-        render={(x, i) => <LinhaHoje key={`${x.c.n}-${i}`} c={x.c}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</LinhaHoje>} />
+        render={(x, i) => <LinhaHoje key={`${x.c.n}-${i}`} c={x.c} {...em("proposta", x)}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</LinhaHoje>} />
       <GrupoHoje titulo={`Sem contacto há mais de ${DIAS_SEM_CONTACTO} dias`} itens={semContacto} vazio="Ninguém (só conta clientes com pelo menos um contacto registado)."
-        render={(x) => <LinhaHoje key={x.c.n} c={x.c}>último: {new Date(x.ultimo.em).toLocaleDateString("pt-PT")} · há {x.dias} dias</LinhaHoje>} />
+        render={(x) => <LinhaHoje key={x.c.n} c={x.c} {...em("semContacto", x)}>último: {new Date(x.ultimo.em).toLocaleDateString("pt-PT")} · há {x.dias} dias</LinhaHoje>} />
     </div>
   );
 }
