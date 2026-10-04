@@ -5526,7 +5526,8 @@ function sugerirCategorias(analise, clienteAtual) {
 // decisão "ler sempre do Excel ligado") — removido por estar exposto no git.
 const PROSPETOS_BASE = [];
 const PONTOS = [
-  { id: "assuntos", label: "Para começar o dia", eyebrow: "Quem contactar e assuntos em progresso", icone: "lista", ready: true },
+  { id: "assuntos", label: "Para começar o dia", eyebrow: "Quem contactar hoje", icone: "lista", ready: true },
+  { id: "assuntos-progresso", label: "Assuntos em Progresso", eyebrow: "Assuntos em curso", icone: "conversa", ready: true },
   { id: "negocios", label: "Negócios do Trimestre", eyebrow: "Pipeline comercial", icone: "grafico", ready: true },
   { id: "comissoes", label: "Comissões", eyebrow: "Remuneração", icone: "euro", ready: true },
   { id: "clientes", label: "Clientes", eyebrow: "Carteira de clientes", icone: "pessoas", ready: true },
@@ -6499,20 +6500,20 @@ function BlocoCampanha({ registos, todos, aCarregar }) {
   const comEmail = destinatarios.filter((d) => d.email).length;
 
   return (
-    <div className="flex gap-6 items-start">
-      <div className="flex-1 min-w-0">
+    <div className="flex gap-6 items-stretch">
+      <div className="flex-1 min-w-0 flex flex-col">
         <CartoesKpi itens={[
           { rotulo: "Selecionados", valor: destinatarios.length, tom: "vermelho" },
           { rotulo: "Com email", valor: comEmail },
           { rotulo: "Sem email", valor: destinatarios.length - comEmail, detalhe: "não entram na lista CCO", tom: "amarelo" },
         ]} />
-        <div className="bg-white border rounded-[20px] overflow-hidden" style={{ borderColor: "var(--vf-border)" }}>
+        <div className="flex-1 flex flex-col min-h-0 bg-white border rounded-[20px] overflow-hidden" style={{ borderColor: "var(--vf-border)" }}>
           <div onClick={alternarTodos} className="flex items-center gap-3 px-5 min-h-[48px] border-b cursor-pointer select-none text-sm font-semibold"
             style={{ borderColor: "var(--vf-border)", color: "var(--vf-muted)" }}>
             <CaixaSelecao marcada={todosMarcados} />
             Selecionar todos os filtrados ({registos.length})
           </div>
-          <div className="max-h-[560px] overflow-auto">
+          <div className="flex-1 basis-0 min-h-[320px] overflow-auto">
             {aCarregar && <div className="px-5 py-6 text-center text-sm" style={{ color: "var(--vf-muted)" }}>A carregar contactos…</div>}
             {!aCarregar && registos.map((r) => {
               const marcado = selecionados.has(r.n);
@@ -6822,7 +6823,7 @@ function PainelCampanhaEmail({ destinatarios }) {
   const MAX_ETIQUETAS = 40;
 
   return (
-    <aside className="w-[380px] shrink-0 sticky top-6 bg-white border rounded-[20px] p-5 space-y-4" style={{ borderColor: "var(--vf-border)" }}>
+    <aside className="w-[380px] shrink-0 self-start sticky top-6 bg-white border rounded-[20px] p-5 space-y-3" style={{ borderColor: "var(--vf-border)" }}>
       <div>
         <div className="font-display font-bold text-xl">Campanha de email</div>
         <div className="text-xs mt-0.5" style={{ color: "var(--vf-muted)" }}>Compõe aqui e cola no Outlook.</div>
@@ -6858,19 +6859,20 @@ function PainelCampanhaEmail({ destinatarios }) {
         <input value={assunto} onChange={(e) => setAssunto(e.target.value)} placeholder="Assunto do email" className="w-full px-3 border text-sm" />
       </div>
 
-      <div>
-        <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--vf-muted)" }}>Link</div>
-        <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://…" className="w-full px-3 border text-sm" />
-      </div>
-
-      <div>
-        <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--vf-muted)" }}>Texto do link <span className="font-normal">(opcional)</span></div>
-        <input value={textoLink} onChange={(e) => setTextoLink(e.target.value)} placeholder="ex. Saber mais sobre a parceria Vodafone e Prosegur" className="w-full px-3 border text-sm" />
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--vf-muted)" }}>Link</div>
+          <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://…" className="w-full px-3 border text-sm" />
+        </div>
+        <div>
+          <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--vf-muted)" }}>Texto do link <span className="font-normal">(opcional)</span></div>
+          <input value={textoLink} onChange={(e) => setTextoLink(e.target.value)} placeholder="ex. Saber mais" className="w-full px-3 border text-sm" />
+        </div>
       </div>
 
       <div>
         <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--vf-muted)" }}>Texto</div>
-        <textarea value={texto} onChange={(e) => setTexto(e.target.value)} rows={6}
+        <textarea value={texto} onChange={(e) => setTexto(e.target.value)} rows={4}
           placeholder="Caro cliente, partilho esta novidade que pode ser relevante para a vossa atividade…"
           className="w-full px-3 py-2.5 border text-sm resize-none" />
       </div>
@@ -6895,14 +6897,16 @@ function PainelCampanhaEmail({ destinatarios }) {
             </button>
           )}
         </div>
-        <button onClick={copiarEmails} disabled={comEmail.length === 0} className="w-full bg-red-600 disabled:opacity-40">
-          <Icone nome={copiado.emails === "ok" ? "check" : "copiar"} className="w-4 h-4" />
-          {copiado.emails === "ok" ? "Emails copiados" : copiado.emails === "erro" ? "Não foi possível copiar — tenta outra vez" : `Copiar emails (CCO)${comEmail.length ? ` · ${comEmail.length}` : ""}`}
-        </button>
-        <button onClick={copiarTexto} disabled={!texto && !link} className="w-full vf-sec disabled:opacity-40">
-          <Icone nome={copiado.texto === "ok" ? "check" : "copiar"} className="w-4 h-4" />
-          {copiado.texto === "ok" ? "Texto copiado" : copiado.texto === "erro" ? "Não foi possível copiar — tenta outra vez" : "Copiar texto"}
-        </button>
+        <div className="flex gap-2">
+          <button onClick={copiarEmails} disabled={comEmail.length === 0} className="flex-1 bg-red-600 disabled:opacity-40">
+            <Icone nome={copiado.emails === "ok" ? "check" : "copiar"} className="w-4 h-4" />
+            {copiado.emails === "ok" ? "Copiados" : copiado.emails === "erro" ? "Erro — repete" : `Emails (CCO)${comEmail.length ? ` · ${comEmail.length}` : ""}`}
+          </button>
+          <button onClick={copiarTexto} disabled={!texto && !link} className="flex-1 vf-sec disabled:opacity-40">
+            <Icone nome={copiado.texto === "ok" ? "check" : "copiar"} className="w-4 h-4" />
+            {copiado.texto === "ok" ? "Copiado" : copiado.texto === "erro" ? "Erro — repete" : "Copiar texto"}
+          </button>
+        </div>
       </div>
     </aside>
   );
@@ -14895,7 +14899,8 @@ function App() {
         {(pontoAtivo === "propostas" || pontoAtivo === "produtos") && <AvisoPastaProjeto ligacaoPasta={ligacaoPasta} />}
 
         <ErrorBoundary key={pontoAtivo}>
-          {pontoAtivo === "assuntos" && <><HojeView /><h2 className="font-display font-bold text-xl mt-8 mb-3">Assuntos em Progresso</h2><AssuntosView /></>}
+          {pontoAtivo === "assuntos" && <HojeView />}
+          {pontoAtivo === "assuntos-progresso" && <AssuntosView />}
           {pontoAtivo === "negocios" && <NegociosView />}
           {pontoAtivo === "comissoes" && <ComissoesView />}
           {pontoAtivo === "clientes" && <ClientesView />}
