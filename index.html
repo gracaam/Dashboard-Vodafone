@@ -7116,7 +7116,12 @@ function lerCabecalhosEml(texto) {
   topo.split(/\r?\n/).forEach((l) => { const i = l.indexOf(":"); if (i > 0) { const k = l.slice(0, i).trim().toLowerCase(); if (!(k in h)) h[k] = l.slice(i + 1).trim(); } });
   const emails = (v) => (decodificarCabecalhoMime(v).match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g) || []).map((e) => e.toLowerCase());
   const d = Date.parse(h.date || "");
-  return { assunto: decodificarCabecalhoMime(h.subject || "").trim(), de: emails(h.from), outros: [...emails(h.to), ...emails(h.cc)], em: isNaN(d) ? null : new Date(d).toISOString() };
+  const nomes = {};
+  [h.from, h.to, h.cc].forEach((v) => decodificarCabecalhoMime(v).split(",").forEach((parte) => {
+    const m = parte.match(/^\s*"?([^"<]+?)"?\s*<([^>]+)>/);
+    if (m && !m[1].includes("@")) nomes[m[2].trim().toLowerCase()] = m[1].trim();
+  }));
+  return { assunto: decodificarCabecalhoMime(h.subject || "").trim(), de: emails(h.from), outros: [...emails(h.to), ...emails(h.cc)], em: isNaN(d) ? null : new Date(d).toISOString(), nomes, telefone: "" };
 }
 // Outlook Item (.msg) = ficheiro OLE/CFB. Leitor mínimo: só os streams de propriedades
 // do topo (assunto, remetente, destinatários, data) — corpo e anexos nunca são lidos.
@@ -7156,10 +7161,14 @@ function lerMsgOutlook(ab) {
     return ""; };
   const emails = (v) => (String(v).match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g) || []).map((e) => e.toLowerCase());
   const deTxt = [texto(topo, "5D01"), texto(topo, "0C1F"), texto(topo, "0065")].join(" ");
+  const nomes = {};
   const outros = [];
   topo.filter((e) => e.tipo === 1 && e.nome.startsWith("__recip_version1.0_")).forEach((r) => {
     const l = filhos(r.idx);
-    outros.push(...emails(texto(l, "39FE") + " " + texto(l, "3003")));
+    const es = emails(texto(l, "39FE") + " " + texto(l, "3003"));
+    outros.push(...es);
+    const nome = texto(l, "3001").trim();
+    if (nome && es[0] && !nome.includes("@")) nomes[es[0]] = nome;
   });
   let em = null;
   const props = topo.find((e) => e.nome === "__properties_version1.0");
@@ -7176,7 +7185,18 @@ function lerMsgOutlook(ab) {
   const de = emails(deTxt);
   if (!de.length && /^\/o=/i.test(texto(topo, "0C1F"))) de.push("interno@vodafone.com");
   const assunto = texto(topo, "0037").trim();
-  return { assunto, de, outros: [...new Set(outros)], em, proximoEm: detetarDataPedido(assunto + "\n" + texto(topo, "1000"), em) };
+  const corpo = texto(topo, "1000");
+  const nomeDe = (texto(topo, "0C1A") || texto(topo, "0042")).trim();
+  if (nomeDe && de[0] && !nomeDe.includes("@")) nomes[de[0]] = nomeDe;
+  return { assunto, de, outros: [...new Set(outros)], em, nomes, telefone: telefoneNaAssinatura(corpo), proximoEm: detetarDataPedido(assunto + "\n" + corpo, em) };
+}
+
+// 1.º telefone português no texto do email antes do histórico citado ("De:"/"From:"),
+// ou seja, na assinatura de quem escreveu. Só usado em emails recebidos.
+function telefoneNaAssinatura(texto) {
+  const corpo = String(texto || "").split(/\n\s*(De|From|-----Original)\s*:/i)[0];
+  const m = corpo.match(/(?:\+351[\s.-]?)?(?<![\d])([29]\d{2})[\s.-]?(\d{3})[\s.-]?(\d{3})(?!\d)/);
+  return m ? `${m[1]} ${m[2]} ${m[3]}` : "";
 }
 
 // Primeira data explícita no email que seja depois da data do email (pedidos com prazo).
@@ -7219,7 +7239,27 @@ function encontrarClientePorEmails(emails, clientes) {
   return null;
 }
 
-function ImportarEmailsOutlook({ clientes }) {
+// Contacto do email: quem escreveu (recebido) ou o 1.º destinatário externo (enviado).
+// O telefone só vem de emails recebidos (num enviado, a assinatura é a do Augusto).
+function contactoDoEmail(cab, enviado) {
+  const externo = (e) => !/@vodafone\.(com|pt)$/i.test(e);
+  const email = (enviado ? cab.outros : cab.de).find(externo) || "";
+  return { email, nome: (cab.nomes || {})[email] || "", telefone: enviado ? "" : (cab.telefone || "") };
+}
+// Acrescenta à ficha, sempre e sem perguntar (pedido do Augusto, 2026-10-04: cada empresa
+// tem 2–4 pessoas que escrevem), só o que lá não está — nunca apaga nem substitui. Email,
+// telefone e nome juntam-se aos existentes com "; ".
+function camposNovosFicha(extras, contacto) {
+  const novos = {};
+  const tem = (campo, v) => String(extras[campo] || "").toLowerCase().split(/[;,]\s*/).map((x) => x.replace(/\s/g, "")).includes(String(v).toLowerCase().replace(/\s/g, ""));
+  const juntar = (campo, v) => { if (v && !tem(campo, v)) novos[campo] = [extras[campo], v].filter(Boolean).join("; "); };
+  juntar("email", contacto.email);
+  juntar("telefone", contacto.telefone);
+  juntar("contactoNome", contacto.nome);
+  return novos;
+}
+
+function ImportarEmailsOutlook({ clientes, obterExtras, definirExtras }) {
   const [itens, setItens] = useState([]);
   const [aArrastar, setAArrastar] = useState(false);
   const [aviso, setAviso] = useState("");
@@ -7231,20 +7271,27 @@ function ImportarEmailsOutlook({ clientes }) {
         const cab = /\.msg$/i.test(f.name) ? lerMsgOutlook(await f.arrayBuffer()) : lerCabecalhosEml(await f.text());
         const enviado = cab.de.some((e) => /@vodafone\.(com|pt)$/i.test(e));
         const c = encontrarClientePorEmails(enviado ? cab.outros : cab.de.concat(cab.outros), clientes);
-        novos.push({ chave: `${f.name}-${Math.random()}`, ficheiro: f.name, ...cab, enviado, nif: c ? c.n : "" });
+        novos.push({ chave: `${f.name}-${Math.random()}`, ficheiro: f.name, ...cab, enviado, nif: c ? c.n : "", contacto: contactoDoEmail(cab, enviado) });
       } catch (e) { novos.push({ chave: `${f.name}-${Math.random()}`, ficheiro: f.name, erro: e.message }); }
     }
     setItens((p) => [...p, ...novos]);
   };
   const gravar = async () => {
-    let n = 0;
+    let n = 0, fichas = 0;
     for (const it of itens) {
       if (!it.nif || it.erro) continue;
+      if (obterExtras && definirExtras) {
+        try {
+          const extras = (await obterExtras(it.nif)) || {};
+          const novosCampos = camposNovosFicha(extras, it.contacto || {});
+          if (Object.keys(novosCampos).length) { await definirExtras(it.nif, novosCampos); fichas++; }
+        } catch (e) { console.warn("Não foi possível atualizar a ficha:", e.message); }
+      }
       try { await registarContacto(it.nif, { tipo: "Email", nota: `${it.enviado ? "Enviado" : "Recebido"}: ${it.assunto || "(sem assunto)"}`, em: it.em || undefined,
           ...(it.proximoEm ? { proximoEm: it.proximoEm, proximoPasso: `Responder ao pedido: ${it.assunto || "(sem assunto)"}` } : {}) }); n++; } catch (e) {}
     }
     setItens((p) => p.filter((it) => !it.nif || it.erro));
-    setAviso(`${n} email(s) registado(s) no histórico.`); setTimeout(() => setAviso(""), 8000);
+    setAviso(`${n} email(s) registado(s) no histórico${fichas ? ` · ${fichas} ficha(s) atualizada(s) com contactos novos` : ""}.`); setTimeout(() => setAviso(""), 8000);
   };
   const nGraveis = itens.filter((it) => it.nif && !it.erro).length;
   return (
@@ -7421,7 +7468,7 @@ function avisosCampanhas(catalogo, clientes, mapaContratos, extras, hoje = new D
 
 function HojeView() {
   const firebaseUser = useFirebaseAuthUser();
-  const { todosClientes, obterExtras, obterTodosExtras } = useClientesNovos();
+  const { todosClientes, obterExtras, obterTodosExtras, definirExtras } = useClientesNovos();
   const mapaContratos = useContratosPermanencia(firebaseUser);
   const [catalogoHoje, setCatalogoHoje] = useState(null);
   const [extrasHoje, setExtrasHoje] = useState(null);
@@ -7439,7 +7486,7 @@ function HojeView() {
     <div className="space-y-5">
       {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
       {firebaseUser && <ResumoSemanal clientes={todosClientes} />}
-      {firebaseUser && <ImportarEmailsOutlook clientes={todosClientes} />}
+      {firebaseUser && <ImportarEmailsOutlook clientes={todosClientes} obterExtras={obterExtras} definirExtras={definirExtras} />}
       {campanhas.length > 0 && (
         <GrupoHoje titulo="Campanhas novas ou a terminar" cor="amber" itens={campanhas} vazio=""
           render={(x) => (
