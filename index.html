@@ -6757,6 +6757,8 @@ function PainelCampanhaEmail({ destinatarios }) {
   const prepararEmailOutlook = async () => {
     setAPreparar(true);
     const blob = await gerarEmlCampanha({ para: EMAIL_AUGUSTO, cco: comEmail.map((d) => d.email), assunto, corpo: texto, link: linkEmail, anexo });
+    // Histórico de contactos: 1 entrada por cliente da campanha (prospetos falham em silêncio — ver registarContacto).
+    comEmail.forEach((d) => registarContacto(d.n, { tipo: "Email", nota: `Campanha: ${assunto || "(sem assunto)"}` }).catch(() => {}));
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -6885,14 +6887,78 @@ function PainelCampanhaEmail({ destinatarios }) {
   );
 }
 
+const DIAS_PROPOSTA_SEM_RESPOSTA = 7;
+const DIAS_SEM_CONTACTO = 90;
+const TIPOS_CONTACTO = ["Telefone", "Email", "Reunião", "Outro"];
+
+// Histórico de contactos (2026-10-03, Fase 1 ponto 3): campo `contactos` na ficha do
+// cliente (clientes/{nif}), lista de { em, tipo, nota, proximoPasso, proximoEm }.
+// arrayUnion → duas gravações ao mesmo tempo (Mac + Citrix) nunca se apagam uma à outra.
+// update() (não set) → nunca cria uma ficha nova: um NIF que não é cliente (ex. prospeto
+// numa campanha) falha em silêncio em vez de aparecer nos Clientes.
+async function registarContacto(nif, entrada) {
+  const limpo = JSON.parse(JSON.stringify({ ...entrada, em: entrada.em || new Date().toISOString() }));
+  await firebaseDb.collection("clientes").doc(String(nif)).update({ contactos: firebase.firestore.FieldValue.arrayUnion(limpo) });
+}
+function contactosOrdenados(c) {
+  return (Array.isArray(c && c.contactos) ? c.contactos : []).filter((x) => x && x.em).sort((a, b) => b.em.localeCompare(a.em));
+}
+
+function RegistoContactoForm({ nif, onFeito }) {
+  const [tipo, setTipo] = useState("Telefone");
+  const [nota, setNota] = useState("");
+  const [proximoPasso, setProximoPasso] = useState("");
+  const [proximoEm, setProximoEm] = useState("");
+  const [estado, setEstado] = useState("");
+  const gravar = async () => {
+    setEstado("A gravar…");
+    try {
+      await registarContacto(nif, { tipo, nota: nota.trim(), proximoPasso: proximoPasso.trim(), proximoEm: proximoEm || null });
+      setNota(""); setProximoPasso(""); setProximoEm(""); setEstado("");
+      onFeito && onFeito();
+    } catch (e) { setEstado(`Não foi possível gravar: ${e.message}`); }
+  };
+  const cls = "px-2 py-1 rounded border border-neutral-300 text-xs";
+  return (
+    <div className="flex items-center gap-2 flex-wrap text-xs">
+      <select value={tipo} onChange={(e) => setTipo(e.target.value)} className={cls}>{TIPOS_CONTACTO.map((t) => <option key={t}>{t}</option>)}</select>
+      <input value={nota} onChange={(e) => setNota(e.target.value)} placeholder="O que se falou" className={`${cls} flex-1 min-w-[180px]`} />
+      <input value={proximoPasso} onChange={(e) => setProximoPasso(e.target.value)} placeholder="Próximo passo (opcional)" className={`${cls} w-48`} />
+      <input type="date" value={proximoEm} onChange={(e) => setProximoEm(e.target.value)} title="Data do próximo passo" className={cls} />
+      <button onClick={gravar} className="px-2.5 py-1 rounded-md bg-neutral-900 text-white">Registar</button>
+      {estado && <span className="w-full text-neutral-500">{estado}</span>}
+    </div>
+  );
+}
+
+function HistoricoContactosCard({ cliente }) {
+  const lista = contactosOrdenados(cliente);
+  const hojeIso = new Date().toISOString().slice(0, 10);
+  return (
+    <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
+      <div className="text-xs font-medium text-neutral-400">HISTÓRICO DE CONTACTOS</div>
+      <RegistoContactoForm nif={cliente.n} />
+      {lista.length ? (
+        <div className="space-y-1 max-h-60 overflow-y-auto pr-1">
+          {lista.map((x, i) => (
+            <div key={i} className="text-xs border-b border-neutral-100 last:border-0 py-1">
+              <span className="text-neutral-500">{new Date(x.em).toLocaleDateString("pt-PT")}</span> · <b>{x.tipo || "—"}</b>{x.nota ? ` · ${x.nota}` : ""}
+              {x.proximoPasso || x.proximoEm ? <span className={x.proximoEm && x.proximoEm <= hojeIso && i === 0 ? "text-red-700" : "text-neutral-500"}> → {x.proximoPasso || "próximo passo"}{x.proximoEm ? ` (${formatarDataIsoPT(x.proximoEm)})` : ""}</span> : null}
+            </div>
+          ))}
+        </div>
+      ) : <div className="text-xs text-neutral-400">Ainda sem contactos registados.</div>}
+    </div>
+  );
+}
+
 /* ================= PONTO: HOJE (2026-10-03, Fase 1 do plano) =================
    Lista de quem contactar, calculada só com dados que já existem: fim de permanência
-   (contratos_permanencia) e propostas entregues ainda não fechadas (campo `propostas`
-   da ficha do Cliente). Não grava nada. */
-const DIAS_PROPOSTA_SEM_RESPOSTA = 7;
+   (contratos_permanencia), propostas entregues ainda não fechadas (campo `propostas`)
+   e histórico de contactos (campo `contactos`). Só grava ao registar um contacto. */
 function calcularListaHoje(clientes, mapaContratos, hoje = new Date()) {
   const hojeIso = hoje.toISOString().slice(0, 10);
-  const renovacoes = [], propostas = [];
+  const renovacoes = [], propostas = [], passos = [], semContacto = [];
   clientes.forEach((c) => {
     const f = calcularFimMaisProximo(mapaContratos.get(String(c.n)), hoje);
     if (f && !f.terminado && f.dias <= 183) renovacoes.push({ c, ...f });
@@ -6901,49 +6967,66 @@ function calcularListaHoje(clientes, mapaContratos, hoje = new Date()) {
       const dias = diasEntreDatasIso(p.entregueEm.slice(0, 10), hojeIso);
       if (dias >= DIAS_PROPOSTA_SEM_RESPOSTA) propostas.push({ c, dias, total: p.total, entregueEm: p.entregueEm });
     });
+    // Só o contacto mais recente conta: registar um contacto novo "fecha" o passo anterior.
+    const ultimo = contactosOrdenados(c)[0];
+    if (ultimo) {
+      if (ultimo.proximoEm && ultimo.proximoEm <= hojeIso) passos.push({ c, ultimo, atraso: diasEntreDatasIso(ultimo.proximoEm, hojeIso) });
+      const dias = diasEntreDatasIso(ultimo.em.slice(0, 10), hojeIso);
+      if (dias > DIAS_SEM_CONTACTO) semContacto.push({ c, ultimo, dias });
+    }
   });
   renovacoes.sort((a, b) => a.dias - b.dias);
   propostas.sort((a, b) => b.dias - a.dias);
-  return { renovacoes, propostas };
+  passos.sort((a, b) => b.atraso - a.atraso);
+  semContacto.sort((a, b) => b.dias - a.dias);
+  return { renovacoes, propostas, passos, semContacto };
+}
+
+// Fora do HojeView de propósito: definido lá dentro, cada re-render recriava o
+// componente e fechava o formulário aberto.
+function LinhaHoje({ c, children }) {
+  const [aberto, setAberto] = useState(false);
+  return (
+    <div className="px-3 py-2 border-b border-neutral-100 last:border-0 text-sm space-y-2">
+      <div className="flex items-center gap-3">
+        <span className="font-medium flex-1 truncate">{c.e}</span>
+        <span className="text-xs text-neutral-500 whitespace-nowrap">{children}</span>
+        <button onClick={() => setAberto((v) => !v)} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap">{aberto ? "Fechar" : "Registar contacto"}</button>
+      </div>
+      {aberto && <RegistoContactoForm nif={c.n} onFeito={() => setAberto(false)} />}
+    </div>
+  );
+}
+
+function GrupoHoje({ titulo, cor, itens, vazio, render }) {
+  return (
+    <section className="border border-neutral-200 rounded-lg bg-white">
+      <div className={`px-3 py-2 border-b border-neutral-200 text-sm font-semibold ${cor === "red" ? "text-red-700" : cor === "amber" ? "text-amber-700" : "text-neutral-700"}`}>
+        {titulo} <span className="font-normal text-neutral-500">({itens.length})</span>
+      </div>
+      {itens.length ? itens.map(render) : <div className="px-3 py-2 text-xs text-neutral-400">{vazio}</div>}
+    </section>
+  );
 }
 
 function HojeView() {
   const firebaseUser = useFirebaseAuthUser();
   const { todosClientes } = useClientesNovos();
   const mapaContratos = useContratosPermanencia(firebaseUser);
-  const { renovacoes, propostas } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
-  const grupos = [
-    { titulo: "Permanência termina em menos de 1 mês", itens: renovacoes.filter((x) => x.dias <= 30), cor: "red" },
-    { titulo: "Permanência termina em 1 a 3 meses", itens: renovacoes.filter((x) => x.dias > 30 && x.dias <= 90), cor: "amber" },
-    { titulo: "Permanência termina em 3 a 6 meses", itens: renovacoes.filter((x) => x.dias > 90), cor: "neutral" },
-  ];
-  const Linha = ({ c, children }) => (
-    <div className="flex items-center gap-3 px-3 py-2 border-b border-neutral-100 last:border-0 text-sm">
-      <span className="font-medium flex-1 truncate">{c.e}</span>
-      <span className="text-xs text-neutral-500 whitespace-nowrap">{children}</span>
-    </div>
-  );
+  const { renovacoes, propostas, passos, semContacto } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
+  const renov = (x) => <LinhaHoje key={x.c.n} c={x.c}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {x.conta}</LinhaHoje>;
   return (
     <div className="space-y-5">
       {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
-      {grupos.map((g) => (
-        <section key={g.titulo} className="border border-neutral-200 rounded-lg bg-white">
-          <div className={`px-3 py-2 border-b border-neutral-200 text-sm font-semibold ${g.cor === "red" ? "text-red-700" : g.cor === "amber" ? "text-amber-700" : "text-neutral-700"}`}>
-            {g.titulo} <span className="font-normal text-neutral-500">({g.itens.length})</span>
-          </div>
-          {g.itens.length ? g.itens.map((x) => (
-            <Linha key={x.c.n} c={x.c}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {x.conta}</Linha>
-          )) : <div className="px-3 py-2 text-xs text-neutral-400">Ninguém neste grupo.</div>}
-        </section>
-      ))}
-      <section className="border border-neutral-200 rounded-lg bg-white">
-        <div className="px-3 py-2 border-b border-neutral-200 text-sm font-semibold text-neutral-700">
-          Propostas entregues sem resposta há {DIAS_PROPOSTA_SEM_RESPOSTA}+ dias <span className="font-normal text-neutral-500">({propostas.length})</span>
-        </div>
-        {propostas.length ? propostas.map((x, i) => (
-          <Linha key={`${x.c.n}-${i}`} c={x.c}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</Linha>
-        )) : <div className="px-3 py-2 text-xs text-neutral-400">Nenhuma proposta à espera de resposta.</div>}
-      </section>
+      <GrupoHoje titulo="Próximos passos para hoje ou atrasados" cor="red" itens={passos} vazio="Nenhum próximo passo para hoje."
+        render={(x) => <LinhaHoje key={x.c.n} c={x.c}>{x.ultimo.proximoPasso || "próximo passo"} · {x.atraso ? `atrasado ${x.atraso} dias` : "hoje"}</LinhaHoje>} />
+      <GrupoHoje titulo="Permanência termina em menos de 1 mês" cor="red" itens={renovacoes.filter((x) => x.dias <= 30)} vazio="Ninguém neste grupo." render={renov} />
+      <GrupoHoje titulo="Permanência termina em 1 a 3 meses" cor="amber" itens={renovacoes.filter((x) => x.dias > 30 && x.dias <= 90)} vazio="Ninguém neste grupo." render={renov} />
+      <GrupoHoje titulo="Permanência termina em 3 a 6 meses" itens={renovacoes.filter((x) => x.dias > 90)} vazio="Ninguém neste grupo." render={renov} />
+      <GrupoHoje titulo={`Propostas entregues sem resposta há ${DIAS_PROPOSTA_SEM_RESPOSTA}+ dias`} itens={propostas} vazio="Nenhuma proposta à espera de resposta."
+        render={(x, i) => <LinhaHoje key={`${x.c.n}-${i}`} c={x.c}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</LinhaHoje>} />
+      <GrupoHoje titulo={`Sem contacto há mais de ${DIAS_SEM_CONTACTO} dias`} itens={semContacto} vazio="Ninguém (só conta clientes com pelo menos um contacto registado)."
+        render={(x) => <LinhaHoje key={x.c.n} c={x.c}>último: {new Date(x.ultimo.em).toLocaleDateString("pt-PT")} · há {x.dias} dias</LinhaHoje>} />
     </div>
   );
 }
@@ -7624,6 +7707,8 @@ function ClientesView() {
 
           {!ehNovo && clienteAtual && <ContratosPermanenciaCard nif={clienteAtual.n} firebaseUser={firebaseUser} mapa={mapaContratos} />}
 
+          {!ehNovo && clienteAtual && firebaseUser && <HistoricoContactosCard cliente={clienteAtual} />}
+
           {!ehNovo && clienteAtual && propostas.length > 0 && (
             <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
               <div className="text-xs font-medium text-neutral-400">PROPOSTAS ENTREGUES</div>
@@ -8203,6 +8288,7 @@ function AnaliseFaturasView() {
       try { await definirExtras(nifSelecionado, { email: emailDestino }); } catch {}
     }
     const blob = await gerarEmlCampanha({ para: emailDestino, assunto: assuntoEmail, corpo: textoEmail });
+    registarContacto(nifSelecionado, { tipo: "Email", nota: `Análise de faturas: ${assuntoEmail || ""}`.trim() }).catch(() => {});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
