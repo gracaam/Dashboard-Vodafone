@@ -14065,6 +14065,79 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
 // combina as duas listas, coisa que BlocoCampanha/PainelCampanhaEmail (por página)
 // não fazem hoje sem um refactor maior — decisão registada aqui para ser revista se
 // Augusto preferir integrar diretamente nas páginas existentes.
+/* ================= MAPA DE PRODUTOS POR CLIENTE (2026-10-04, Fase 3 ponto 6) =================
+   Grelha clientes × famílias de produto, sem Jev nem pedidos: Móvel/Fixo/IoT vêm das
+   quantidades do import de Clientes; todas as colunas também aceitam o texto dos contratos
+   de permanência em vigor (Serviço, Tipo Produto, Descrição) e o campo "Produtos já
+   contratados" da ficha. One Net, Microsoft 365 e Segurança só aparecem por essas duas
+   fontes — sem contratos importados, "não tem" quer dizer "não sei". */
+const COLUNAS_MAPA_PRODUTOS = [
+  { id: "movel", label: "Móvel", base: (c) => (c.v && c.v[0] > 0) || (c.d && c.d[0] > 0), re: /m[óo]vel|\bvoz\b|red\s/i },
+  { id: "fixo", label: "Fixo", base: (c) => c.f && c.f[0] > 0, re: /fixo|fibra|adsl|internet fixa/i },
+  { id: "onenet", label: "One Net", re: /one\s?net/i },
+  { id: "m365", label: "Microsoft 365", re: /365|microsoft|office/i },
+  { id: "seguranca", label: "Segurança", re: /segur|secur|firewall|antiv[ií]rus|ddos|lookout|cyber/i },
+  { id: "iot", label: "IoT", base: (c) => c.i > 0, re: /\biot\b|m2m|smart\s?solution/i },
+];
+function mapaProdutosDoCliente(c, docContratos, extras, hojeIso) {
+  const textos = [String((extras && extras.produtosJaTem) || "")];
+  Object.values((docContratos && docContratos.contas) || {}).forEach((dados) => ((dados && dados.contratos) || []).forEach((k) => {
+    if (!k.fim || k.fim >= hojeIso) textos.push([k.servico, k.tipo, k.produto, k.descricao].filter(Boolean).join(" "));
+  }));
+  const t = textos.join("\n");
+  const tem = {};
+  COLUNAS_MAPA_PRODUTOS.forEach((col) => { tem[col.id] = !!((col.base && col.base(c)) || col.re.test(t)); });
+  return { tem, comContratos: textos.length > 1 };
+}
+
+function MapaProdutosClientes({ clientes, mapaContratos, extrasClientes }) {
+  const [temId, setTemId] = useState("");
+  const [faltaId, setFaltaId] = useState("");
+  const hojeIso = new Date().toISOString().slice(0, 10);
+  const linhas = useMemo(() => clientes.map((c) => ({ c, ...mapaProdutosDoCliente(c, mapaContratos.get(String(c.n)), extrasClientes && extrasClientes[c.n], hojeIso) })),
+    [clientes, mapaContratos, extrasClientes, hojeIso]);
+  const filtradas = linhas.filter((l) => (!temId || l.tem[temId]) && (!faltaId || !l.tem[faltaId]));
+  const destinatarios = (temId || faltaId) ? filtradas.map((l) => ({ n: l.c.n, e: l.c.e, email: (extrasClientes && extrasClientes[l.c.n] && extrasClientes[l.c.n].email) || null })) : [];
+  const sel = (v, set, vazio) => (
+    <select value={v} onChange={(e) => set(e.target.value)} className="px-2 py-1 rounded border border-neutral-300 text-xs">
+      <option value="">{vazio}</option>
+      {COLUNAS_MAPA_PRODUTOS.map((col) => <option key={col.id} value={col.id}>{col.label}</option>)}
+    </select>
+  );
+  return (
+    <details className="bg-white border border-neutral-200 rounded-lg">
+      <summary className="px-4 py-3 text-sm font-medium cursor-pointer">Mapa de produtos por cliente (sem Jev — lista em segundos)</summary>
+      <div className="p-4 pt-0 space-y-3">
+        <p className="text-xs text-neutral-500">Móvel, Fixo e IoT vêm do import de Clientes. One Net, Microsoft 365 e Segurança só aparecem se estiverem nos contratos de permanência importados ou em "Produtos já contratados" na ficha.</p>
+        <div className="flex items-center gap-2 flex-wrap text-xs text-neutral-600">
+          Tem {sel(temId, setTemId, "— qualquer —")} mas não tem {sel(faltaId, setFaltaId, "— qualquer —")}
+          <span className="text-neutral-500">→ {filtradas.length} cliente(s)</span>
+        </div>
+        <div className="max-h-96 overflow-auto border border-neutral-100 rounded">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-neutral-50">
+              <tr>
+                <th className="text-left px-2 py-1 font-medium">Cliente</th>
+                {COLUNAS_MAPA_PRODUTOS.map((col) => <th key={col.id} className="px-2 py-1 font-medium whitespace-nowrap">{col.label} <span className="font-normal text-neutral-400">({filtradas.filter((l) => l.tem[col.id]).length})</span></th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {filtradas.map((l) => (
+                <tr key={l.c.n} className="border-t border-neutral-100">
+                  <td className="px-2 py-1 truncate max-w-[260px]" title={l.comContratos ? "" : "Sem contratos importados"}>{l.c.e}{!l.comContratos && <span className="text-neutral-300"> ·</span>}</td>
+                  {COLUNAS_MAPA_PRODUTOS.map((col) => <td key={col.id} className={`px-2 py-1 text-center ${l.tem[col.id] ? "text-emerald-700" : "text-neutral-300"}`}>{l.tem[col.id] ? "✓" : "—"}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {destinatarios.length > 0 ? <PainelCampanhaEmail destinatarios={destinatarios} />
+          : <p className="text-xs text-neutral-400">Escolhe "tem" e/ou "não tem" para preparar o email para essa lista.</p>}
+      </div>
+    </details>
+  );
+}
+
 function CampanhaPorProdutoView() {
   const { todosClientes, firebaseUser, nuvemAtiva, obterTodosExtras } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
@@ -14324,6 +14397,8 @@ function CampanhaPorProdutoView() {
       <div>
         <p className="text-sm text-neutral-500">Pontua clientes e prospetos reais contra uma campanha (produto do catálogo ou descrição livre) e gera o .eml a partir dos melhores.</p>
       </div>
+
+      <MapaProdutosClientes clientes={todosClientes} mapaContratos={mapaContratos} extrasClientes={extrasClientes} />
 
       <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-3">
         <p className="text-sm font-medium">Campanha / produto</p>
