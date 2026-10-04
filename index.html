@@ -7312,10 +7312,32 @@ function GrupoHoje({ titulo, cor, itens, vazio, render }) {
   );
 }
 
+// Campanhas novas (últimos 7 dias) ou a terminar (próximos 14 dias), com o nº de clientes
+// a que se aplicam pelo "Aplica-se a" do quadrado (mesma regra do Mapa de produtos).
+const DIAS_CAMPANHA_A_TERMINAR = 14, DIAS_CAMPANHA_NOVA = 7;
+function avisosCampanhas(catalogo, clientes, mapaContratos, extras, hoje = new Date()) {
+  const hojeIso = hoje.toISOString().slice(0, 10);
+  return (catalogo || []).filter((p) => p.categoriaId === "campanhas-em-vigor").map((p) => {
+    const diasFim = p.dataCampanha ? diasEntreDatasIso(hojeIso, p.dataCampanha) : null;
+    const nova = p.adicionadaEm && diasEntreDatasIso(p.adicionadaEm, hojeIso) <= DIAS_CAMPANHA_NOVA;
+    const a = p.aplicaA || {};
+    const n = (a.tem || a.falta) ? clientes.filter((c) => { const { tem } = mapaProdutosDoCliente(c, mapaContratos.get(String(c.n)), extras && extras[c.n], hojeIso); return (!a.tem || tem[a.tem]) && (!a.falta || !tem[a.falta]); }).length : null;
+    return { p, diasFim, nova, n, aTerminar: diasFim != null && diasFim >= 0 && diasFim <= DIAS_CAMPANHA_A_TERMINAR };
+  }).filter((x) => x.nova || x.aTerminar).sort((x, y) => (x.diasFim ?? 999) - (y.diasFim ?? 999));
+}
+
 function HojeView() {
   const firebaseUser = useFirebaseAuthUser();
-  const { todosClientes, obterExtras } = useClientesNovos();
+  const { todosClientes, obterExtras, obterTodosExtras } = useClientesNovos();
   const mapaContratos = useContratosPermanencia(firebaseUser);
+  const [catalogoHoje, setCatalogoHoje] = useState(null);
+  const [extrasHoje, setExtrasHoje] = useState(null);
+  useEffect(() => {
+    if (!firebaseUser) return;
+    lerProdutosCaracteristicasNuvem().then((d) => setCatalogoHoje((d && d.produtos) || []));
+    obterTodosExtras().then(setExtrasHoje).catch(() => {});
+  }, [firebaseUser, todosClientes.length]);
+  const campanhas = useMemo(() => avisosCampanhas(catalogoHoje, todosClientes, mapaContratos, extrasHoje), [catalogoHoje, todosClientes, mapaContratos, extrasHoje]);
   const { renovacoes, propostas, passos, semContacto } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const antigos = useMemo(() => listarTarifariosAntigos(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const em = (tipo, x) => ({ email: textoEmailHoje(tipo, x.c, x), obterExtras });
@@ -7324,6 +7346,19 @@ function HojeView() {
     <div className="space-y-5">
       {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
       {firebaseUser && <ImportarEmailsOutlook clientes={todosClientes} />}
+      {campanhas.length > 0 && (
+        <GrupoHoje titulo="Campanhas novas ou a terminar" cor="amber" itens={campanhas} vazio=""
+          render={(x) => (
+            <div key={x.p.nome + (x.p.ficheiro && x.p.ficheiro.nome)} className="px-3 py-2 border-b border-neutral-100 last:border-0 text-sm flex items-center gap-3 flex-wrap">
+              <span className="font-medium flex-1">{x.p.nome}</span>
+              <span className="text-xs text-neutral-500">
+                {x.aTerminar ? (x.diasFim === 0 ? "termina hoje" : `termina daqui a ${x.diasFim} dia${x.diasFim === 1 ? "" : "s"}`) : "nova"}
+                {x.n != null ? ` · aplica-se a ${x.n} cliente${x.n === 1 ? "" : "s"}` : " · define \"Aplica-se a\" no quadrado da campanha"}
+              </span>
+              <button onClick={() => abrirFicheiroCampanha(x.p, null)} className="text-xs text-neutral-500 hover:text-red-600 underline">Abrir campanha</button>
+            </div>
+          )} />
+      )}
       <GrupoHoje titulo="Próximos passos para hoje ou atrasados" cor="red" itens={passos} vazio="Nenhum próximo passo para hoje."
         render={(x) => <LinhaHoje key={x.c.n} c={x.c} {...em("passo", x)}>{x.ultimo.proximoPasso || "próximo passo"} · {x.atraso ? `atrasado ${x.atraso} dias` : "hoje"}</LinhaHoje>} />
       <GrupoHoje titulo="Permanência termina em menos de 1 mês" cor="red" itens={renovacoes.filter((x) => x.dias <= 30)} vazio="Ninguém neste grupo." render={renov} />
@@ -13056,6 +13091,21 @@ async function adicionarProdutoAoCatarogo(entry, handleProjeto, nuvemAtiva) {
   return gravou;
 }
 
+// Altera campos de uma campanha já no catálogo (Termina em / Aplica-se a, 2026-10-04).
+async function atualizarCampanhaNoCatalogo(produto, alteracoes, handleProjeto, nuvemAtiva) {
+  const chave = (p) => `${p.categoriaId}|${p.nome}|${(p.ficheiro && p.ficheiro.nome) || ""}`;
+  const alvo = chave(produto);
+  const aplicar = (d) => { d.produtos = (d.produtos || []).map((p) => chave(p) === alvo ? { ...p, ...alteracoes } : p); return d; };
+  if (nuvemAtiva) {
+    const d = (await lerProdutosCaracteristicasNuvem()) || { produtos: [] };
+    await firebaseDb.collection("meta").doc("produtos_caracteristicas").set(aplicar(d));
+  }
+  if (handleProjeto) {
+    const d = (await lerJsonDadosPrivados(handleProjeto, "produtos-caracteristicas.json")) || { produtos: [] };
+    await guardarJsonDadosPrivados(handleProjeto, "produtos-caracteristicas.json", aplicar(d));
+  }
+}
+
 async function removerProdutoDoCatalogo(produto, handleProjeto, nuvemAtiva) {
   const chave = (p) => `${p.categoriaId}|${p.nome}|${(p.ficheiro && p.ficheiro.nome) || ""}`;
   const alvo = chave(produto);
@@ -13121,6 +13171,7 @@ function AdicionarCampanha({ handleProjeto, nuvemAtiva, onAdicionado }) {
           subtitulo: data ? `Válida até ${formatarDataIsoPT(data)}` : "",
           caracteristicas: [], nota: "",
           dataCampanha: data || "",
+          adicionadaEm: new Date().toISOString().slice(0, 10),
           ficheiro: { nome: f.name, tipo: tipoFicheiroPorExtensao(f.name) },
         };
         await adicionarProdutoAoCatarogo(entry, handleProjeto, nuvemAtiva);
@@ -13340,6 +13391,27 @@ function VerPdfOrigemProduto({ handleProjeto, subpasta, nuvemAtiva }) {
   );
 }
 
+// "Termina em" e "Aplica-se a" de cada campanha — alimentam o aviso em Para começar o dia.
+function DadosCampanha({ produto, handleProjeto, nuvemAtiva, onAlterado }) {
+  const a = produto.aplicaA || {};
+  const gravar = async (alt) => { try { await atualizarCampanhaNoCatalogo(produto, alt, handleProjeto, nuvemAtiva); if (onAlterado) onAlterado(); } catch (e) { console.warn("Não foi possível gravar a campanha:", e); } };
+  const sel = (v, k, vazio) => (
+    <select value={v || ""} onChange={(e) => gravar({ aplicaA: { ...a, [k]: e.target.value } })} className="px-1 py-0.5 rounded border border-neutral-300 text-[11px]">
+      <option value="">{vazio}</option>
+      {COLUNAS_MAPA_PRODUTOS.map((col) => <option key={col.id} value={col.id}>{col.label}</option>)}
+    </select>
+  );
+  return (
+    <div className="w-full flex flex-col gap-1 text-[11px] text-neutral-500 mt-1">
+      <label className="flex items-center gap-1">Termina em
+        <input type="date" value={produto.dataCampanha || ""} onChange={(e) => gravar({ dataCampanha: e.target.value, subtitulo: e.target.value ? `Válida até ${formatarDataIsoPT(e.target.value)}` : "" })}
+          className="px-1 py-0.5 rounded border border-neutral-300 text-[11px]" />
+      </label>
+      <div className="flex items-center gap-1 flex-wrap">Aplica-se a quem tem {sel(a.tem, "tem", "— qualquer —")} e não tem {sel(a.falta, "falta", "— qualquer —")}</div>
+    </div>
+  );
+}
+
 function CartaoProdutoVodafone({ produto, categoriaLabel, handleProjeto, categoriaSubpastas, nuvemAtiva, onAlterado }) {
   const subpastaUpload = pastaOrigemProduto(produto, categoriaSubpastas);
   // Quadrado de CAMPANHA (tem `ficheiro`): nome + data + abrir ficheiro, sem
@@ -13377,6 +13449,7 @@ function CartaoProdutoVodafone({ produto, categoriaLabel, handleProjeto, categor
               if (onAlterado) onAlterado();
             }}
             title="Remover campanha" className="text-[11px] text-neutral-400 hover:text-red-600 ml-auto">✕ remover</button>
+          <DadosCampanha produto={produto} handleProjeto={handleProjeto} nuvemAtiva={nuvemAtiva} onAlterado={onAlterado} />
         </div>
       ) : (
         <div className="mt-3 pt-3 border-t border-neutral-100 flex flex-col gap-1.5">
