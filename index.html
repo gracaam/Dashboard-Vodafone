@@ -6982,6 +6982,48 @@ function calcularListaHoje(clientes, mapaContratos, hoje = new Date()) {
   return { renovacoes, propostas, passos, semContacto };
 }
 
+// Tarifários extintos ou antigos (2026-10-04, Fase 1 ponto 2). Fonte: Portal Comercial
+// Vodafone extraído a 02-10-2026 — RED "Estanho" desde 01-08-2026, Pacotes First extintos
+// desde 01-09-2026, planos 2024 substituídos pelos 2025. Lê o "Produto" dos contratos de
+// permanência ativos. Preços de referência: mensalidade por cartão, sem IVA, com
+// fidelização 24m (portal, Voz Móvel Biz, início 17-08-2026). Acrescentar regras aqui.
+const PRECOS_BIZ_REFERENCIA = { "Biz Start": 17, "Biz Standard": 28.64, "Biz Max": 36.82, "Biz Infinity Start": 30, "Biz Infinity Max": 47.05, "Biz Infinity Prime": 92.07 };
+const ANO_2024 = /(?:jan|fev|mar|abr|mai|maio|jun|jul|ago|set|out|nov|dez)24\b|2024/;
+const REGRAS_TARIFARIO_ANTIGO = [
+  { re: /\bred\b.*(igiga|ilimit|infinit)|(igiga|ilimit|infinit).*\bred\b/, sugestao: "Biz Infinity Start", motivo: "oferta RED descontinuada (Estanho desde 01/08/2026)" },
+  { re: /\bred\b/, sugestao: "Biz Start", motivo: "oferta RED descontinuada (Estanho desde 01/08/2026)" },
+  { re: /\bfirst\b/, sugestao: "Pacote Biz Start 2026", motivo: "Pacotes First extintos desde 01/09/2026" },
+  { re: /(infinity|∞).*(plus|max)/, ano24: true, sugestao: "Biz Infinity Max", motivo: "plano 2024 — versão 2025 disponível" },
+  { re: /v2 ?plus/, ano24: true, sugestao: "Biz Start", motivo: "plano 2024 — versão 2025 disponível" },
+  { re: /standard/, ano24: true, sugestao: "Biz Standard", motivo: "plano 2024 — versão 2025 com mais dados" },
+  { re: /\b(max|plus)\b/, ano24: true, sugestao: "Biz Max", motivo: "plano 2024 — versão 2025 com mais dados" },
+];
+function sugestaoTarifarioAntigo(produto) {
+  const t = nomeTarifarioCurto(produto).toLowerCase();
+  // Equipamentos ainda em venda com "Red" no nome (ex. "Telefone Fixo Red Biz IP Básico").
+  if (!t || /telefone|equipamento|router|cr[eé]dito/.test(t)) return null;
+  const regra = REGRAS_TARIFARIO_ANTIGO.find((g) => g.re.test(t) && (!g.ano24 || ANO_2024.test(t)));
+  return regra ? { sugestao: regra.sugestao, motivo: regra.motivo } : null;
+}
+function listarTarifariosAntigos(clientes, mapaContratos, hoje = new Date()) {
+  const hojeIso = hoje.toISOString().slice(0, 10);
+  const out = [];
+  clientes.forEach((c) => {
+    const doc = mapaContratos.get(String(c.n));
+    const itens = [];
+    Object.values((doc && doc.contas) || {}).forEach((dados) => ((dados && dados.contratos) || []).forEach((k) => {
+      if (k.fim && k.fim < hojeIso) return;
+      const s = sugestaoTarifarioAntigo(k.produto || k.tipo);
+      if (!s) return;
+      const atual = valorAtualizadoInflacao(k.multa, k.inicio, hoje).valor;
+      const novo = PRECOS_BIZ_REFERENCIA[s.sugestao];
+      itens.push({ produto: nomeTarifarioCurto(k.produto || k.tipo), ...s, atual, novo, dif: atual != null && novo != null ? Math.round((novo - atual) * 100) / 100 : null });
+    }));
+    if (itens.length) out.push({ c, itens, difTotal: itens.reduce((t, x) => t + (x.dif || 0), 0) });
+  });
+  return out.sort((a, b) => b.itens.length - a.itens.length);
+}
+
 // Fora do HojeView de propósito: definido lá dentro, cada re-render recriava o
 // componente e fechava o formulário aberto.
 function LinhaHoje({ c, children }) {
@@ -7014,6 +7056,7 @@ function HojeView() {
   const { todosClientes } = useClientesNovos();
   const mapaContratos = useContratosPermanencia(firebaseUser);
   const { renovacoes, propostas, passos, semContacto } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
+  const antigos = useMemo(() => listarTarifariosAntigos(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const renov = (x) => <LinhaHoje key={x.c.n} c={x.c}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {x.conta}</LinhaHoje>;
   return (
     <div className="space-y-5">
@@ -7023,6 +7066,18 @@ function HojeView() {
       <GrupoHoje titulo="Permanência termina em menos de 1 mês" cor="red" itens={renovacoes.filter((x) => x.dias <= 30)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 1 a 3 meses" cor="amber" itens={renovacoes.filter((x) => x.dias > 30 && x.dias <= 90)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 3 a 6 meses" itens={renovacoes.filter((x) => x.dias > 90)} vazio="Ninguém neste grupo." render={renov} />
+      <GrupoHoje titulo="Tarifários extintos ou antigos (renovação/upgrade)" cor="amber" itens={antigos} vazio="Nenhum cliente com tarifários extintos nos contratos importados."
+        render={(x) => {
+          const porSug = {};
+          x.itens.forEach((i) => { porSug[i.sugestao] = porSug[i.sugestao] || { n: 0, motivo: i.motivo, produtos: new Set() }; porSug[i.sugestao].n++; porSug[i.sugestao].produtos.add(i.produto); });
+          const comDif = x.itens.some((i) => i.dif != null);
+          return (
+            <LinhaHoje key={x.c.n} c={x.c}>
+              {Object.entries(porSug).map(([sug, g]) => `${g.n}× ${[...g.produtos].slice(0, 2).join(", ")} → ${sug}`).join(" · ")}
+              {comDif ? ` · ${x.difTotal > 0 ? "sobe" : "desce"} ${formatEuro(Math.abs(x.difTotal))}/mês` : ""}
+            </LinhaHoje>
+          );
+        }} />
       <GrupoHoje titulo={`Propostas entregues sem resposta há ${DIAS_PROPOSTA_SEM_RESPOSTA}+ dias`} itens={propostas} vazio="Nenhuma proposta à espera de resposta."
         render={(x, i) => <LinhaHoje key={`${x.c.n}-${i}`} c={x.c}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</LinhaHoje>} />
       <GrupoHoje titulo={`Sem contacto há mais de ${DIAS_SEM_CONTACTO} dias`} itens={semContacto} vazio="Ninguém (só conta clientes com pelo menos um contacto registado)."
