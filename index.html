@@ -6952,8 +6952,12 @@ function RegistoContactoForm({ nif, onFeito }) {
   );
 }
 
+async function apagarContacto(nif, entrada) {
+  await firebaseDb.collection("clientes").doc(String(nif)).update({ contactos: firebase.firestore.FieldValue.arrayRemove(entrada) });
+}
 function HistoricoContactosCard({ cliente }) {
   const lista = contactosOrdenados(cliente);
+  const [aApagar, setAApagar] = useState(null);
   const hojeIso = new Date().toISOString().slice(0, 10);
   return (
     <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
@@ -6963,6 +6967,9 @@ function HistoricoContactosCard({ cliente }) {
         <div className="space-y-1 max-h-60 overflow-y-auto pr-1">
           {lista.map((x, i) => (
             <div key={i} className="text-xs border-b border-neutral-100 last:border-0 py-1">
+              {aApagar === x.em + (x.nota || "")
+                ? <span className="float-right"><button onClick={async () => { try { await apagarContacto(cliente.n, x); } catch (e) {} setAApagar(null); }} className="text-red-700 underline mr-2">Apagar</button><button onClick={() => setAApagar(null)} className="text-neutral-500 underline">Cancelar</button></span>
+                : <button onClick={() => setAApagar(x.em + (x.nota || ""))} title="Apagar este registo" className="float-right text-neutral-400 hover:text-red-600">✕</button>}
               <span className="text-neutral-500">{new Date(x.em).toLocaleDateString("pt-PT")}</span> · <b>{x.tipo || "—"}</b>{x.nota ? ` · ${x.nota}` : ""}
               {x.proximoPasso || x.proximoEm ? <span className={x.proximoEm && x.proximoEm <= hojeIso && i === 0 ? "text-red-700" : "text-neutral-500"}> → {x.proximoPasso || "próximo passo"}{x.proximoEm ? ` (${formatarDataIsoPT(x.proximoEm)})` : ""}</span> : null}
             </div>
@@ -7107,6 +7114,95 @@ function lerCabecalhosEml(texto) {
   const d = Date.parse(h.date || "");
   return { assunto: decodificarCabecalhoMime(h.subject || "").trim(), de: emails(h.from), outros: [...emails(h.to), ...emails(h.cc)], em: isNaN(d) ? null : new Date(d).toISOString() };
 }
+// Outlook Item (.msg) = ficheiro OLE/CFB. Leitor mínimo: só os streams de propriedades
+// do topo (assunto, remetente, destinatários, data) — corpo e anexos nunca são lidos.
+function lerMsgOutlook(ab) {
+  const dv = new DataView(ab), u8 = new Uint8Array(ab);
+  if (dv.getUint32(0, true) !== 0xE011CFD0) throw new Error("não é um ficheiro .msg do Outlook");
+  const tam = 1 << dv.getUint16(0x1E, true), off = (s) => (s + 1) * tam, FIM = 0xFFFFFFFE;
+  const difat = [];
+  for (let i = 0; i < 109; i++) difat.push(dv.getUint32(0x4C + i * 4, true));
+  for (let s = dv.getUint32(0x44, true), n = 0; s < FIM && n < 1e4; n++) {
+    for (let i = 0; i < tam / 4 - 1; i++) difat.push(dv.getUint32(off(s) + i * 4, true));
+    s = dv.getUint32(off(s) + tam - 4, true);
+  }
+  const fat = [];
+  difat.filter((s) => s < FIM).forEach((s) => { for (let i = 0; i < tam / 4; i++) fat.push(dv.getUint32(off(s) + i * 4, true)); });
+  const cadeia = (s, tabela) => { const r = []; while (s < FIM && r.length < 1e6) { r.push(s); s = tabela[s]; } return r; };
+  const ler = (s) => { const p = cadeia(s, fat), out = new Uint8Array(p.length * tam); p.forEach((x, i) => out.set(u8.subarray(off(x), off(x) + tam), i * tam)); return out; };
+  const dir = ler(dv.getUint32(0x30, true)), dd = new DataView(dir.buffer);
+  const entrada = (i) => { const b = i * 128, nl = dd.getUint16(b + 64, true);
+    return { nome: new TextDecoder("utf-16le").decode(dir.subarray(b, b + Math.max(0, nl - 2))), tipo: dir[b + 66],
+      esq: dd.getUint32(b + 68, true), dir: dd.getUint32(b + 72, true), filho: dd.getUint32(b + 76, true),
+      ini: dd.getUint32(b + 116, true), tam: dd.getUint32(b + 120, true) }; };
+  const raiz = entrada(0), corte = dv.getUint32(0x38, true);
+  const miniFat = []; { const m = dv.getUint32(0x3C, true); if (m < FIM) { const b = ler(m), v = new DataView(b.buffer); for (let i = 0; i < b.length / 4; i++) miniFat.push(v.getUint32(i * 4, true)); } }
+  const miniStream = raiz.ini < FIM ? ler(raiz.ini) : new Uint8Array(0);
+  const conteudo = (e) => {
+    if (e.tam >= corte) return ler(e.ini).subarray(0, e.tam);
+    const p = cadeia(e.ini, miniFat), out = new Uint8Array(p.length * 64);
+    p.forEach((x, i) => out.set(miniStream.subarray(x * 64, x * 64 + 64), i * 64));
+    return out.subarray(0, e.tam);
+  };
+  const filhos = (i) => { const r = [], pilha = [entrada(i).filho]; while (pilha.length && r.length < 1e4) { const k = pilha.pop(); if (k >= 0xFFFFFFFA) continue; const e = entrada(k); e.idx = k; r.push(e); pilha.push(e.esq, e.dir); } return r; };
+  const topo = filhos(0);
+  const texto = (lista, id) => { const u = lista.find((e) => e.nome === `__substg1.0_${id}001F`), a = lista.find((e) => e.nome === `__substg1.0_${id}001E`);
+    if (u) return new TextDecoder("utf-16le").decode(conteudo(u)).replace(/\0+$/, "");
+    if (a) return new TextDecoder("windows-1252").decode(conteudo(a)).replace(/\0+$/, "");
+    return ""; };
+  const emails = (v) => (String(v).match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g) || []).map((e) => e.toLowerCase());
+  const deTxt = [texto(topo, "5D01"), texto(topo, "0C1F"), texto(topo, "0065")].join(" ");
+  const outros = [];
+  topo.filter((e) => e.tipo === 1 && e.nome.startsWith("__recip_version1.0_")).forEach((r) => {
+    const l = filhos(r.idx);
+    outros.push(...emails(texto(l, "39FE") + " " + texto(l, "3003")));
+  });
+  let em = null;
+  const props = topo.find((e) => e.nome === "__properties_version1.0");
+  if (props) {
+    const b = conteudo(props), v = new DataView(b.buffer, b.byteOffset, b.byteLength), datas = {};
+    for (let p = 32; p + 16 <= b.length; p += 16) {
+      const tag = v.getUint32(p, true);
+      if ((tag & 0xFFFF) === 0x0040) datas[tag >>> 16] = v.getUint32(p + 8, true) + v.getUint32(p + 12, true) * 4294967296;
+    }
+    const ft = datas[0x0E06] || datas[0x0039];
+    if (ft) em = new Date(ft / 10000 - 11644473600000).toISOString();
+  }
+  // Remetente interno do Exchange ("/O=…") não tem @: é alguém da Vodafone (enviado por ti).
+  const de = emails(deTxt);
+  if (!de.length && /^\/o=/i.test(texto(topo, "0C1F"))) de.push("interno@vodafone.com");
+  const assunto = texto(topo, "0037").trim();
+  return { assunto, de, outros: [...new Set(outros)], em, proximoEm: detetarDataPedido(assunto + "\n" + texto(topo, "1000"), em) };
+}
+
+// Primeira data explícita no email que seja depois da data do email (pedidos com prazo).
+// Lê "dd/mm[/aaaa]", "dd-mm-aaaa", "[dia] 15 de outubro" e "amanhã". Datas anteriores ao
+// email (histórico citado, faturas) são ignoradas. O texto do email nunca é guardado.
+// ponytail: só datas explícitas — "sexta-feira"/"próxima semana" não são detetadas.
+function detetarDataPedido(texto, emIso) {
+  const base = emIso ? new Date(emIso) : new Date();
+  const ref = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  const corpo = String(texto || "").split(/\n\s*(De|From|-----Original)\s*:/i)[0].replace(/\S*(https?:|www\.|@)\S*/gi, " ");
+  const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const cands = [];
+  if (/\bamanh[ãa](?![a-z])/i.test(corpo)) cands.push({ i: corpo.search(/\bamanh[ãa](?![a-z])/i), d: new Date(ref.getTime() + 864e5) });
+  const re = /(?<![\d\/.,-])(\d{1,2})\s*(?:[\/.-]\s*(\d{1,2})(?:\s*[\/.-]\s*(\d{2,4}))?|\s+de\s+(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)(?:\s+de\s+(\d{4}))?)/gi;
+  let m;
+  while ((m = re.exec(corpo))) {
+    const dia = +m[1], mes = m[2] ? +m[2] - 1 : MESES.indexOf(String(m[4] || "").toLowerCase().replace("marco", "março"));
+    let ano = m[3] ? +m[3] : m[5] ? +m[5] : ref.getFullYear();
+    if (ano < 100) ano += 2000;
+    if (mes < 0 || mes > 11 || dia < 1 || dia > 31) continue;
+    let d = new Date(ano, mes, dia);
+    if (d.getMonth() !== mes) continue;
+    if (!m[3] && !m[5] && d < ref) d = new Date(ano + 1, mes, dia);
+    cands.push({ i: m.index, d });
+  }
+  const ok = cands.filter((c) => c.d > ref && c.d - ref < 366 * 864e5).sort((a, b) => a.i - b.i);
+  return ok.length ? iso(ok[0].d) : "";
+}
+
 function encontrarClientePorEmails(emails, clientes) {
   const externos = emails.filter((e) => !/@vodafone\.(com|pt)$/i.test(e));
   for (const e of externos) { const c = clientes.find((x) => ((x.extras && x.extras.email) || "").toLowerCase().split(/[;,\s]+/).includes(e)); if (c) return c; }
@@ -7128,7 +7224,7 @@ function ImportarEmailsOutlook({ clientes }) {
     const novos = [];
     for (const f of files) {
       try {
-        const cab = lerCabecalhosEml(await f.text());
+        const cab = /\.msg$/i.test(f.name) ? lerMsgOutlook(await f.arrayBuffer()) : lerCabecalhosEml(await f.text());
         const enviado = cab.de.some((e) => /@vodafone\.(com|pt)$/i.test(e));
         const c = encontrarClientePorEmails(enviado ? cab.outros : cab.de.concat(cab.outros), clientes);
         novos.push({ chave: `${f.name}-${Math.random()}`, ficheiro: f.name, ...cab, enviado, nif: c ? c.n : "" });
@@ -7140,7 +7236,8 @@ function ImportarEmailsOutlook({ clientes }) {
     let n = 0;
     for (const it of itens) {
       if (!it.nif || it.erro) continue;
-      try { await registarContacto(it.nif, { tipo: "Email", nota: `${it.enviado ? "Enviado" : "Recebido"}: ${it.assunto || "(sem assunto)"}`, em: it.em || undefined }); n++; } catch (e) {}
+      try { await registarContacto(it.nif, { tipo: "Email", nota: `${it.enviado ? "Enviado" : "Recebido"}: ${it.assunto || "(sem assunto)"}`, em: it.em || undefined,
+          ...(it.proximoEm ? { proximoEm: it.proximoEm, proximoPasso: `Responder ao pedido: ${it.assunto || "(sem assunto)"}` } : {}) }); n++; } catch (e) {}
     }
     setItens((p) => p.filter((it) => !it.nif || it.erro));
     setAviso(`${n} email(s) registado(s) no histórico.`); setTimeout(() => setAviso(""), 8000);
@@ -7148,19 +7245,26 @@ function ImportarEmailsOutlook({ clientes }) {
   const nGraveis = itens.filter((it) => it.nif && !it.erro).length;
   return (
     <details className="border border-neutral-200 rounded-lg bg-white">
-      <summary className="px-3 py-2 text-sm font-semibold text-neutral-700 cursor-pointer">Importar emails do Outlook (.eml) para o histórico</summary>
+      <summary className="px-3 py-2 text-sm font-semibold text-neutral-700 cursor-pointer">Importar emails do Outlook (.msg) para o histórico</summary>
       <div className="p-3 space-y-2 border-t border-neutral-200">
         <div onClick={() => inputRef.current && inputRef.current.click()}
           onDragOver={(e) => { e.preventDefault(); setAArrastar(true); }} onDragLeave={() => setAArrastar(false)}
           onDrop={(e) => { e.preventDefault(); setAArrastar(false); const fs = [...e.dataTransfer.files]; if (fs.length) ler(fs); }}
           className={`border border-dashed rounded-md px-2.5 py-3 cursor-pointer text-center text-xs ${aArrastar ? "border-red-500 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-400 hover:border-neutral-400"}`}>
-          <input ref={inputRef} type="file" accept=".eml" multiple className="hidden" onChange={(e) => { const fs = [...e.target.files]; if (fs.length) ler(fs); e.target.value = ""; }} />
-          📥 Arrasta um ou vários emails guardados como .eml (Outlook → Ficheiro → Guardar Como), ou clica para escolher
+          <input ref={inputRef} type="file" accept=".msg,.eml" multiple className="hidden" onChange={(e) => { const fs = [...e.target.files]; if (fs.length) ler(fs); e.target.value = ""; }} />
+          📥 Arrasta um ou vários emails guardados como Outlook Item (.msg) — recebidos ou enviados — ou clica para escolher
         </div>
         {itens.map((it) => (
           <div key={it.chave} className="flex items-center gap-2 text-xs border-b border-neutral-100 pb-1 flex-wrap">
             <span className="text-neutral-500 w-20">{it.em ? new Date(it.em).toLocaleDateString("pt-PT") : "—"}</span>
             <span className="flex-1 min-w-[160px] truncate">{it.erro ? <span className="text-red-700">{it.ficheiro}: {it.erro}</span> : <>{it.enviado ? "Enviado" : "Recebido"} · {it.assunto || "(sem assunto)"}</>}</span>
+            {!it.erro && (
+              <label className="flex items-center gap-1 text-neutral-500" title="Data detetada no email (podes mudar ou apagar). Fica em Próximos passos no dia.">
+                Próximo passo
+                <input type="date" value={it.proximoEm || ""} onChange={(e) => setItens((p) => p.map((x) => x.chave === it.chave ? { ...x, proximoEm: e.target.value } : x))}
+                  className={`px-1 py-0.5 rounded border text-xs ${it.proximoEm ? "border-red-400" : "border-neutral-300"}`} />
+              </label>
+            )}
             {!it.erro && (
               <select value={it.nif} onChange={(e) => setItens((p) => p.map((x) => x.chave === it.chave ? { ...x, nif: e.target.value } : x))}
                 className={`px-2 py-1 rounded border text-xs max-w-[260px] ${it.nif ? "border-neutral-300" : "border-amber-400"}`}>
