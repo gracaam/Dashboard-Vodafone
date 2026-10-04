@@ -7070,11 +7070,11 @@ function HojeView() {
         render={(x) => {
           const porSug = {};
           x.itens.forEach((i) => { porSug[i.sugestao] = porSug[i.sugestao] || { n: 0, motivo: i.motivo, produtos: new Set() }; porSug[i.sugestao].n++; porSug[i.sugestao].produtos.add(i.produto); });
-          const comDif = x.itens.some((i) => i.dif != null);
+          // Sem "sobe/desce" (2026-10-04): a "Multa Mensal" do contrato não é a mensalidade
+          // e o preço de tabela ignora descontos — a diferença dava valores enganadores.
           return (
             <LinhaHoje key={x.c.n} c={x.c}>
               {Object.entries(porSug).map(([sug, g]) => `${g.n}× ${[...g.produtos].slice(0, 2).join(", ")} → ${sug}`).join(" · ")}
-              {comDif ? ` · ${x.difTotal > 0 ? "sobe" : "desce"} ${formatEuro(Math.abs(x.difTotal))}/mês` : ""}
             </LinhaHoje>
           );
         }} />
