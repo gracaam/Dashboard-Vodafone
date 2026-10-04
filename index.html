@@ -7312,6 +7312,95 @@ function GrupoHoje({ titulo, cor, itens, vazio, render }) {
   );
 }
 
+/* ================= RESUMO SEMANAL (2026-10-04, Fase 4 ponto 8) =================
+   Só lê dados que já existem: histórico de contactos e propostas das fichas, e os
+   negócios (Negócios do Trimestre). Valores = RLMC ajustada (o mesmo critério do
+   atingimento em Comissões). "Pipeline" = negócios do trimestre ainda em Negociação,
+   Data Futura ou Implementação — a projeção assume que fecham todos. */
+const ESTADOS_PIPELINE_RESUMO = ["EM NEGOCIAÇÃO", "DATA FUTURA", "EM IMPLEMENTAÇÃO"];
+function calcularResumoSemanal(clientes, negocios, objetivosCategoria, hoje = new Date()) {
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const seg = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - ((hoje.getDay() + 6) % 7));
+  const segAnt = new Date(seg.getFullYear(), seg.getMonth(), seg.getDate() - 7);
+  const periodos = { semana: [iso(seg), iso(hoje)], anterior: [iso(segAnt), iso(new Date(seg.getTime() - 864e5))] };
+  const dentro = (d, [a, b]) => !!d && d.slice(0, 10) >= a && d.slice(0, 10) <= b;
+  const rlmc = (n) => calcularRlmcAjustadaAtingimento(n) || 0;
+  const impl = negocios.filter((n) => n.estado === "IMPLEMENTADO");
+  const contar = (per) => {
+    let contactos = 0, entregues = 0, fechadas = 0;
+    clientes.forEach((c) => {
+      contactos += contactosOrdenados(c).filter((x) => dentro(x.em, per)).length;
+      (Array.isArray(c.propostas) ? c.propostas : []).forEach((p) => { if (dentro(p.entregueEm, per)) entregues++; if (p.fechada && dentro(p.fechadaEm, per)) fechadas++; });
+    });
+    const ren = impl.filter((n) => n.natureza === "REFIDELIZAÇÃO" && dentro(n.dataInicio, per));
+    const novo = impl.filter((n) => n.natureza === "NRECEITA" && dentro(n.dataInicio, per));
+    return { contactos, entregues, fechadas, renovacoes: ren.length, valorRenovacoes: ren.reduce((t, n) => t + rlmc(n), 0), valorNovo: novo.reduce((t, n) => t + rlmc(n), 0) };
+  };
+  const mes = mesChaveDeData(hoje), tri = trimestreChaveDeData(hoje);
+  const valorNovoMes = impl.filter((n) => n.natureza === "NRECEITA" && mesDeDataInicio(n.dataInicio) === mes).reduce((t, n) => t + rlmc(n), 0);
+  const doTri = negocios.filter((n) => trimestreChaveDeDataInicio(n.dataInicio) === tri);
+  const categorias = Object.entries(objetivosCategoria).map(([categoria, objetivo]) => {
+    const real = doTri.filter((n) => n.estado === "IMPLEMENTADO" && n.categoria === categoria).reduce((t, n) => t + rlmc(n), 0);
+    const pipeline = doTri.filter((n) => ESTADOS_PIPELINE_RESUMO.includes(n.estado) && n.categoria === categoria).reduce((t, n) => t + rlmc(n), 0);
+    const pct = (v) => (objetivo ? Math.round((v / objetivo) * 100) : 0);
+    return { categoria, objetivo, real, pipeline, pctReal: pct(real), pctProjecao: pct(real + pipeline) };
+  });
+  return { periodos, semana: contar(periodos.semana), anterior: contar(periodos.anterior), mes, valorNovoMes, tri, categorias };
+}
+
+function ResumoSemanal({ clientes }) {
+  const { negocios } = useNegocios();
+  const { objetivosCategoriaDoTrimestre } = useObjetivosTrimestrais();
+  const hoje = new Date();
+  const r = useMemo(() => calcularResumoSemanal(clientes, negocios, objetivosCategoriaDoTrimestre(trimestreChaveDeData(hoje)), hoje), [clientes, negocios, objetivosCategoriaDoTrimestre]);
+  const label = (cat) => (RLMC_CARTOES.find((x) => x.categoria === cat) || {}).label || cat;
+  const linhas = [
+    ["Contactos registados", "contactos"], ["Propostas entregues", "entregues"], ["Propostas fechadas", "fechadas"],
+    ["Renovações garantidas", "renovacoes"], ["Valor das renovações (RLMC)", "valorRenovacoes", true], ["Valor novo (RLMC)", "valorNovo", true],
+  ];
+  const dif = (a, b) => (a === b ? "" : a > b ? " ▲" : " ▼");
+  return (
+    <details className="border border-neutral-200 rounded-lg bg-white" open={hoje.getDay() === 1}>
+      <summary className="px-3 py-2 text-sm font-semibold text-neutral-700 cursor-pointer">Resumo da semana</summary>
+      <div className="p-3 border-t border-neutral-200 space-y-4 text-sm">
+        <table className="w-full text-xs">
+          <thead><tr className="text-neutral-500">
+            <th className="text-left font-medium py-1"></th>
+            <th className="text-right font-medium">Esta semana <span className="font-normal">({formatarDataIsoPT(r.periodos.semana[0])}–hoje)</span></th>
+            <th className="text-right font-medium">Semana anterior</th>
+          </tr></thead>
+          <tbody>
+            {linhas.map(([t, k, euro]) => (
+              <tr key={k} className="border-t border-neutral-100">
+                <td className="py-1">{t}</td>
+                <td className="text-right font-semibold">{euro ? formatEuroArredondado(r.semana[k]) : r.semana[k]}<span className="text-neutral-400">{dif(r.semana[k], r.anterior[k])}</span></td>
+                <td className="text-right text-neutral-500">{euro ? formatEuroArredondado(r.anterior[k]) : r.anterior[k]}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="text-xs">Valor novo em {labelMes(r.mes)}: <b>{formatEuroArredondado(r.valorNovoMes)}</b> (RLMC, negócios Nova Receita implementados)</div>
+        <div>
+          <div className="text-xs font-medium text-neutral-500 mb-1">Objetivos de {labelTrimestre(r.tri)} — implementado e projeção com o pipeline</div>
+          {r.categorias.map((c) => (
+            <div key={c.categoria} className="flex items-center gap-2 text-xs py-0.5">
+              <span className="w-44 truncate">{label(c.categoria)}</span>
+              <div className="flex-1 h-2 bg-neutral-100 rounded relative overflow-hidden">
+                <div className="absolute inset-y-0 left-0 bg-neutral-300" style={{ width: `${Math.min(100, c.pctProjecao)}%` }} />
+                <div className={`absolute inset-y-0 left-0 ${c.pctReal >= 90 ? "bg-emerald-600" : "bg-red-600"}`} style={{ width: `${Math.min(100, c.pctReal)}%` }} />
+              </div>
+              <span className="w-56 text-right text-neutral-600">{formatEuroArredondado(c.real)} / {formatEuroArredondado(c.objetivo)} · {c.pctReal}% → {c.pctProjecao}%
+                <b className={c.pctReal >= 90 ? "text-emerald-700" : c.pctProjecao >= 90 ? "text-amber-700" : "text-red-700"}> {c.pctReal >= 90 ? "atingido" : c.pctProjecao >= 90 ? "atinge se o pipeline fechar" : "em risco"}</b>
+              </span>
+            </div>
+          ))}
+          <div className="text-[11px] text-neutral-400 mt-1">Barra vermelha/verde = implementado; cinzenta = com o pipeline do trimestre (Em Negociação, Data Futura, Em Implementação). Atingido a partir de 90%.</div>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 // Campanhas novas (últimos 7 dias) ou a terminar (próximos 14 dias), com o nº de clientes
 // a que se aplicam pelo "Aplica-se a" do quadrado (mesma regra do Mapa de produtos).
 const DIAS_CAMPANHA_A_TERMINAR = 14, DIAS_CAMPANHA_NOVA = 7;
@@ -7345,6 +7434,7 @@ function HojeView() {
   return (
     <div className="space-y-5">
       {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
+      {firebaseUser && <ResumoSemanal clientes={todosClientes} />}
       {firebaseUser && <ImportarEmailsOutlook clientes={todosClientes} />}
       {campanhas.length > 0 && (
         <GrupoHoje titulo="Campanhas novas ou a terminar" cor="amber" itens={campanhas} vazio=""
