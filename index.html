@@ -67,7 +67,9 @@
     border-color: var(--vf-border); border-radius: 12px;
   }
   main input:not([type=checkbox]):not([type=radio]), main select { min-height: 44px; }
-  main input:focus, main select:focus, main textarea:focus { outline: none; border-color: var(--vf-ink); }
+  main input:focus, main select:focus, main textarea:focus { border-color: var(--vf-ink); }
+  main :focus-visible { outline: 2px solid var(--vf-ink); outline-offset: 2px; }
+  main .text-neutral-400 { color: var(--vf-muted); }
 </style>
 </head>
 <body>
@@ -261,7 +263,7 @@ function MigracaoNuvemBanner({ nome, firebaseUser, nuvemAtiva, migrarParaNuvem, 
   // recusa sobrescrever) — antes esse motivo era descartado em silêncio.
   const [aviso, setAviso] = useState("");
   if (!firebaseUser) return <LoginFirebaseInline mensagem={`Liga-te para levar ${nome} para a nuvem (acessível de qualquer computador):`} />;
-  if (nuvemAtiva) return <div className="text-[11px] text-neutral-400">☁️ {nome} na nuvem — {firebaseUser.email}</div>;
+  if (nuvemAtiva) return <div className="text-[13px] text-neutral-400">☁️ {nome} na nuvem — {firebaseUser.email}</div>;
   const migrar = async () => {
     if (!window.confirm(`Vais copiar ${nParaMigrar} registo(s) de ${nome} para a nuvem. Isto não apaga nada localmente — o Excel continua exatamente como está. Continuar?`)) return;
     setAviso("");
@@ -6412,7 +6414,7 @@ function DropzoneFaturas({ onFicheiros, titulo, subtitulo, accept = ".pdf,.jpg,.
         aArrastar ? "border-red-500 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-400 hover:border-neutral-400"}`}
     >
       {titulo || "📎 Arrasta faturas ou outros documentos de apoio para aqui, ou clica para escolher"}
-      <div className="text-[11px] text-neutral-400 mt-1">{subtitulo || "Faturas (PDF, JPG, PNG) são analisadas automaticamente; outros ficheiros (Excel, Word, texto) ficam só como anexo, sem processamento."}</div>
+      <div className="text-[13px] text-neutral-400 mt-1">{subtitulo || "Faturas (PDF, JPG, PNG) são analisadas automaticamente; outros ficheiros (Excel, Word, texto) ficam só como anexo, sem processamento."}</div>
       <input ref={inputRef} type="file" multiple accept={accept}
         onChange={(e) => { processar(e.target.files); e.target.value = ""; }}
         className="hidden" />
@@ -6529,7 +6531,7 @@ function BlocoCampanha({ registos, todos, aCarregar }) {
                     </div>
                   </div>
                   {!r.email && (
-                    <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full whitespace-nowrap" style={{ background: "#FEF3C7", color: "#92400E" }}>sem email</span>
+                    <span className="text-[13px] font-semibold px-2.5 py-1 rounded-full whitespace-nowrap" style={{ background: "#FEF3C7", color: "#92400E" }}>sem email</span>
                   )}
                 </div>
               );
@@ -6884,7 +6886,7 @@ function PainelCampanhaEmail({ destinatarios }) {
           <Icone nome="email" className="w-4 h-4" />
           {aPreparar ? "A preparar…" : `Preparar email (Outlook)${comEmail.length ? ` · ${comEmail.length}` : ""}`}
         </button>
-        <div className="text-[11px] text-center" style={{ color: "var(--vf-muted)" }}>ou, alternativa (sem app Outlook / fora do Citrix):</div>
+        <div className="text-[13px] text-center" style={{ color: "var(--vf-muted)" }}>ou, alternativa (sem app Outlook / fora do Citrix):</div>
         <div className="flex gap-2">
           <button onClick={abrirNoOutlookWeb} disabled={comEmail.length === 0} className="flex-1 vf-sec">
             <Icone nome="email" className="w-4 h-4" />
@@ -6973,7 +6975,7 @@ function HistoricoContactosCard({ cliente }) {
             <div key={i} className="text-xs border-b border-neutral-100 last:border-0 py-1">
               {aApagar === x.em + (x.nota || "")
                 ? <span className="float-right"><button onClick={async () => { try { await apagarContacto(cliente.n, x); } catch (e) {} setAApagar(null); }} className="text-red-700 underline mr-2">Apagar</button><button onClick={() => setAApagar(null)} className="text-neutral-500 underline">Cancelar</button></span>
-                : <button onClick={() => setAApagar(x.em + (x.nota || ""))} title="Apagar este registo" className="float-right text-neutral-400 hover:text-red-600">✕</button>}
+                : <button onClick={() => setAApagar(x.em + (x.nota || ""))} title="Apagar este registo" aria-label="Apagar este registo" className="float-right text-neutral-400 hover:text-red-600">✕</button>}
               <span className="text-neutral-500">{new Date(x.em).toLocaleDateString("pt-PT")}</span> · <b>{x.tipo || "—"}</b>{x.nota ? ` · ${x.nota}` : ""}
               {x.proximoPasso || x.proximoEm ? <span className={x.proximoEm && x.proximoEm <= hojeIso && i === 0 ? "text-red-700" : "text-neutral-500"}> → {x.proximoPasso || "próximo passo"}{x.proximoEm ? ` (${formatarDataIsoPT(x.proximoEm)})` : ""}</span> : null}
             </div>
@@ -7323,7 +7325,7 @@ function ImportarEmailsOutlook({ clientes, obterExtras, definirExtras }) {
                 {clientes.map((c) => <option key={c.n} value={c.n}>{c.e}</option>)}
               </select>
             )}
-            <button onClick={() => setItens((p) => p.filter((x) => x.chave !== it.chave))} className="text-neutral-400 hover:text-red-600">✕</button>
+            <button onClick={() => setItens((p) => p.filter((x) => x.chave !== it.chave))} aria-label="Descartar" className="text-neutral-400 hover:text-red-600">✕</button>
           </div>
         ))}
         {itens.length > 0 && <button onClick={gravar} disabled={!nGraveis} className="text-xs px-3 py-1.5 rounded-md bg-neutral-900 text-white disabled:opacity-40">Registar {nGraveis} no histórico</button>}
@@ -7346,7 +7348,7 @@ function LinhaHoje({ c, children, email, obterExtras }) {
         {email && <button onClick={async () => setSemEmail(!(await gerarEmailHoje(c, email, obterExtras)))} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap">Gerar email</button>}
         <button onClick={() => setAberto((v) => !v)} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap">{aberto ? "Fechar" : "Registar contacto"}</button>
       </div>
-      {semEmail && <div className="text-[11px] text-amber-700">A ficha deste cliente não tem email — escreve-o no Outlook (ou no campo Email da ficha, para as próximas vezes).</div>}
+      {semEmail && <div className="text-[13px] text-amber-700">A ficha deste cliente não tem email — escreve-o no Outlook (ou no campo Email da ficha, para as próximas vezes).</div>}
       {aberto && <RegistoContactoForm nif={c.n} onFeito={() => setAberto(false)} />}
     </div>
   );
@@ -7445,7 +7447,7 @@ function ResumoSemanal({ clientes }) {
               </span>
             </div>
           ))}
-          <div className="text-[11px] text-neutral-400 mt-1">Barra vermelha/verde = implementado; cinzenta = com o pipeline do trimestre (Em Negociação, Data Futura, Em Implementação). Atingido a partir de 90%.</div>
+          <div className="text-[13px] text-neutral-400 mt-1">Barra vermelha/verde = implementado; cinzenta = com o pipeline do trimestre (Em Negociação, Data Futura, Em Implementação). Atingido a partir de 90%.</div>
         </div>
       </div>
     </details>
@@ -7575,7 +7577,7 @@ function LinhaContratoResumo({ c, extra }) {
   // (coluna "Tipo Produto") — o parser preenche ambos a partir de qualquer das duas.
   const produto = c.produto || c.tipo || null;
   return (
-    <div className="text-[11px] text-neutral-600">
+    <div className="text-[13px] text-neutral-600">
       {c.id} · {c.servico || "—"}{produto ? ` · ${produto}` : ""} · fim {formatarDataIsoPT(c.fim)}{extra ? ` · ${extra}` : ""}
     </div>
   );
@@ -7706,11 +7708,11 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
                     <summary className="text-sm cursor-pointer flex items-center gap-2 flex-wrap">
                       <span className="font-medium">Conta {conta}</span>
                       <span className="text-xs text-neutral-500">{(dados.contratos || []).length} contrato(s) · importado em {dados.atualizadoEm ? new Date(dados.atualizadoEm).toLocaleDateString("pt-PT") : "—"}</span>
-                      {desatualizada && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ desatualizada{dias !== null ? ` (há ${dias} dias)` : ""} — volta a importar</span>}
+                      {desatualizada && <span className="text-[13px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ desatualizada{dias !== null ? ` (há ${dias} dias)` : ""} — volta a importar</span>}
                       <button onClick={(e) => { e.preventDefault(); const dt = e.currentTarget.closest("details"); if (dt) dt.open = true; setEditarConta({ antiga: conta, nova: conta, erro: "" }); }}
-                        className="ml-auto text-[11px] text-neutral-500 hover:text-red-600 underline" title="Corrigir o nº desta conta">✏ Mudar nº de conta</button>
+                        className="ml-auto text-[13px] text-neutral-500 hover:text-red-600 underline" title="Corrigir o nº desta conta">✏ Mudar nº de conta</button>
                       <button onClick={(e) => { e.preventDefault(); const dt = e.currentTarget.closest("details"); if (dt) dt.open = true; setApagarConta(conta); }}
-                        className="text-sm leading-none text-neutral-400 hover:text-red-600 px-1" title="Apagar esta conta e todos os seus contratos">✕</button>
+                        className="text-sm leading-none text-neutral-400 hover:text-red-600 px-1" title="Apagar esta conta e todos os seus contratos" aria-label="Apagar esta conta">✕</button>
                     </summary>
                     {apagarConta === conta && (
                       <div className="mt-1.5 flex items-center gap-2 flex-wrap text-xs text-red-800 bg-red-50 border border-red-200 rounded px-2 py-1.5">
@@ -7763,7 +7765,7 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
             <div key={it.chave} className="border border-neutral-200 rounded-md p-2.5 space-y-1.5 bg-neutral-50">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-medium text-neutral-700">{it.ficheiro}</span>
-                <button onClick={() => setItens((prev) => prev.filter((x) => x.chave !== it.chave))} className="ml-auto text-neutral-400 hover:text-red-600 text-xs" title="Descartar este ficheiro">✕</button>
+                <button onClick={() => setItens((prev) => prev.filter((x) => x.chave !== it.chave))} className="ml-auto text-neutral-400 hover:text-red-600 text-xs" title="Descartar este ficheiro" aria-label="Descartar este ficheiro">✕</button>
               </div>
               {it.erro ? (
                 <div className="text-xs text-red-700">{it.erro}</div>
@@ -7801,7 +7803,7 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
                       {a.diff.desaparecidos.map((c) => <LinhaContratoResumo key={"d" + c.id} c={c} extra="DESAPARECIDO — será removido" />)}
                     </div>
                   )}
-                  {it.avisos.map((av, i) => <div key={i} className="text-[11px] text-amber-700">⚠ {av}</div>)}
+                  {it.avisos.map((av, i) => <div key={i} className="text-[13px] text-amber-700">⚠ {av}</div>)}
                 </>
               )}
             </div>
@@ -8179,7 +8181,7 @@ function ClientesView() {
                 {extras.notasFidelizacao.map((n, i) => (
                   <div key={i} className="flex items-center justify-between gap-2 text-sm text-neutral-700 border-b border-neutral-100 last:border-0 pb-1.5 last:pb-0">
                     <span>{n.texto}</span>
-                    <button onClick={() => removerNotaFidelizacao(i)} className="text-neutral-300 hover:text-red-600 text-xs whitespace-nowrap" title="Apagar esta nota">✕</button>
+                    <button onClick={() => removerNotaFidelizacao(i)} className="text-neutral-300 hover:text-red-600 text-xs whitespace-nowrap" title="Apagar esta nota" aria-label="Apagar esta nota">✕</button>
                   </div>
                 ))}
               </div>
@@ -8222,7 +8224,7 @@ function ClientesView() {
                       )}
                     </div>
                     {p.fechada ? (
-                      <div className="text-[11px] text-neutral-400">Contratos gerados a partir desta proposta — vê-os em cima, em "Contratos de permanência".</div>
+                      <div className="text-[13px] text-neutral-400">Contratos gerados a partir desta proposta — vê-os em cima, em "Contratos de permanência".</div>
                     ) : (
                       <div className="flex items-center gap-2 text-xs">
                         <label className="text-neutral-500">Fechada em:</label>
@@ -8238,7 +8240,7 @@ function ClientesView() {
                   </div>
                 );
               })}
-              <div className="text-[11px] text-neutral-400">Ao fechar, o dashboard cria os contratos de permanência (início = data de fecho, fim = data de fecho + duração) e passa a avisar 6 meses antes do fim.</div>
+              <div className="text-[13px] text-neutral-400">Ao fechar, o dashboard cria os contratos de permanência (início = data de fecho, fim = data de fecho + duração) e passa a avisar 6 meses antes do fim.</div>
             </div>
           )}
 
@@ -8251,12 +8253,12 @@ function ClientesView() {
                   {aCalcularProdutos ? "A calcular…" : "Calcular produtos recomendados"}
                 </button>
               </div>
-              <div className="text-[11px] text-neutral-400">
+              <div className="text-[13px] text-neutral-400">
                 Pontua as categorias do catálogo que este cliente ainda não tem (ver "Produtos já contratados" acima), ordenadas por probabilidade de fecho.
                 As perguntas-chave respondidas acima entram nesta pontuação.
               </div>
               {extras.produtosPontuados && (
-                <details className="text-[11px] text-neutral-400">
+                <details className="text-[13px] text-neutral-400">
                   <summary className="cursor-pointer">Como ler as notas (0 a 4)</summary>
                   <div className="mt-1 space-y-0.5">
                     <div><b>Adequação</b> — serve este tipo de negócio? 0 sem relação · 2 aplicação plausível · 4 central à forma como o setor opera.</div>
@@ -8273,7 +8275,7 @@ function ClientesView() {
                       ⚠ Desatualizado — uma resposta às perguntas-chave mudou desde o último cálculo. Recalcula para atualizar o ranking.
                     </div>
                   )}
-                  <div className="text-[11px] text-neutral-400">Calculado em {new Date(extras.produtosPontuados.calculadoEm).toLocaleString("pt-PT")}</div>
+                  <div className="text-[13px] text-neutral-400">Calculado em {new Date(extras.produtosPontuados.calculadoEm).toLocaleString("pt-PT")}</div>
                   <div className="space-y-1.5">
                     {extras.produtosPontuados.categorias.map((c, i) => (
                       <div key={c.id} className="flex items-center justify-between gap-2 text-sm border-b border-neutral-100 last:border-0 pb-1.5 last:pb-0">
@@ -8834,7 +8836,7 @@ function AnaliseFaturasView() {
                     <button onClick={() => verFatura(f)} className="text-left flex-1 hover:underline"><Icone nome="documento" className="w-4 h-4 shrink-0" />
                       {f.nome} <span className="text-neutral-400">({formatarTamanhoFicheiro(f.tamanho)})</span>
                     </button>
-                    <button onClick={() => removerFatura(f.id)} className="text-neutral-400 hover:text-red-600">✕</button>
+                    <button onClick={() => removerFatura(f.id)} aria-label="Remover fatura" className="text-neutral-400 hover:text-red-600">✕</button>
                   </div>
                 ))}
               </div>
@@ -8920,10 +8922,10 @@ function AnaliseFaturasView() {
             <div className="border border-neutral-200 rounded-lg bg-white overflow-hidden">
               <div className="flex items-baseline justify-between gap-2 px-4 pt-3">
                 <div className="text-xs font-medium text-neutral-400">PAINEL EXECUTIVO</div>
-                <div className="text-[11px] text-neutral-400">{resumo.nFaturasAnalisadas} de {resumo.nFaturas} fatura(s) analisada(s) · {resumo.contas.length} conta(s) identificada(s)</div>
+                <div className="text-[13px] text-neutral-400">{resumo.nFaturasAnalisadas} de {resumo.nFaturas} fatura(s) analisada(s) · {resumo.contas.length} conta(s) identificada(s)</div>
               </div>
               {analisadoEm && (
-                <div className="text-[11px] text-neutral-400 px-4">
+                <div className="text-[13px] text-neutral-400 px-4">
                   Análise gravada em {new Date(analisadoEm).toLocaleDateString("pt-PT")} às {new Date(analisadoEm).toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" })}
                   {analiseDesatualizada && <span className="text-amber-600"> · ⚠ a lista de faturas mudou desde então ({faturas.length} agora vs. {resumo.nFaturas} nesta análise) — considera analisar de novo</span>}
                 </div>
@@ -8938,7 +8940,7 @@ function AnaliseFaturasView() {
                   </button>
                   {mostrarAvisos && (
                     <div className="space-y-1 pt-2">
-                      {resumo.avisos.map((a, i) => <div key={i} className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">⚠ {a}</div>)}
+                      {resumo.avisos.map((a, i) => <div key={i} className="text-[13px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">⚠ {a}</div>)}
                     </div>
                   )}
                 </div>
@@ -9014,7 +9016,7 @@ function AnaliseFaturasView() {
                     className="text-sm px-3.5 py-2 rounded-md bg-neutral-900 text-white font-medium hover:bg-neutral-800 whitespace-nowrap"><Icone nome="conversa" className="w-4 h-4 shrink-0" />
                     Argumentos
                   </button>
-                  <div className="text-[11px] text-neutral-400">
+                  <div className="text-[13px] text-neutral-400">
                     Gravados em 03_Analise Faturas/{clienteAtual ? clienteAtual.e : ""}/Analise/. Imprimir abre o diálogo de impressão do browser; Argumentos abre o texto por baixo. Em qualquer dos casos a análise e as faturas mantêm-se em ecrã.
                   </div>
                 </div>
@@ -9026,7 +9028,7 @@ function AnaliseFaturasView() {
             <div className="border border-neutral-200 rounded-lg bg-neutral-50 p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="text-xs font-medium text-neutral-500">ARGUMENTOS DE REUNIÃO</div>
-                <button onClick={() => setMostrarArgumentos(false)} className="text-neutral-400 hover:text-red-600">✕</button>
+                <button onClick={() => setMostrarArgumentos(false)} aria-label="Fechar" className="text-neutral-400 hover:text-red-600">✕</button>
               </div>
               <pre className="text-xs whitespace-pre-wrap font-sans text-neutral-700">{textoArgumentos}</pre>
             </div>
@@ -9099,7 +9101,7 @@ function AnexosFaturas({ ehNovo, nifAtivo, aAnexar, anexarFicheiros, faturas, ve
               <button onClick={() => verFatura(f)} className="text-left flex-1 hover:underline"><Icone nome="documento" className="w-4 h-4 shrink-0" />
                 {(f.categoriaAnexo || "fatura") === "fatura" ? "" : "📎"} {f.nome} <span className="text-neutral-400">({formatarTamanhoFicheiro(f.tamanho)}{(f.categoriaAnexo || "fatura") !== "fatura" ? " · documento de apoio" : ""})</span>
               </button>
-              <button onClick={() => removerFatura(f.id)} className="text-neutral-400 hover:text-red-600">✕</button>
+              <button onClick={() => removerFatura(f.id)} aria-label="Remover fatura" className="text-neutral-400 hover:text-red-600">✕</button>
             </div>
           ))}
         </div>
@@ -9134,14 +9136,14 @@ function GraficoEvolucaoTotal({ evolucaoTotalMensal }) {
     <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
       <div className="flex items-baseline justify-between gap-2">
         <div className="text-xs font-medium text-neutral-500">EVOLUÇÃO DA FATURA TOTAL</div>
-        <div className="text-[11px] text-neutral-400">mês mais elevado em destaque</div>
+        <div className="text-[13px] text-neutral-400">mês mais elevado em destaque</div>
       </div>
       <div className="flex items-end justify-center gap-3 h-28 overflow-x-auto px-1">
         {evolucaoTotalMensal.map((m) => {
           const ehMax = m.total === maxMesTotal;
           return (
             <div key={m.label} className="flex flex-col items-center justify-end gap-1.5 h-full w-11 shrink-0" title={`${m.label}: ${formatEuro(m.total)}`}>
-              <span className={`text-[11px] whitespace-nowrap ${ehMax ? "font-medium text-red-600" : "invisible"}`}>{formatEuro(m.total)}</span>
+              <span className={`text-[13px] whitespace-nowrap ${ehMax ? "font-medium text-red-600" : "invisible"}`}>{formatEuro(m.total)}</span>
               <div className="w-full flex-1 flex items-end justify-center">
                 <div className={`w-6 rounded-t-md ${ehMax ? "bg-red-500" : "bg-neutral-200"}`} style={{ height: `${Math.max(8, (m.total / maxMesTotal) * 100)}%` }} />
               </div>
@@ -9171,7 +9173,7 @@ function LinhaTarifarioResumo({ categoria, t, tarifariosExpandidos, toggleTarifa
         <span className={`whitespace-nowrap ${t.destaque ? "text-amber-700" : "text-neutral-400"}`}>{t.nServicos}× · {formatEuro(t.mediaPorServico)}</span>
       </div>
       {expandido && (
-        <div className="pl-4 py-1 space-y-1 text-[11px] text-neutral-500 border-l-2 border-neutral-100 ml-1">
+        <div className="pl-4 py-1 space-y-1 text-[13px] text-neutral-500 border-l-2 border-neutral-100 ml-1">
           {t.decomposicao.map((d) => (
             <div key={d.numero}>
               <span className="font-medium text-neutral-600">{d.numero}:</span> {d.itens.map((it) => `${it.descricao}${it.qtd && it.qtd > 1 ? ` (x${it.qtd})` : ""}: ${formatEuro(it.valor)}`).join(" | ")}
@@ -9214,7 +9216,7 @@ function ResumoPorCategoria({ resumoPorCategoria, evolucaoTotalMensal, tarifario
             {c.notas.length > 0 && (
               <div className="space-y-1 pt-1">
                 {c.notas.map((n, i) => (
-                  <div key={i} className="text-[11px] text-amber-700 bg-amber-50 rounded-md px-2 py-1">⚠ {n}</div>
+                  <div key={i} className="text-[13px] text-amber-700 bg-amber-50 rounded-md px-2 py-1">⚠ {n}</div>
                 ))}
               </div>
             )}
@@ -9931,7 +9933,7 @@ function PropostasView() {
                 <label key={conta} className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-md border cursor-pointer ${contasSel.includes(conta) ? "border-red-400 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-700"}`}>
                   <input type="checkbox" checked={contasSel.includes(conta)} onChange={() => togglarConta(conta)} />
                   Conta {conta}
-                  <span className="text-[11px] text-neutral-400">{((docContratos.contas[conta] || {}).contratos || []).length} serviço(s)</span>
+                  <span className="text-[13px] text-neutral-400">{((docContratos.contas[conta] || {}).contratos || []).length} serviço(s)</span>
                 </label>
               ))}
             </div>
@@ -10001,7 +10003,7 @@ function PropostasView() {
                               <td className="p-2 text-right font-medium">{vf != null ? formatEuro(vf) : <span className="text-neutral-300">—</span>}</td>
                               <td className="p-2"><select value={l.duracao} onChange={(e) => atualizarLinha(l.key, { duracao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">—</option>{DURACOES_PROPOSTA.map((m) => <option key={m} value={labelDuracao(m)}>{labelDuracao(m)}</option>)}</select></td>
                               <td className="p-2">
-                                <button onClick={() => removerLinha(l.key)} title="Retirar da proposta" className="text-neutral-400 hover:text-red-600">✕</button>
+                                <button onClick={() => removerLinha(l.key)} title="Retirar da proposta" aria-label="Retirar da proposta" className="text-neutral-400 hover:text-red-600">✕</button>
                               </td>
                             </tr>
                           );
@@ -10041,7 +10043,7 @@ function PropostasView() {
                             </td>
                             <td className="p-2"><select value={l.duracao} onChange={(e) => atualizarLinha(l.key, { duracao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">—</option>{DURACOES_PROPOSTA.map((m) => <option key={m} value={labelDuracao(m)}>{labelDuracao(m)}</option>)}</select></td>
                             <td className="p-2">
-                              <button onClick={() => removerLinha(l.key)} title="Retirar da proposta" className="text-neutral-400 hover:text-red-600">✕</button>
+                              <button onClick={() => removerLinha(l.key)} title="Retirar da proposta" aria-label="Retirar da proposta" className="text-neutral-400 hover:text-red-600">✕</button>
                             </td>
                           </tr>
                         );
@@ -10717,7 +10719,7 @@ function ProspetosView() {
               entre computadores — limitação já existente, não nova. */}
           <div className="border border-neutral-200 rounded-lg bg-white p-4">
             <div className="text-xs font-medium text-neutral-400 mb-3">PERGUNTAS-CHAVE DE PRODUTOS</div>
-            <div className="text-[11px] text-neutral-400 mb-3">
+            <div className="text-[13px] text-neutral-400 mb-3">
               Ajudam a Campanha por Produto a distinguir este prospeto — preenche as que souberes, mesmo sem correr nada.
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -10825,7 +10827,7 @@ function CartaoRLMC({ numero, label, valor }) {
     <div className="rounded-lg overflow-hidden border border-neutral-200">
       <div className="bg-neutral-800 text-white text-center py-2 px-2">
         <div className="text-sm font-semibold">RLMC {numero}</div>
-        <div className="text-[11px] text-neutral-300 leading-tight">({label})</div>
+        <div className="text-[13px] text-neutral-300 leading-tight">({label})</div>
       </div>
       <div className="bg-neutral-100 text-center py-3">
         <span className="text-base font-semibold">{formatEuroArredondado(valor)}</span>
@@ -11115,7 +11117,7 @@ function PainelValidacaoPipe({ negocios, wbAtual, nuvemAtiva }) {
           )}
           {wbAtual && tabelaXP && negocios.length > 0 && (
             <>
-              <div className="text-[11px] text-neutral-400">
+              <div className="text-[13px] text-neutral-400">
                 {comparacao.length} negócio(s) · Upfront: {comComparacaoValida.length} comparável(eis), {comDiferenca.length} com diferença · Prémio Trimestral: {comPremioValido.length} comparável(eis), {comPremioDiferenca.length} com diferença, {comPremioNaoCalculado.length} não calculado(s) (cluster "BÓNUS PROX TRI" — fórmula original perdida, ver nota abaixo) · {comSemFormulaExcel.length} sem fórmula Excel na linha (nunca comparado, ver secção própria) · {comAvisos.length} com aviso.
               </div>
               {linhasComDiferenca.length === 0 && (comComparacaoValida.length > 0 || comPremioValido.length > 0) && (
@@ -11157,7 +11159,7 @@ function PainelValidacaoPipe({ negocios, wbAtual, nuvemAtiva }) {
               )}
               {comSemFormulaExcel.length > 0 && (
                 <div className="border border-blue-200 bg-blue-50 rounded-lg p-2 space-y-1.5">
-                  <div className="text-[11px] text-blue-900 font-medium">
+                  <div className="text-[13px] text-blue-900 font-medium">
                     ℹ️ {comSemFormulaExcel.length} negócio(s) sem fórmula real do Excel nesta linha (ex. criado(s) pelo próprio "+ Novo Negócio" — a linha ficou fora do intervalo de fórmulas da folha Pipe). O valor "Excel" aí não é genuíno, por isso NUNCA comparado — só o valor esperado, calculado pelo motor JS. Duas razões DIFERENTES e independentes para um valor não aparecer aqui: (1) "sem fórmula na linha" — porque o Excel nunca calculou nada nesta linha, o que estás a ler agora; (2) "—" na coluna Upfront — porque o motor JS, por si só, também não conseguiu calcular (falta um campo de entrada, ex. "Estado do Tarifário" — ver aviso ⚠ abaixo). Uma linha pode ter só a 1ª razão, só a 2ª, ou as duas ao mesmo tempo (como o caso real Cliente A).
                   </div>
                   <div className="overflow-x-auto">
@@ -11187,24 +11189,24 @@ function PainelValidacaoPipe({ negocios, wbAtual, nuvemAtiva }) {
                 </div>
               )}
               {comPremioNaoCalculado.length > 0 && (
-                <div className="text-[11px] text-neutral-400 bg-neutral-50 rounded-md px-2 py-1.5">
+                <div className="text-[13px] text-neutral-400 bg-neutral-50 rounded-md px-2 py-1.5">
                   ℹ️ {comPremioNaoCalculado.length} negócio(s) sem Prémio Trimestral calculado — cluster "BÓNUS PROX TRI" (célula original do Excel perdida, ver documentação) ou sem trimestre/nível determinável (data de início em falta, ou negócio ainda não Implementado).
                 </div>
               )}
               {comAvisos.length > 0 && (
                 <div className="space-y-1">
                   {comAvisos.slice(0, 10).map((l) => (
-                    <div key={l.linhaExcel} className="text-[11px] text-amber-700 bg-amber-50 rounded-md px-2 py-1">⚠ {l.empresa}: {l.avisos.join(" ")}</div>
+                    <div key={l.linhaExcel} className="text-[13px] text-amber-700 bg-amber-50 rounded-md px-2 py-1">⚠ {l.empresa}: {l.avisos.join(" ")}</div>
                   ))}
-                  {comAvisos.length > 10 && <div className="text-[11px] text-neutral-400">+ {comAvisos.length - 10} aviso(s) adicional(is).</div>}
+                  {comAvisos.length > 10 && <div className="text-[13px] text-neutral-400">+ {comAvisos.length - 10} aviso(s) adicional(is).</div>}
                 </div>
               )}
               <button onClick={guardar} disabled={aGuardar || !firebaseUser}
                 className="text-xs px-2.5 py-1.5 rounded-md bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-40"><Icone nome="guardar" className="w-4 h-4 shrink-0" />
                 {aGuardar ? "A gravar…" : "Guardar comparação no Firestore"}
               </button>
-              {!firebaseUser && <span className="text-[11px] text-neutral-400 ml-2">Precisa de login (ver Assuntos/Clientes) para gravar.</span>}
-              {avisoGuardar && <div className="text-[11px] text-neutral-600">{avisoGuardar}</div>}
+              {!firebaseUser && <span className="text-[13px] text-neutral-400 ml-2">Precisa de login (ver Assuntos/Clientes) para gravar.</span>}
+              {avisoGuardar && <div className="text-[13px] text-neutral-600">{avisoGuardar}</div>}
             </>
           )}
         </div>
@@ -11477,7 +11479,7 @@ function NegociosView() {
                   <span className="text-blue-500"> → {sugestao.nomeCliente} (NIF {sugestao.nif})</span>
                 </span>
                 <button onClick={() => aplicarSugestaoNif(negocio, sugestao.nif)}
-                  className="px-2 py-1 rounded-md bg-blue-600 text-white text-[11px] font-medium hover:bg-blue-700 whitespace-nowrap">
+                  className="px-2 py-1 rounded-md bg-blue-600 text-white text-[13px] font-medium hover:bg-blue-700 whitespace-nowrap">
                   Preencher NIF
                 </button>
               </div>
@@ -11633,7 +11635,7 @@ function NegociosView() {
                   className="w-full px-3 py-2 rounded-md border border-neutral-200 text-sm bg-white">
                   {PRODUTO_SS_OPCOES.map((o) => <option key={o} value={o}>{o === "FIXO" ? "Fixo/ICT" : "Móvel/IoT"}</option>)}
                 </select>
-                <div className="text-[11px] text-neutral-400 mt-1">
+                <div className="text-[13px] text-neutral-400 mt-1">
                   Só muda o RLMC em Refidelização (RLMC4 Fixo/ICT · RLMC2 Móvel/IoT) — Nova Receita conta sempre RLMC5, independentemente disto.
                 </div>
               </div>
@@ -11702,7 +11704,7 @@ function NegociosView() {
               <input type="date" value={form.dataInicio} onChange={(e) => mudarCampo("dataInicio", e.target.value)}
                 required
                 className="w-full px-3 py-2 rounded-md border border-neutral-200 text-sm" />
-              {!form.dataInicio && <div className="text-[11px] text-red-600 mt-1">Obrigatória — define o mês/trimestre do negócio e o alerta de fidelização.</div>}
+              {!form.dataInicio && <div className="text-[13px] text-red-600 mt-1">Obrigatória — define o mês/trimestre do negócio e o alerta de fidelização.</div>}
             </div>
             <div>
               <label className="text-xs text-neutral-500 mb-1 block">Período (derivado da Data de início)</label>
@@ -11739,7 +11741,7 @@ function NegociosView() {
                   const diff = Math.abs(calc - (Number(form.comissaoUpfront) || 0));
                   const divergente = diff > 0.01;
                   return (
-                    <div className={`mt-1.5 flex items-center justify-between gap-2 text-[11px] rounded-md px-2 py-1.5 ${
+                    <div className={`mt-1.5 flex items-center justify-between gap-2 text-[13px] rounded-md px-2 py-1.5 ${
                       divergente ? "bg-amber-50 border border-amber-200 text-amber-800" : "bg-neutral-50 border border-neutral-200 text-neutral-500"}`}>
                       <span>Calculado: <span className="font-medium">{formatEuro(calc)}</span>{divergente ? " — diferente do valor manual" : ""}</span>
                       <button type="button" onClick={() => mudarCampo("comissaoUpfront", Math.round((calc + Number.EPSILON) * 100) / 100)}
@@ -11808,7 +11810,7 @@ function NegociosView() {
 
 
       {semDataInicioCount > 0 && (
-        <div className="text-[11px] text-neutral-400">
+        <div className="text-[13px] text-neutral-400">
           {semDataInicioCount} negócio{semDataInicioCount !== 1 ? "s" : ""} no ficheiro sem "Data de início" (não entram em nenhuma vista, mensal ou trimestral).
         </div>
       )}
@@ -12154,7 +12156,7 @@ function SeccaoComissaoReal({ categoria, label, negocios, mesChaveAtual, procura
         <div className="text-xs font-medium text-neutral-400">{label.toUpperCase()} — {labelMes(mesChaveAtual)}</div>
       </div>
       <div className="text-2xl font-semibold text-neutral-800">{formatEuro(totalJS)}</div>
-      <div className="text-[11px] text-neutral-400">Comissão Upfront ({label}) calculada pelo motor JS para este mês — mesma fonte de sempre, nunca o ficheiro real.</div>
+      <div className="text-[13px] text-neutral-400">Comissão Upfront ({label}) calculada pelo motor JS para este mês — mesma fonte de sempre, nunca o ficheiro real.</div>
 
       <div className="pt-2 border-t border-neutral-100 space-y-2">
         <div onClick={() => inputRef.current && inputRef.current.click()}
@@ -12224,7 +12226,7 @@ function EditorTabelaXP({ tabela, onGuardar, aGuardar }) {
     <div className="space-y-3">
       {Object.entries(rascunho).map(([seccao, subTabela]) => (
         <div key={seccao}>
-          <div className="text-[11px] font-medium text-neutral-400 uppercase mb-1">{seccao}</div>
+          <div className="text-[13px] font-medium text-neutral-400 uppercase mb-1">{seccao}</div>
           <div className="space-y-1">
             {Object.entries(subTabela || {}).map(([chave, valor]) => (
               <div key={chave} className="flex items-center justify-between gap-2 text-xs">
@@ -12379,18 +12381,18 @@ function ComissoesView() {
       <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
         <div className="flex items-baseline justify-between gap-2">
           <div className="text-xs font-medium text-neutral-400">PRÉMIO TRIMESTRAL — {labelTrimestre(trimestreChaveAtual)}</div>
-          <div className="text-[11px] text-neutral-400">Nível {nivelTrimestre.nivel}/5</div>
+          <div className="text-[13px] text-neutral-400">Nível {nivelTrimestre.nivel}/5</div>
         </div>
         <div className="text-2xl font-semibold text-neutral-800">{formatEuro(premioTotalTrimestre)}</div>
-        <div className="text-[11px] text-neutral-400">Motor JS reconstruído (calcularPremioTrimestralProposta) — em paralelo, nunca fonte primária. Ver Painel de Validação abaixo.</div>
+        <div className="text-[13px] text-neutral-400">Motor JS reconstruído (calcularPremioTrimestralProposta) — em paralelo, nunca fonte primária. Ver Painel de Validação abaixo.</div>
         <div className="pt-2 border-t border-neutral-100">
-          <div className="text-[11px] text-neutral-400 mb-2">Objetivos trimestrais (RLMC ajustada) — introduz os valores propostos pela Vodafone para {labelTrimestre(trimestreChaveAtual)}:</div>
+          <div className="text-[13px] text-neutral-400 mb-2">Objetivos trimestrais (RLMC ajustada) — introduz os valores propostos pela Vodafone para {labelTrimestre(trimestreChaveAtual)}:</div>
           <div className="space-y-1.5">
             {nivelTrimestre.porCategoria.map((c) => (
               <div key={c.categoria} className="flex items-center justify-between gap-2 text-xs">
                 <span className="text-neutral-600">{RLMC_CARTOES.find((r) => r.categoria === c.categoria)?.label || c.categoria}</span>
                 <div className="flex items-center gap-2">
-                  <span className={`text-[11px] ${c.atingido ? "text-emerald-700" : "text-neutral-400"}`}>{formatEuro(c.real)} · {c.atingimentoPercent}%{c.atingido ? " ✓" : ""}</span>
+                  <span className={`text-[13px] ${c.atingido ? "text-emerald-700" : "text-neutral-400"}`}>{formatEuro(c.real)} · {c.atingimentoPercent}%{c.atingido ? " ✓" : ""}</span>
                   <InputObjetivo valor={c.objetivo} placeholder={String(OBJETIVO_TRIMESTRAL_POR_CATEGORIA[c.categoria])}
                     onChange={(v) => definirCampo(trimestreChaveAtual, c.categoria, v)} />
                 </div>
@@ -12406,7 +12408,7 @@ function ComissoesView() {
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div>
             <div className="text-2xl font-semibold text-neutral-800">{formatEuro(totalCampanhaTrimestre)}</div>
-            <div className="text-[11px] text-neutral-400">{negociosCampanhaTrimestre.length} negócio(s) marcado(s) "Campanha = Sim" neste trimestre (RLMC ajustada)</div>
+            <div className="text-[13px] text-neutral-400">{negociosCampanhaTrimestre.length} negócio(s) marcado(s) "Campanha = Sim" neste trimestre (RLMC ajustada)</div>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-neutral-500">Objetivo trimestral</span>
@@ -12419,7 +12421,7 @@ function ComissoesView() {
             {atingimentoCampanhaPercent}% do objetivo trimestral — {campanhaTrimestreAtingida ? "✓ objetivo deste trimestre atingido" : "objetivo deste trimestre NÃO atingido"}
           </div>
         ) : (
-          <div className="text-[11px] text-neutral-400">Sem objetivo trimestral da campanha definido para {labelTrimestre(trimestreChaveAtual)} — introduz o valor acima.</div>
+          <div className="text-[13px] text-neutral-400">Sem objetivo trimestral da campanha definido para {labelTrimestre(trimestreChaveAtual)} — introduz o valor acima.</div>
         )}
       </div>
 
@@ -12455,9 +12457,9 @@ function ComissoesView() {
             {elegivelPremioAnual ? "✓ elegível para o prémio anual extra" : "ainda não elegível para o prémio anual extra"} — independente de cada trimestre individual ter batido ou não a própria meta.
           </div>
         ) : (
-          <div className="text-[11px] text-neutral-400">Sem nenhum objetivo trimestral da campanha definido ainda este ano — introduz pelo menos 1 acima (secção "Campanha") para veres o progresso anual.</div>
+          <div className="text-[13px] text-neutral-400">Sem nenhum objetivo trimestral da campanha definido ainda este ano — introduz pelo menos 1 acima (secção "Campanha") para veres o progresso anual.</div>
         )}
-        <div className="text-[11px] text-neutral-400 pt-1 border-t border-neutral-100">
+        <div className="text-[13px] text-neutral-400 pt-1 border-t border-neutral-100">
           ⚠️ O valor em euros deste prémio anual extra ainda não está definido — só o indicador de elegibilidade/progresso, nunca um valor inventado.
         </div>
       </div>
@@ -12470,17 +12472,17 @@ function ComissoesView() {
       <div className="border border-neutral-200 rounded-lg bg-white p-3">
         <button type="button" onClick={() => setAbertoXP((v) => !v)} className="w-full flex items-center justify-between text-xs font-medium text-neutral-500">
           <span>{abertoXP ? "▾" : "▸"} 🔧 Tabela de Referência (XP) — usada só pelo Painel de Validação abaixo</span>
-          {nuvemAtivaXP && <span className="text-[11px] text-neutral-400 font-normal">☁️ na nuvem</span>}
+          {nuvemAtivaXP && <span className="text-[13px] text-neutral-400 font-normal">☁️ na nuvem</span>}
         </button>
         {abertoXP && (
           <div className="mt-3 space-y-3">
-            <div className="text-[11px] text-neutral-400">
+            <div className="text-[13px] text-neutral-400">
               Esta tabela (Gold/Bronze/Silver/Estanho, Em Vigor/Descontinuada, etc.) alimenta só a comparação JS vs Excel abaixo — nunca os valores reais de Comissão Upfront/Prémio/RLMC ajustada/Campanha, que usam sempre constantes já confirmadas e embutidas no código.
             </div>
             <MigracaoNuvemBanner nome="a Tabela de Referência (XP)" firebaseUser={firebaseUserXP} nuvemAtiva={nuvemAtivaXP}
               migrarParaNuvem={migrarTabelaXP} aMigrar={aMigrarXP} nParaMigrar={1} />
             {!nuvemAtivaXP && !temExcelParaXP && firebaseUserXP && (
-              <div className="text-[11px] text-amber-700">Liga o Excel "Mapa Trimestral" acima para poderes migrar esta tabela pela 1ª vez (a migração lê-a de lá).</div>
+              <div className="text-[13px] text-amber-700">Liga o Excel "Mapa Trimestral" acima para poderes migrar esta tabela pela 1ª vez (a migração lê-a de lá).</div>
             )}
             <EditorTabelaXP tabela={tabelaXPAtual} onGuardar={guardarTabelaXP} aGuardar={aGuardarXP} />
           </div>
@@ -12698,7 +12700,7 @@ function CalendarioAssuntos({ assuntos, diaFiltro, onSelecionarDia }) {
           return (
             <button key={i} onClick={() => onSelecionarDia(dataStr)}
               title={count > 0 ? `${count} assunto${count === 1 ? "" : "s"} previsto${count === 1 ? "" : "s"}` : ""}
-              className={`relative aspect-square flex flex-col items-center justify-center rounded-md text-[11px] transition-colors ${
+              className={`relative aspect-square flex flex-col items-center justify-center rounded-md text-[13px] transition-colors ${
                 ativo ? "bg-red-600 text-white font-medium" : ehHoje ? "bg-neutral-100 font-medium text-neutral-900" : "text-neutral-700 hover:bg-neutral-50"}`}>
               {d}
               <span className={`w-1 h-1 rounded-full mt-0.5 ${count > 0 ? (ativo ? "bg-white" : "bg-red-500") : "bg-transparent"}`} />
@@ -12707,7 +12709,7 @@ function CalendarioAssuntos({ assuntos, diaFiltro, onSelecionarDia }) {
         })}
       </div>
       {diaFiltro && (
-        <button onClick={() => onSelecionarDia(diaFiltro)} className="text-[11px] text-neutral-400 hover:text-neutral-700">
+        <button onClick={() => onSelecionarDia(diaFiltro)} className="text-[13px] text-neutral-400 hover:text-neutral-700">
           ✕ limpar filtro de dia ({new Date(diaFiltro).toLocaleDateString("pt-PT")})
         </button>
       )}
@@ -12746,7 +12748,7 @@ function CartaoAssunto({ a, arquivado, atualizar, remover }) {
             </span>
           )}
         </div>
-        <span className="text-[11px] text-neutral-400">{a.dataPedido}</span>
+        <span className="text-[13px] text-neutral-400">{a.dataPedido}</span>
       </div>
 
       {aEditar ? (
@@ -12754,11 +12756,11 @@ function CartaoAssunto({ a, arquivado, atualizar, remover }) {
           <textarea value={rascunho.comentario} onChange={(e) => setRascunho({ ...rascunho, comentario: e.target.value })} rows={2}
             className="w-full px-2.5 py-1.5 rounded-md border border-neutral-200 text-sm focus:outline-none focus:border-red-600 resize-none" />
           <div className="flex items-center gap-2">
-            <label className="text-[11px] text-neutral-500">Data prevista:</label>
+            <label className="text-[13px] text-neutral-500">Data prevista:</label>
             <input type="date" value={rascunho.dataPrevista} onChange={(e) => setRascunho({ ...rascunho, dataPrevista: e.target.value })}
               className="px-2 py-1 rounded-md border border-neutral-200 text-xs" />
-            <button onClick={guardarEdicao} className="text-[11px] px-2.5 py-1 rounded-md bg-red-600 text-white hover:bg-red-700 ml-auto">Guardar</button>
-            <button onClick={() => setAEditar(false)} className="text-[11px] px-2.5 py-1 rounded-md border border-neutral-200 text-neutral-600 hover:border-neutral-400">Cancelar</button>
+            <button onClick={guardarEdicao} className="text-[13px] px-2.5 py-1 rounded-md bg-red-600 text-white hover:bg-red-700 ml-auto">Guardar</button>
+            <button onClick={() => setAEditar(false)} className="text-[13px] px-2.5 py-1 rounded-md border border-neutral-200 text-neutral-600 hover:border-neutral-400">Cancelar</button>
           </div>
         </div>
       ) : (
@@ -12767,11 +12769,11 @@ function CartaoAssunto({ a, arquivado, atualizar, remover }) {
 
       <div className="flex items-center gap-2 pt-1">
         <select value={a.estado} onChange={(e) => atualizar(a.id, { estado: e.target.value })}
-          className={`text-[11px] px-2 py-1 rounded-md border ${ASSUNTO_ESTADO_ESTILO[a.estado]}`}>
+          className={`text-[13px] px-2 py-1 rounded-md border ${ASSUNTO_ESTADO_ESTILO[a.estado]}`}>
           {ASSUNTO_ESTADOS.map((e) => <option key={e} value={e}>{e}</option>)}
         </select>
-        {!aEditar && <button onClick={abrirEdicao} className="text-[11px] text-neutral-400 hover:text-neutral-700"><Icone nome="editar" className="w-4 h-4 shrink-0" />Editar</button>}
-        <button onClick={() => remover(a.id)} className="text-[11px] text-neutral-400 hover:text-red-600 ml-auto">Apagar</button>
+        {!aEditar && <button onClick={abrirEdicao} className="text-[13px] text-neutral-400 hover:text-neutral-700"><Icone nome="editar" className="w-4 h-4 shrink-0" />Editar</button>}
+        <button onClick={() => remover(a.id)} className="text-[13px] text-neutral-400 hover:text-red-600 ml-auto">Apagar</button>
       </div>
     </div>
   );
@@ -12852,16 +12854,16 @@ function AssuntosView() {
       <MigracaoNuvemBanner nome="Assuntos" firebaseUser={firebaseUser} nuvemAtiva={nuvemAtiva}
         migrarParaNuvem={migrarParaNuvem} aMigrar={aMigrar} nParaMigrar={nParaMigrar} />
       {firebaseUser && !nuvemAtiva && (
-        <div className="text-[11px] text-neutral-400">☁️ Sincronizado com o telemóvel — {firebaseUser.email}</div>
+        <div className="text-[13px] text-neutral-400">☁️ Sincronizado com o telemóvel — {firebaseUser.email}</div>
       )}
       {/* Já migrado, mas podem existir assuntos locais nascidos DEPOIS da migração
           "uma vez só" (ex. recuperados do telemóvel entretanto) — nunca chegaram à
           nuvem, e migrarParaNuvem recusa-se a correr outra vez (nuvemAtiva já true).
           Compara por id, idempotente — nunca duplica os já migrados. */}
       {nuvemAtiva && nLocalTotal > 0 && (
-        <div className="flex items-center gap-2 flex-wrap text-[11px] text-neutral-400">
+        <div className="flex items-center gap-2 flex-wrap text-[13px] text-neutral-400">
           <button onClick={sincronizarFaltantesClick} disabled={aSincronizarFaltantes}
-            className="text-[11px] px-2 py-1 rounded-md border border-neutral-200 text-neutral-500 hover:border-neutral-400 disabled:opacity-40"><Icone nome="renovar" className="w-4 h-4 shrink-0" />
+            className="text-[13px] px-2 py-1 rounded-md border border-neutral-200 text-neutral-500 hover:border-neutral-400 disabled:opacity-40"><Icone nome="renovar" className="w-4 h-4 shrink-0" />
             {aSincronizarFaltantes ? "A sincronizar…" : "Sincronizar assuntos locais em falta para a nuvem"}
           </button>
           {resultadoSincFaltantes !== null && (
@@ -13537,16 +13539,16 @@ function DadosCampanha({ produto, handleProjeto, nuvemAtiva, onAlterado }) {
   const a = produto.aplicaA || {};
   const gravar = async (alt) => { try { await atualizarCampanhaNoCatalogo(produto, alt, handleProjeto, nuvemAtiva); if (onAlterado) onAlterado(); } catch (e) { console.warn("Não foi possível gravar a campanha:", e); } };
   const sel = (v, k, vazio) => (
-    <select value={v || ""} onChange={(e) => gravar({ aplicaA: { ...a, [k]: e.target.value } })} className="px-1 py-0.5 rounded border border-neutral-300 text-[11px]">
+    <select value={v || ""} onChange={(e) => gravar({ aplicaA: { ...a, [k]: e.target.value } })} className="px-1 py-0.5 rounded border border-neutral-300 text-[13px]">
       <option value="">{vazio}</option>
       {COLUNAS_MAPA_PRODUTOS.map((col) => <option key={col.id} value={col.id}>{col.label}</option>)}
     </select>
   );
   return (
-    <div className="w-full flex flex-col gap-1 text-[11px] text-neutral-500 mt-1">
+    <div className="w-full flex flex-col gap-1 text-[13px] text-neutral-500 mt-1">
       <label className="flex items-center gap-1">Termina em
         <input type="date" value={produto.dataCampanha || ""} onChange={(e) => gravar({ dataCampanha: e.target.value, subtitulo: e.target.value ? `Válida até ${formatarDataIsoPT(e.target.value)}` : "" })}
-          className="px-1 py-0.5 rounded border border-neutral-300 text-[11px]" />
+          className="px-1 py-0.5 rounded border border-neutral-300 text-[13px]" />
       </label>
       <div className="flex items-center gap-1 flex-wrap">Aplica-se a quem tem {sel(a.tem, "tem", "— qualquer —")} e não tem {sel(a.falta, "falta", "— qualquer —")}</div>
     </div>
@@ -13583,13 +13585,13 @@ function CartaoProdutoVodafone({ produto, categoriaLabel, handleProjeto, categor
             className="text-xs px-2.5 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700">
             Abrir campanha
           </button>
-          <span className="text-[11px] text-neutral-400">{produto.ficheiro.tipo === "text/html" ? "HTML" : "PDF"}</span>
+          <span className="text-[13px] text-neutral-400">{produto.ficheiro.tipo === "text/html" ? "HTML" : "PDF"}</span>
           <button onClick={async () => {
               if (!window.confirm("Remover esta campanha do catálogo?")) return;
               await removerProdutoDoCatalogo(produto, handleProjeto, nuvemAtiva);
               if (onAlterado) onAlterado();
             }}
-            title="Remover campanha" className="text-[11px] text-neutral-400 hover:text-red-600 ml-auto">✕ remover</button>
+            title="Remover campanha" className="text-[13px] text-neutral-400 hover:text-red-600 ml-auto">✕ remover</button>
           <DadosCampanha produto={produto} handleProjeto={handleProjeto} nuvemAtiva={nuvemAtiva} onAlterado={onAlterado} />
         </div>
       ) : (
@@ -13911,7 +13913,7 @@ function ProdutosVodafoneView({ ligacaoPasta }) {
       </div>
 
       {dados && (
-        <div className="text-[11px] text-neutral-400 mt-4">Atualizado em {dados.atualizadoEm}</div>
+        <div className="text-[13px] text-neutral-400 mt-4">Atualizado em {dados.atualizadoEm}</div>
       )}
     </div>
   );
@@ -14710,7 +14712,7 @@ function CampanhaPorProdutoView() {
               ))}
             </select>
             {campanhaAbertaId && (
-              <div className="text-[11px] text-neutral-400">
+              <div className="text-[13px] text-neutral-400">
                 A mostrar a campanha reaberta — as pontuações são as que ficaram gravadas nessa altura.
               </div>
             )}
