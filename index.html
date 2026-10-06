@@ -960,6 +960,9 @@ function extrairConsumosMensais(segmento) {
   if (mCabecalho) zona = zona.slice(mCabecalho[0].length);
   const fim = zona.search(/À data de emissão/);
   if (fim !== -1) zona = zona.slice(0, fim);
+  // A secção "Consumos mensais partilhados" (plafond partilhado) vem a seguir — não é plafond da linha.
+  const iPart = zona.search(/Consumos mensais partilhados/);
+  if (iPart !== -1) zona = zona.slice(0, iPart);
 
   const consumos = [];
   const re = new RegExp(LINHA_CONSUMO);
@@ -1061,10 +1064,22 @@ function analisarSegmentoDetalheServico(segmento) {
   // uma categoria errada.
   const mMensalidade = /Mensalidade\s+(.+?)\s+€\s*(-?[\d.,]+)/.exec(segmento);
   const mTotal = /Total sem IVA\s*€\s*(-?[\d.,]+)/.exec(segmento);
+  // Descontos são valores NEGATIVOS ("€ -8,71" / "-€ 8,71"). Lê-se primeiro qualquer valor
+  // negativo da zona dos itens (antes de "Total sem IVA"): quando o PDF sai com as etiquetas
+  // primeiro e os valores no fim, o nome "Desconto…" já não fica ao lado do seu valor e a regra
+  // por nome apanhava o 1º € do bloco (a mensalidade, positiva) como se fosse o desconto.
   let desconto = 0, achouDesconto = false;
-  const reDesconto = /Desconto[^\n€]*€\s*(-?[\d.,]+)/gi;
-  let md;
-  while ((md = reDesconto.exec(segmento)) !== null) { desconto += parseFloat(md[1].replace(",", ".")); achouDesconto = true; }
+  const iTotal = segmento.search(/Total sem IVA/);
+  const zonaItens = iTotal !== -1 ? segmento.slice(0, iTotal) : segmento.split(/Consumos mensais|À data de emissão/)[0];
+  const reNeg = /(?:-\s*€\s*|€\s*-\s*)(\d[\d.,]*)/g;
+  let mn;
+  while ((mn = reNeg.exec(zonaItens)) !== null) { desconto -= parseFloat(mn[1].replace(",", ".")); achouDesconto = true; }
+  if (!achouDesconto) {
+    // "Desc." abreviado (ex. "Desc.3G BL VM") também é desconto.
+    const reDesconto = /\bDesc(?:onto|\.)[^\n€]*€\s*(-?[\d.,]+)/gi;
+    let md;
+    while ((md = reDesconto.exec(segmento)) !== null) { desconto += parseFloat(md[1].replace(",", ".")); achouDesconto = true; }
+  }
   const fidelizacoes = [];
   const reFid = /contrato do tipo ([^,]+), com data de fim (\d{2}-\d{2}-\d{4})/g;
   let mf;
@@ -2441,7 +2456,7 @@ function gerarExcelQuestionarioClienteNovo(nome, nif) {
 function dobrarDescontosNosItens(itens) {
   const resultado = [];
   itens.forEach((it) => {
-    if (/desconto/i.test(it.descricao) && resultado.length) {
+    if (/\bdesc(?:onto|\.)/i.test(it.descricao) && resultado.length) {
       const alvo = resultado[resultado.length - 1];
       alvo.valor = Number((alvo.valor + it.valor).toFixed(2));
     } else {
