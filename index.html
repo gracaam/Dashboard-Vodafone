@@ -1426,7 +1426,7 @@ function calcularParquePorTarifario(linhas) {
     if (!porTarifario.has(chave)) porTarifario.set(chave, { tarifario: chave, nAcessos: 0, custoMensal: 0 });
     const g = porTarifario.get(chave);
     g.nAcessos += 1;
-    g.custoMensal = Number((g.custoMensal + (Number(l.mensalidade) || 0)).toFixed(2));
+    g.custoMensal = Number((g.custoMensal + (l.total !== "" && l.total != null ? Number(l.total) : (Number(l.mensalidade) || 0))).toFixed(2));
   });
   return [...porTarifario.values()].sort((a, b) => b.nAcessos - a.nAcessos);
 }
@@ -1438,7 +1438,11 @@ function calcularDetalhePorAcesso(linhas) {
   return linhas.map((l) => {
     const c = l.consumoPrincipal;
     const pct = typeof l.utilizacaoRatio === "number" ? Math.round(l.utilizacaoRatio * 100) : null;
-    const estado = pct === null ? "—" : pct >= 100 ? "Esgotado" : pct >= 80 ? "Alto" : "OK";
+    const partilhadoMB = typeof l.consumoPartilhadoMB === "number" ? l.consumoPartilhadoMB : null;
+    // Com plafond partilhado, o excesso do plafond individual sai do pool — não é "Esgotado".
+    const estado = pct === null ? "—" : pct >= 100 ? (partilhadoMB !== null ? "Partilhado" : "Esgotado") : pct >= 80 ? "Alto" : "OK";
+    const mensalidade = Number(l.mensalidade) || 0;
+    const desconto = Number(l.desconto) || 0;
     return {
       numero: l.numero,
       tarifario: l.tarifario,
@@ -1446,7 +1450,9 @@ function calcularDetalhePorAcesso(linhas) {
       utilizado: c && c.utilizado ? c.utilizado.texto : "—",
       pct,
       estado,
-      mensalidade: Number(l.mensalidade) || 0,
+      mensalidade, desconto, partilhadoMB,
+      // Custo real do mês (Total da fatura, já com descontos); sem Total, mensalidade + desconto.
+      custo: l.total !== "" && l.total != null ? Number(l.total) : Number((mensalidade + desconto).toFixed(2)),
     };
   });
 }
@@ -1587,6 +1593,20 @@ function descodificarJsBase64(b64) {
 // pela categoria dominante dos seus próprios tarifários). Chart.js vai EMBUTIDO no
 // ficheiro (base64 → descodificado no script) para o painel ser autossuficiente; só cai
 // para o CDN se, por algum motivo, a biblioteca embutida não existir.
+// Cartão "Plafond partilhado" do painel: aditivo, uso do pool e maiores consumidores.
+function cartaoPartilhadoHtml(periodo) {
+  const d = periodo && periodo.partilhado;
+  if (!d) return "";
+  const gb = (mb) => (mb / 1024).toFixed(1).replace(".", ",");
+  const pct = d.incluidoMB ? Math.round((d.utilizadoMB / d.incluidoMB) * 100) : null;
+  const top = [...d.porNumero].sort((a, b) => b.mb - a.mb).slice(0, 3).map((x) => `${escaparHtml(x.numero)} (${gb(x.mb)} GB)`).join(" · ");
+  return `<div class="card" style="margin-top:14px">
+      <h3>Plafond partilhado</h3>
+      <div class="sub">${escaparHtml(d.nome)}: ${gb(d.utilizadoMB)} GB usados${d.incluidoMB ? ` de ${gb(d.incluidoMB)} GB (${pct}%)` : ""}${d.custo != null ? ` · custo ${formatEuro(d.custo)}/mês` : ""} · ${d.porNumero.length} números a consumir</div>
+      <div style="font-size:13px;margin-top:6px">Maiores consumos: ${top}</div>
+    </div>`;
+}
+
 function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
   const nomeUpper = escaparHtml(nomeCliente.toUpperCase());
   const kpis = calcularKpisEInsights(contas);
@@ -1687,7 +1707,7 @@ function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
   .num{font-weight:700}
   .pill{font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:999px;letter-spacing:.02em}
   .p-ok{background:var(--ok-soft);color:var(--ok)} .p-alto{background:var(--warn-soft);color:var(--warn)}
-  .p-out{background:var(--bad);color:#fff} .p-na{background:#eef0f3;color:var(--muted)}
+  .p-part{background:#e6f0fb;color:#1f5fa8} .p-out{background:var(--bad);color:#fff} .p-na{background:#eef0f3;color:var(--muted)}
   .bar{height:6px;background:#edeff2;border-radius:99px;overflow:hidden;width:100px;display:inline-block;vertical-align:middle}
   .bar i{display:block;height:100%;background:var(--ok);border-radius:99px}
   .bar i.alto{background:var(--warn)} .bar i.out{background:var(--bad)}
@@ -1754,6 +1774,7 @@ function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
         <div class="chartbox"><canvas id="gDist${c.idDom}"></canvas></div>
       </div>
     </div>` : ""}
+    ${cartaoPartilhadoHtml(c.periodoRecente)}
     <div class="card" style="margin-top:14px">
       <h3>Evolução mensal — Conta ${escaparHtml(c.conta)}</h3>
       <div class="sub">Sem IVA</div>
@@ -1764,7 +1785,7 @@ function gerarHtmlAnaliseFaturas(nomeCliente, contas, dataAnalise) {
       <div class="sub">"—" quando a fatura não detalha consumo no bloco · ordenar clicando no cabeçalho</div>
       <div class="toolbar">
         <input id="fNum${c.idDom}" placeholder="Pesquisar número…">
-        <select id="fEst${c.idDom}"><option value="">Todos os estados</option><option>OK</option><option>Alto</option><option>Esgotado</option><option value="—">—</option></select>
+        <select id="fEst${c.idDom}"><option value="">Todos os estados</option><option>OK</option><option>Alto</option><option>Esgotado</option><option>Partilhado</option><option value="—">—</option></select>
       </div>
       <div class="scroll">
       <table id="tNums${c.idDom}">
@@ -1910,14 +1931,14 @@ DADOS.contas.forEach((c, i) => {
   if (tb) {
     const fNum = el("fNum" + c.idDom), fEst = el("fEst" + c.idDom);
     let ord = { k: "numero", asc: true };
-    const pill = (e) => e === "Esgotado" ? '<span class="pill p-out">Esgotado</span>' : e === "Alto" ? '<span class="pill p-alto">Alto</span>' : e === "OK" ? '<span class="pill p-ok">OK</span>' : '<span class="pill p-na">—</span>';
+    const pill = (e) => e === "Esgotado" ? '<span class="pill p-out">Esgotado</span>' : e === "Alto" ? '<span class="pill p-alto">Alto</span>' : e === "OK" ? '<span class="pill p-ok">OK</span>' : e === "Partilhado" ? '<span class="pill p-part" title="O excesso sobre o plafond individual sai do plafond partilhado da conta">Partilhado</span>' : '<span class="pill p-na">—</span>';
     const barra = (p) => p == null ? "" : \`<span class="bar"><i class="\${p >= 100 ? "out" : (p >= 80 ? "alto" : "")}" style="width:\${Math.min(100, p)}%"></i></span><span class="pct">\${p}%</span>\`;
     function render() {
       const q = (fNum.value || "").replace(/\\D/g, "");
       const linhas = c.detalhe.filter((r) => (!q || r.numero.includes(q)) && (!fEst.value || r.estado === fEst.value));
-      const F = { numero: r => r.numero, tarifario: r => r.tarifario, plafond: r => r.plafond, utilizado: r => r.utilizado, pct: r => r.pct == null ? -1 : r.pct, estado: r => ({ Esgotado: 3, Alto: 2, OK: 1, "—": 0 }[r.estado]), mensalidade: r => r.mensalidade };
+      const F = { numero: r => r.numero, tarifario: r => r.tarifario, plafond: r => r.plafond, utilizado: r => r.utilizado, pct: r => r.pct == null ? -1 : r.pct, estado: r => ({ Esgotado: 4, Partilhado: 3, Alto: 2, OK: 1, "—": 0 }[r.estado]), mensalidade: r => r.custo };
       linhas.sort((a, b) => { const va = F[ord.k](a), vb = F[ord.k](b); return (va > vb ? 1 : va < vb ? -1 : 0) * (ord.asc ? 1 : -1); });
-      tb.innerHTML = linhas.map(r => \`<tr><td class="num">\${r.numero}</td><td>\${r.tarifario}</td><td>\${r.plafond}</td><td>\${r.utilizado}</td><td>\${barra(r.pct)}</td><td>\${pill(r.estado)}</td><td style="text-align:right">\${eur(r.mensalidade)}</td></tr>\`).join("")
+      tb.innerHTML = linhas.map(r => \`<tr><td class="num">\${r.numero}</td><td>\${r.tarifario}</td><td>\${r.plafond}</td><td>\${r.utilizado}</td><td>\${barra(r.pct)}</td><td>\${pill(r.estado)}</td><td style="text-align:right" title="Mensalidade \${eur(r.mensalidade)}\${r.desconto ? " · desconto " + eur(r.desconto) : ""}">\${eur(r.custo)}</td></tr>\`).join("")
         || '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">Sem resultados</td></tr>';
     }
     [fNum, fEst].forEach((x) => x.addEventListener("input", render));
