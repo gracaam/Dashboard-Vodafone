@@ -7372,11 +7372,11 @@ function LinhaHoje({ c, children, email, obterExtras, concluir }) {
   return (
     <div className="px-3 py-2 border-b border-neutral-100 last:border-0 text-sm space-y-2">
       <div className="flex items-center gap-3">
-        <span className="font-medium flex-1 truncate">{c.e}</span>
-        <span className="text-xs text-neutral-500 whitespace-nowrap">{children}</span>
-        {email && <button onClick={async () => setSemEmail(!(await gerarEmailHoje(c, email, obterExtras)))} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap">Gerar email</button>}
-        {concluir != null && <button onClick={() => setConcluindo(true)} title="Dá o passo como feito e regista no histórico o que fizeste" className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap">Concluir</button>}
-        <button onClick={() => setAberto((v) => !v)} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap">{aberto ? "Fechar" : "Registar contacto"}</button>
+        <span className="font-medium shrink-0 max-w-[45%] truncate" title={c.e}>{c.e}</span>
+        <span className="text-xs text-neutral-500 flex-1 min-w-0 break-words" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{children}</span>
+        {email && <button onClick={async () => setSemEmail(!(await gerarEmailHoje(c, email, obterExtras)))} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap shrink-0">Gerar email</button>}
+        {concluir != null && <button onClick={() => setConcluindo(true)} title="Dá o passo como feito e regista no histórico o que fizeste" className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0">Concluir</button>}
+        <button onClick={() => setAberto((v) => !v)} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap shrink-0">{aberto ? "Fechar" : "Registar contacto"}</button>
       </div>
       {semEmail && <div className="text-[11px] text-amber-700">A ficha deste cliente não tem email — escreve-o no Outlook (ou no campo Email da ficha, para as próximas vezes).</div>}
       {aberto && <RegistoContactoForm nif={c.n} onFeito={() => setAberto(false)} />}
