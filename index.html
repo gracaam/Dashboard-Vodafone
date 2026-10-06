@@ -4440,7 +4440,7 @@ const TIPO_CLIENTE_OPCOES = ["EMPRESA", "PARTICULAR"];
 
 // Estados manuais de um registo de "Fidelização por trimestre" (2026-09-25, pedido
 // explícito do utilizador) — nunca vêm do Excel, só editados por Augusto no dashboard.
-const ESTADO_FIDELIZACAO_OPCOES = ["Em aberto", "Em negociação", "Fechado"];
+const ESTADO_FIDELIZACAO_OPCOES = ["Em aberto", "Em negociação", "Em implementação", "Fechado"];
 // Paleta de estados do redesign (2026-09-26) — fundo/texto. "Em aberto" usa a cor de
 // "Por contactar". Os valores gravados dos estados não mudam, só o aspeto.
 const CORES_ESTADO = {
@@ -4448,12 +4448,14 @@ const CORES_ESTADO = {
   "Em aberto": { background: "#EDE7E3", color: "#57534E" },
   "Contactado": { background: "#DBEAFE", color: "#1D4ED8" },
   "Em negociação": { background: "#FEF3C7", color: "#92400E" },
+  "Em implementação": { background: "#E0E7FF", color: "#3730A3" },
   "Fechado": { background: "#CCFBF1", color: "#0F5F58" },
   "Perdido": { background: "#FDE2E1", color: "#B91C1C" },
 };
 const ESTADO_FIDELIZACAO_ESTILO = {
   "Em aberto": "border-neutral-200 text-neutral-500",
   "Em negociação": "border-amber-300 text-amber-700 bg-amber-50",
+  "Em implementação": "border-indigo-300 text-indigo-700 bg-indigo-50",
   "Fechado": "border-emerald-300 text-emerald-700 bg-emerald-50",
 };
 const NATUREZA_OPCOES = ["NRECEITA", "REFIDELIZAÇÃO"];
@@ -6374,8 +6376,8 @@ function useFidelizacaoTrimestre() {
   // ambiguidade nenhuma a resolver, ao contrário de criarClienteSeNaoExistir.
   const registarFechoFidelizacao = async (registo) => {
     await adicionarNotaFidelizacao(registo.n, {
-      data: new Date().toISOString(),
-      texto: `Negócio de fidelização fechado em ${new Date().toLocaleDateString("pt-PT")}.`,
+      data: registo.dataFechado || new Date().toISOString(),
+      texto: `Negócio de fidelização fechado em ${new Date(registo.dataFechado || Date.now()).toLocaleDateString("pt-PT")}.`,
       tipo: "fidelizacao-fechada",
     });
   };
@@ -14886,7 +14888,7 @@ function EtiquetaEstado({ estado, opcoes, onMudar }) {
   );
 }
 
-function CartaoClienteFidelizacao({ c, valor, tom, ehCliente, onMudarEstado, permanencia }) {
+function CartaoClienteFidelizacao({ c, valor, tom, ehCliente, onMudarEstado, permanencia, semNota, onAdicionarNota }) {
   const estado = c.estado || "Em aberto";
   return (
     <div className="bg-white border rounded-[18px] p-4 space-y-3" style={{ borderColor: "var(--vf-border)" }}>
@@ -14904,9 +14906,15 @@ function CartaoClienteFidelizacao({ c, valor, tom, ehCliente, onMudarEstado, per
               ⚠ Contrato a {permanencia.dias} dias do fim — avisar 6 meses antes
             </div>
           )}
-          {estado === "Fechado" && ehCliente && (
+          {estado === "Fechado" && ehCliente && !semNota && (
             <div className="text-xs font-medium mt-1.5" style={{ color: "#0F5F58" }}>
               Nota na ficha de Cliente: negócio de fidelização fechado{c.dataFechado ? ` em ${new Date(c.dataFechado).toLocaleDateString("pt-PT")}` : ""}
+            </div>
+          )}
+          {estado === "Fechado" && ehCliente && semNota && (
+            <div className="text-xs mt-1.5" style={{ color: "#92400E" }}>
+              Fechado, mas a ficha do cliente ainda não tem a nota.{" "}
+              <button type="button" onClick={() => onAdicionarNota(c)} className="font-semibold underline">Adicionar nota à ficha</button>
             </div>
           )}
         </div>
@@ -14973,6 +14981,7 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
     if (novoEstado !== "Fechado") return;
     if (todosClientes.some((cl) => cl.n === c.n)) {
       await registarFechoFidelizacao(atualizado);
+      setVersaoNotas((v) => v + 1);
       setAviso(`"${atualizado.e}" marcado como Fechado — nota adicionada à ficha em Clientes.`);
       setTimeout(() => setAviso(""), 6000);
     } else {
@@ -15028,22 +15037,32 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
   // "Negócio de fidelização fechado em DD/MM/AAAA." na ficha do cliente. Só para
   // mostrar — nunca gravada de volta no registo. Sem nota, fica sem data.
   const [datasDasNotas, setDatasDasNotas] = useState({});
-  const chaveSemData = lista.filter((c) => c.estado === "Fechado" && !c.dataFechado && nifsClientes.has(c.n)).map((c) => c.n).join(",");
+  // Fechados que são clientes: confirma se a nota existe MESMO na ficha (antes o cartão
+  // dizia "Nota na ficha" sem verificar — 2026-10-06, a ficha podia não ter nota nenhuma).
+  const [semNota, setSemNota] = useState({});
+  const [versaoNotas, setVersaoNotas] = useState(0);
+  const chaveFechadosClientes = lista.filter((c) => c.estado === "Fechado" && nifsClientes.has(c.n)).map((c) => c.n).join(",");
   useEffect(() => {
-    if (!chaveSemData) return;
+    if (!chaveFechadosClientes) { setSemNota({}); return; }
     let cancelado = false;
     (async () => {
-      const datas = {};
-      for (const nif of chaveSemData.split(",")) {
+      const datas = {}, sem = {};
+      for (const nif of chaveFechadosClientes.split(",")) {
         const notas = await obterNotasFidelizacao(nif);
-        const nota = Array.isArray(notas) ? [...notas].reverse().find((n) => n.tipo === "fidelizacao-fechada") : null;
+        if (!Array.isArray(notas)) continue; // leitura falhou — não afirmar nada
+        const nota = [...notas].reverse().find((n) => n.tipo === "fidelizacao-fechada");
+        sem[nif] = !nota;
         const m = nota && (nota.texto || "").match(/(\d{2})\/(\d{2})\/(\d{4})/);
         if (m) datas[nif] = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])).toISOString();
       }
-      if (!cancelado) setDatasDasNotas(datas);
+      if (!cancelado) { setDatasDasNotas(datas); setSemNota(sem); }
     })();
     return () => { cancelado = true; };
-  }, [chaveSemData]);
+  }, [chaveFechadosClientes, versaoNotas]);
+  const adicionarNotaEmFalta = async (c) => {
+    await registarFechoFidelizacao(c);
+    setVersaoNotas((v) => v + 1);
+  };
   const fechadosTrimestre = useMemo(() => lista.filter((c) => c.estado === "Fechado").length, [lista]);
   const TOM_ELEGIVEL = { background: "#CCFBF1", color: "#0F5F58" };
   const TOM_APROXIMAR = { background: "#FEF3C7", color: "#92400E" };
@@ -15060,7 +15079,7 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {itens.map((c) => (
-            <CartaoClienteFidelizacao key={c.n} c={c.dataFechado || !datasDasNotas[c.n] ? c : { ...c, dataFechado: datasDasNotas[c.n] }} valor={c[campo]} tom={tom} ehCliente={nifsClientes.has(c.n)} onMudarEstado={mudarEstado} permanencia={calcularFimMaisProximo(mapaContratosTrimestre.get(c.n))} />
+            <CartaoClienteFidelizacao key={c.n} c={c.dataFechado || !datasDasNotas[c.n] ? c : { ...c, dataFechado: datasDasNotas[c.n] }} valor={c[campo]} tom={tom} ehCliente={nifsClientes.has(c.n)} onMudarEstado={mudarEstado} permanencia={calcularFimMaisProximo(mapaContratosTrimestre.get(c.n))} semNota={!!semNota[c.n]} onAdicionarNota={adicionarNotaEmFalta} />
           ))}
         </div>
       )}
