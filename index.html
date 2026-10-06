@@ -5555,7 +5555,6 @@ const PROSPETOS_BASE = [];
 const PONTOS = [
   { id: "assuntos", label: "Para começar o dia", eyebrow: "Quem contactar hoje", icone: "lista", ready: true },
   { id: "assuntos-progresso", label: "Assuntos em Progresso", eyebrow: "Assuntos em curso", icone: "conversa", ready: true },
-  { id: "relatorios", label: "Relatórios", eyebrow: "Desempenho", icone: "grafico", ready: true },
   { id: "negocios", label: "Negócios do Trimestre", eyebrow: "Pipeline comercial", icone: "grafico", ready: true },
   { id: "comissoes", label: "Comissões", eyebrow: "Remuneração", icone: "euro", ready: true },
   { id: "clientes", label: "Clientes", eyebrow: "Carteira de clientes", icone: "pessoas", ready: true },
@@ -5565,6 +5564,7 @@ const PONTOS = [
   { id: "faturas", label: "Análise de Faturas", eyebrow: "Faturação do cliente", icone: "fatura", ready: true },
   { id: "carteira", label: "Carteira a Fidelizar", eyebrow: "Renovações", icone: "renovar", ready: true },
   { id: "campanha-produto", label: "Campanha por Produto", eyebrow: "Próxima Oferta (Jev)", icone: "alvo", ready: true },
+  { id: "relatorios", label: "Relatórios", eyebrow: "Desempenho", icone: "grafico", ready: true },
 ];
 
 // Ícones de traço simples (redesign 2026-09-26) — sem emojis em botões/títulos.
@@ -9091,6 +9091,138 @@ function BarrasEvolucao({ pontos }) {
   );
 }
 
+/* Linhas a rever (2026-10-06): sinais calculados em código por linha (a partir de resumo.contas →
+   periodos[].linhas) + parecer do Jev só sobre "tarifário adequado à utilização". Ao Jev vai só
+   "Linha N" + tarifário + números/indicadores — nunca o nº de telefone, NIF, contactos nem contratos. */
+function calcularSinaisLinhas(contas) {
+  const porNum = new Map();
+  (contas || []).forEach((c) => c.periodos.forEach((p) => (p.linhas || []).forEach((l) => {
+    if (!l.numero || l.total === "" || l.total == null) return;
+    if (!porNum.has(l.numero)) porNum.set(l.numero, []);
+    porNum.get(l.numero).push({ ordem: p.ordem, label: p.label, l });
+  })));
+  const media = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0);
+  const res = [];
+  porNum.forEach((serie, numero) => {
+    serie.sort((a, b) => a.ordem - b.ordem);
+    const ult = serie[serie.length - 1].l;
+    const totais = serie.map((s) => Number(s.l.total));
+    const ratios = serie.map((s) => s.l.utilizacaoRatio).filter((r) => typeof r === "number");
+    const suplementares = serie.map((s) => Number(s.l.suplementares) || 0);
+    const extra = new Set();
+    serie.forEach((s) => (s.l.custoExtraTipo || "").split(", ").filter(Boolean).forEach((t) => extra.add(t)));
+    const sinais = [];
+    if (totais.length >= 2) {
+      const ant = media(totais.slice(0, -1)), at = totais[totais.length - 1];
+      if (ant > 0 && at > ant * 1.4 && at - ant >= 5) sinais.push({ k: "gasto", t: `o total subiu ${Math.round((at / ant - 1) * 100)}% face à média dos meses anteriores (${formatEuro(ant)} → ${formatEuro(at)})` });
+    }
+    const roam = [...extra].filter((t) => t === "roaming" || t === "chamadas internacionais");
+    if (roam.length && Math.max(...suplementares) >= 5) sinais.push({ k: "roaming", t: `custos de ${roam.join(" e ")} (variável até ${formatEuro(Math.max(...suplementares))}/mês)` });
+    if (ratios.length && Math.max(...ratios) < 0.02 && Math.max(...suplementares) < 0.5) sinais.push({ k: "semconsumo", t: `sem consumos nos ${ratios.length} mês(es) medido(s) — paga mensalidade sem utilizar` });
+    const esg = serie.filter((s) => typeof s.l.utilizacaoRatio === "number" && s.l.utilizacaoRatio >= 1).map((s) => s.label);
+    if (esg.length) sinais.push({ k: "pico", t: `plafond esgotado em ${esg.join(", ")}` });
+    else if (totais.length >= 3) {
+      const i = totais.findIndex((v, ix) => ix < totais.length - 1 && v >= 5 + 1.5 * media(totais.filter((_, j) => j !== ix)));
+      if (i >= 0) sinais.push({ k: "pico", t: `pico de gasto em ${serie[i].label} (${formatEuro(totais[i])})` });
+    }
+    res.push({
+      numero, tarifario: ult.tarifario || "—", mensalidade: Number(ult.mensalidade) || 0,
+      totalMedio: Number(media(totais).toFixed(2)), meses: serie.length,
+      usoMedioPct: ratios.length ? Math.round(media(ratios) * 100) : null,
+      usoMaxPct: ratios.length ? Math.round(Math.max(...ratios) * 100) : null,
+      pacote: ult.utilizacaoNomePacote || "", extra: [...extra], suplMedio: Number(media(suplementares).toFixed(2)),
+      sinais,
+    });
+  });
+  return res.sort((a, b) => b.sinais.length - a.sinais.length || b.totalMedio - a.totalMedio);
+}
+
+const VEREDITOS_TARIFARIO = {
+  sobredimensionado: "Tarifário sobredimensionado: o cliente paga por mais do que utiliza; existe um tarifário mais barato adequado.",
+  adequado: "Tarifário adequado à utilização normal da linha.",
+  subdimensionado: "Tarifário subdimensionado: a utilização excede o que está incluído e gera custos extra ou plafond esgotado.",
+};
+async function pedirParecerTarifarioJev(l, indice) {
+  const state = {
+    linha: `Linha ${indice + 1}`, tarifario: l.tarifario, mensalidade: l.mensalidade, mesesAnalisados: l.meses,
+    totalMedioMensal: l.totalMedio, gastoVariavelMedio: l.suplMedio, pacoteMedido: l.pacote || null,
+    utilizacaoMediaPct: l.usoMedioPct, utilizacaoMaximaPct: l.usoMaxPct, custosExtra: l.extra,
+    sinaisDetetados: l.sinais.map((s) => s.k),
+  };
+  const questions = {
+    ajuste: { type: "choice", instructions: "O estado descreve uma linha móvel/serviço de uma empresa cliente Vodafone Business, com o tarifário atual, a utilização medida e os custos. O tarifário atual é adequado à utilização normal desta linha?", criteria: VEREDITOS_TARIFARIO },
+    oportunidade: { type: "score", instructions: "Quão forte é a oportunidade de propor ao cliente a mudança de tarifário desta linha?", criteria: ["Nenhuma: tarifário certo, nada a propor", "Fraca: ganho marginal", "Moderada: vale a pena mencionar", "Boa: ganho claro para o cliente", "Muito forte: mudança claramente vantajosa"] },
+  };
+  const r = await chamarRecomendarProdutos(state, questions);
+  const a = r && r.answers && r.answers.ajuste, o = r && r.answers && r.answers.oportunidade;
+  if (!a || !a.choice) throw new Error("sem resposta");
+  return { ajuste: a.choice, confianca: a.confidence, oportunidade: o && typeof o.score === "number" ? o.score : null };
+}
+
+const ROTULOS_SINAL = { gasto: "🔴 Gasto invulgar", roaming: "✈ Roaming/internacional", semconsumo: "⚪ Sem consumo", pico: "📈 Pico" };
+
+function LinhasARever({ contas }) {
+  const linhas = useMemo(() => calcularSinaisLinhas(contas), [contas]);
+  const [aberto, setAberto] = useState(false);
+  const [jev, setJev] = useState({});
+  const [aPedir, setAPedir] = useState(0);
+  const [erro, setErro] = useState("");
+  const assinaladas = linhas.filter((l) => l.sinais.length);
+  const pedir = async (alvos) => {
+    setErro(""); setAPedir((n) => n + alvos.length);
+    await executarEmLotes(alvos, async (l) => {
+      try { const v = await pedirParecerTarifarioJev(l, linhas.indexOf(l)); setJev((j) => ({ ...j, [l.numero]: v })); }
+      catch (e) { setErro("O Jev não respondeu a algumas linhas — tenta de novo."); }
+      setAPedir((n) => n - 1);
+    }, 4);
+  };
+  if (!linhas.length) return null;
+  return (
+    <div className="px-4 pt-2">
+      <div className="flex items-center gap-3 flex-wrap">
+        <button onClick={() => setAberto((v) => !v)} className="text-sm font-medium text-neutral-800">
+          {aberto ? "▾" : "▸"} Linhas a rever <span className="text-neutral-500 font-normal">({assinaladas.length} assinalada(s) de {linhas.length})</span>
+        </button>
+        {aberto && assinaladas.length > 0 && (
+          <button onClick={() => pedir(assinaladas.filter((l) => !jev[l.numero]))} disabled={aPedir > 0}
+            className="text-xs px-2.5 py-1 rounded-md bg-neutral-900 text-white disabled:opacity-40">
+            {aPedir > 0 ? `Jev a analisar… (${aPedir})` : "Pedir parecer do Jev às assinaladas"}
+          </button>
+        )}
+      </div>
+      {erro && <div className="text-[11px] text-amber-700 pt-1">{erro}</div>}
+      {aberto && (
+        <div className="space-y-1.5 pt-2 max-h-96 overflow-y-auto">
+          {linhas.map((l) => {
+            const v = jev[l.numero];
+            return (
+              <div key={l.numero} className="border border-neutral-100 rounded-md px-3 py-2 text-xs">
+                <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                  <div className="font-medium text-neutral-800">{l.numero} <span className="font-normal text-neutral-500">· {nomeTarifarioCurto(l.tarifario) || l.tarifario}</span></div>
+                  <div className="flex gap-1 flex-wrap">
+                    {l.sinais.length === 0 && <span className="text-neutral-400">sem sinais</span>}
+                    {l.sinais.map((s) => <span key={s.k} className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700">{ROTULOS_SINAL[s.k]}</span>)}
+                  </div>
+                </div>
+                {l.sinais.map((s) => <div key={s.k} className="text-neutral-600">• {s.t}</div>)}
+                <div className="pt-1 flex items-center gap-2 flex-wrap">
+                  {v ? (
+                    <span className={v.ajuste === "adequado" ? "text-emerald-700" : "text-amber-700"}>
+                      Jev: {v.ajuste}{v.oportunidade != null ? ` · oportunidade ${v.oportunidade}/4` : ""} <span className="text-neutral-400">({VEREDITOS_TARIFARIO[v.ajuste] || ""})</span>
+                    </span>
+                  ) : (
+                    <button onClick={() => pedir([l])} disabled={aPedir > 0} className="text-[11px] text-neutral-500 hover:text-neutral-900 underline disabled:opacity-40">Analisar com o Jev</button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AnaliseFaturasView() {
   const { todosClientes, obterExtras, definirExtras } = useClientesNovos();
   // Fase 3, Passo 2 (2026-09-20) — migração completa para a nuvem (Storage + cache em
@@ -9582,6 +9714,7 @@ function AnaliseFaturasView() {
                   )}
                 </div>
               )}
+              <LinhasARever contas={resumo.contas} />
               {/* Mesma função geradora do ficheiro exportado (gerarHtmlAnaliseFaturas) — nunca
                   duas versões da lógica de apresentação. O srcDoc é recriado sempre que o
                   resumo muda; a altura ajusta-se ao conteúdo real via onLoad. */}
