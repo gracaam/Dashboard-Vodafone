@@ -5555,6 +5555,7 @@ const PROSPETOS_BASE = [];
 const PONTOS = [
   { id: "assuntos", label: "Para começar o dia", eyebrow: "Quem contactar hoje", icone: "lista", ready: true },
   { id: "assuntos-progresso", label: "Assuntos em Progresso", eyebrow: "Assuntos em curso", icone: "conversa", ready: true },
+  { id: "relatorios", label: "Relatórios", eyebrow: "Desempenho", icone: "grafico", ready: true },
   { id: "negocios", label: "Negócios do Trimestre", eyebrow: "Pipeline comercial", icone: "grafico", ready: true },
   { id: "comissoes", label: "Comissões", eyebrow: "Remuneração", icone: "euro", ready: true },
   { id: "clientes", label: "Clientes", eyebrow: "Carteira de clientes", icone: "pessoas", ready: true },
@@ -7538,6 +7539,523 @@ function avisosCampanhas(catalogo, clientes, mapaContratos, extras, hoje = new D
     const n = (a.tem || a.falta) ? clientes.filter((c) => { const { tem } = mapaProdutosDoCliente(c, mapaContratos.get(String(c.n)), extras && extras[c.n], hojeIso); return (!a.tem || tem[a.tem]) && (!a.falta || !tem[a.falta]); }).length : null;
     return { p, diasFim, nova, n, aTerminar: diasFim != null && diasFim >= 0 && diasFim <= DIAS_CAMPANHA_A_TERMINAR };
   }).filter((x) => x.nova || x.aTerminar).sort((x, y) => (x.diasFim ?? 999) - (y.diasFim ?? 999));
+}
+
+/* ================= RELATÓRIOS (2026-10-06) =================
+   Relatório semanal / mensal / trimestral do desempenho comercial. Só lê o que já existe:
+   histórico de contactos e propostas das fichas, e os negócios implementados (pela
+   "Data de início", RLMC ajustada — mesmo critério do Resumo da semana). As indicações
+   vêm do Jev (TypeSafe), que NÃO escreve texto: responde a 2 perguntas tipadas (área onde
+   concentrar o esforço + nível de ritmo) e o dashboard mostra o conselho pré-escrito
+   dessa área. Ao Jev só vão totais do período — nunca nomes, NIFs nem contactos.
+   O Smart Solutions inclui IoT: os negócios não distinguem IoT de outros SS. */
+const TIPOS_RELATORIO = [["semana", "Semanal"], ["mes", "Mensal"], ["trimestre", "Trimestral"]];
+const AREAS_FOCO_RELATORIO = {
+  contactos: { rotulo: "Contactar mais clientes", jev: "O número de contactos com clientes está baixo ou a descer.", conselho: "Reserva 30 minutos por dia para contactos. Usa «Para começar o dia»: sem contacto há 90+ dias, permanências a terminar e propostas sem resposta." },
+  propostas: { rotulo: "Entregar mais propostas", jev: "Há contactos mas poucas propostas entregues.", conselho: "Transforma cada conversa em proposta: depois do contacto, entrega a proposta em 48 horas. Começa pelos clientes com tarifários extintos e permanências a terminar." },
+  fecho: { rotulo: "Fechar as propostas entregues", jev: "Entregam-se propostas mas poucas fecham.", conselho: "Faz seguimento das propostas entregues há 7+ dias (aparecem em «Para começar o dia»): liga, esclarece dúvidas e propõe uma data de fecho." },
+  refidelizacao: { rotulo: "Garantir mais refidelizações", jev: "As refidelizações estão abaixo do que seria de esperar.", conselho: "Antecipa as renovações: trabalha as permanências a 1, 3 e 6 meses da «Carteira a Fidelizar» antes de a concorrência chegar primeiro." },
+  nova_movel: { rotulo: "Mais Nova Receita Móvel", jev: "Falta Nova Receita em voz/dados móveis.", conselho: "Procura clientes só com fixo ou com poucos móveis no «Mapa de produtos» e propõe linhas móveis adicionais ou portabilidades." },
+  nova_fixo: { rotulo: "Mais Nova Receita Fixo", jev: "Falta Nova Receita em serviços fixos.", conselho: "Procura clientes só com móvel no «Mapa de produtos» e propõe fixo, internet ou One Net." },
+  smart: { rotulo: "Mais Smart Solutions (incl. IoT)", jev: "Falta Nova Receita em Smart Solutions, incluindo IoT.", conselho: "Usa a «Campanha por Produto» para encontrar os clientes com melhor adequação a Smart Solutions / IoT e contacta os 5 primeiros." },
+  ritmo_bom: { rotulo: "Manter o ritmo", jev: "Os números estão bons ou em linha com os objetivos.", conselho: "Está a correr bem. Mantém a rotina e usa a folga para clientes de maior valor ou para prospetar novos." },
+};
+const NIVEIS_RITMO_RELATORIO = ["Muito fraco: quase sem contactos nem negócios", "Fraco: abaixo do período anterior e dos objetivos", "Em linha: parecido com o período anterior", "Bom: acima do período anterior", "Excelente: claramente acima do anterior e dos objetivos"];
+
+function isoDeData(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+// [início, fim] aaaa-mm-dd do período; `desloc` 0 = atual, -1 = anterior, etc.
+function periodoRelatorio(tipo, desloc, hoje = new Date()) {
+  const y = hoje.getFullYear(), m = hoje.getMonth(), d = hoje.getDate();
+  let a, b;
+  if (tipo === "semana") { a = new Date(y, m, d - ((hoje.getDay() + 6) % 7) + 7 * desloc); b = new Date(a.getFullYear(), a.getMonth(), a.getDate() + 6); }
+  else if (tipo === "mes") { a = new Date(y, m + desloc, 1); b = new Date(y, m + desloc + 1, 0); }
+  else { const q = Math.floor(m / 3) * 3 + 3 * desloc; a = new Date(y, q, 1); b = new Date(y, q + 3, 0); }
+  return [isoDeData(a), isoDeData(b)];
+}
+function nomePeriodoRelatorio(tipo, per) {
+  const d = new Date(per[0] + "T00:00:00");
+  if (tipo === "mes") return labelMes(mesChaveDeData(d));
+  if (tipo === "trimestre") return labelTrimestre(trimestreChaveDeData(d));
+  return `Semana de ${formatarDataIsoPT(per[0])} a ${formatarDataIsoPT(per[1])}`;
+}
+
+function metricasRelatorio(clientes, negocios, per) {
+  const dentro = (d) => !!d && d.slice(0, 10) >= per[0] && d.slice(0, 10) <= per[1];
+  const m = { contactos: 0, clientesContactados: 0, porTipo: {}, entregues: 0, clientesComProposta: 0, fechadas: 0, porDia: {}, det: { contactos: [], propostas: [], fechadas: [], negocios: [] } };
+  clientes.forEach((c) => {
+    const cs = contactosOrdenados(c).filter((x) => dentro(x.em));
+    if (cs.length) {
+      m.clientesContactados++;
+      m.det.contactos.push({ nome: c.e, n: cs.length, tipos: [...new Set(cs.map((x) => x.tipo || "Outro"))].join(", "), ultimo: cs.map((x) => x.em).sort().pop(), nota: (cs.slice().sort((x, y) => y.em.localeCompare(x.em))[0].nota || "") });
+    }
+    cs.forEach((x) => { const t = x.tipo || "Outro"; m.contactos++; m.porTipo[t] = (m.porTipo[t] || 0) + 1; const d = x.em.slice(0, 10); m.porDia[d] = (m.porDia[d] || 0) + 1; });
+    const ps = Array.isArray(c.propostas) ? c.propostas : [];
+    const ent = ps.filter((p) => dentro(p.entregueEm));
+    if (ent.length) m.clientesComProposta++;
+    m.entregues += ent.length;
+    ent.forEach((p) => m.det.propostas.push({ nome: c.e, em: p.entregueEm, total: p.total || 0, servicos: (p.linhas || []).length, fechada: !!p.fechada }));
+    ps.filter((p) => p.fechada && dentro(p.fechadaEm)).forEach((p) => { m.fechadas++; m.det.fechadas.push({ nome: c.e, em: p.fechadaEm, total: p.total || 0, servicos: (p.linhas || []).length }); });
+  });
+  const soma = (l) => ({ n: l.length, valor: l.reduce((t, n) => t + (calcularRlmcAjustadaAtingimento(n) || 0), 0) });
+  const fech = negocios.filter((n) => n.estado === "IMPLEMENTADO" && dentro(n.dataInicio));
+  m.det.negocios = fech.map((n) => ({ nome: n.empresa || "", natureza: n.natureza === "REFIDELIZAÇÃO" ? "Refidelização" : "Nova Receita", categoria: n.categoria, tarifario: n.tarifario || "", qt: n.qt || 0, rlmc: calcularRlmcAjustadaAtingimento(n) || 0, data: n.dataInicio })).sort((x, y) => y.rlmc - x.rlmc);
+  m.negocios = { ...soma(fech), nova: soma(fech.filter((n) => n.natureza === "NRECEITA")), refid: soma(fech.filter((n) => n.natureza === "REFIDELIZAÇÃO")), porCategoria: {} };
+  RLMC_CARTOES.forEach(({ categoria }) => { m.negocios.porCategoria[categoria] = soma(fech.filter((n) => n.categoria === categoria)); });
+  return m;
+}
+
+// Progresso dos objetivos do trimestre do período (implementado e com o pipeline).
+function objetivosRelatorio(negocios, objetivosCategoria, per) {
+  const tri = trimestreChaveDeData(new Date(per[0] + "T00:00:00"));
+  const rlmc = (n) => calcularRlmcAjustadaAtingimento(n) || 0;
+  const doTri = negocios.filter((n) => trimestreChaveDeDataInicio(n.dataInicio) === tri);
+  return Object.entries(objetivosCategoria || {}).map(([categoria, objetivo]) => {
+    const real = doTri.filter((n) => n.estado === "IMPLEMENTADO" && n.categoria === categoria).reduce((t, n) => t + rlmc(n), 0);
+    const pipe = doTri.filter((n) => ESTADOS_PIPELINE_RESUMO.includes(n.estado) && n.categoria === categoria).reduce((t, n) => t + rlmc(n), 0);
+    const pct = (v) => (objetivo ? Math.round((v / objetivo) * 100) : 0);
+    return { categoria, label: (RLMC_CARTOES.find((x) => x.categoria === categoria) || {}).label || categoria, objetivo, real, pctReal: pct(real), pctProjecao: pct(real + pipe) };
+  });
+}
+
+// Pedido ao Jev: só totais. Devolve { foco, probFoco (2º lugar), ritmo } ou lança erro.
+async function pedirIndicacoesJev(tipo, atual, anterior, objetivos) {
+  const num = (m) => ({ contactos: m.contactos, clientesContactados: m.clientesContactados, propostasEntregues: m.entregues, propostasFechadas: m.fechadas, negociosFechados: m.negocios.n, refidelizacoes: m.negocios.refid.n, novaReceita: m.negocios.nova.n,
+    negociosPorCategoria: Object.fromEntries(Object.entries(m.negocios.porCategoria).map(([k, v]) => [k, v.n])) });
+  const state = { tipoRelatorio: tipo === "semana" ? "semanal" : tipo === "mes" ? "mensal" : "trimestral", periodoAtual: num(atual), periodoAnterior: num(anterior),
+    objetivosDoTrimestre: objetivos.map((o) => ({ categoria: o.label, atingidoPct: o.pctReal, comPipelinePct: o.pctProjecao })) };
+  const criteria = {};
+  Object.entries(AREAS_FOCO_RELATORIO).forEach(([k, v]) => { criteria[k] = v.jev; });
+  const questions = {
+    foco: { type: "choice", instructions: "O estado descreve a atividade comercial de um gestor de contas Vodafone Business num período (`periodoAtual`), comparada com o período anterior (`periodoAnterior`) e com os objetivos do trimestre (`objetivosDoTrimestre`). Em que área deve concentrar o esforço no próximo período?", criteria },
+    ritmo: { type: "score", instructions: "Quão forte foi a atividade comercial de `periodoAtual` face a `periodoAnterior` e aos `objetivosDoTrimestre`?", criteria: NIVEIS_RITMO_RELATORIO },
+  };
+  const r = await chamarRecomendarProdutos(state, questions);
+  const f = r && r.answers && r.answers.foco, s = r && r.answers && r.answers.ritmo;
+  if (!f || !f.choice) throw new Error("O Jev não devolveu resposta.");
+  const ordem = Object.entries(f.probabilities || {}).sort((a, b) => b[1] - a[1]);
+  const segundo = ordem[1] && ordem[1][1] > 0.25 && ordem[1][0] !== "ritmo_bom" ? ordem[1][0] : null;
+  return { foco: f.choice, confianca: f.confidence, segundo, ritmo: s && typeof s.score === "number" ? s.score : null };
+}
+
+function detalheImpressao(m) {
+  const e = escaparHtml, d = (iso) => (iso ? new Date(iso).toLocaleDateString("pt-PT") : "—");
+  const tab = (titulo, cab, linhas) => (linhas.length ? `<h2>${e(titulo)} (${linhas.length})</h2><table><tr>${cab.map((c) => `<th>${e(c)}</th>`).join("")}</tr>${linhas.map((l) => `<tr>${l.map((c) => `<td>${e(c)}</td>`).join("")}</tr>`).join("")}</table>` : "");
+  return tab("Contactos por cliente", ["Cliente", "Contactos", "Tipo", "Último", "Nota"], m.det.contactos.slice().sort((x, y) => y.n - x.n).map((l) => [l.nome, l.n, l.tipos, d(l.ultimo), l.nota || "—"]))
+    + tab("Propostas entregues", ["Cliente", "Entregue em", "Serviços", "Total mensal", "Estado"], m.det.propostas.map((l) => [l.nome, d(l.em), l.servicos, formatEuro(l.total), l.fechada ? "Fechada" : "Por fechar"]))
+    + tab("Propostas fechadas", ["Cliente", "Fechada em", "Serviços", "Total mensal"], m.det.fechadas.map((l) => [l.nome, d(l.em), l.servicos, formatEuro(l.total)]))
+    + tab("Negócios implementados", ["Empresa", "Natureza", "Categoria", "Tarifário", "Qt", "RLMC"], m.det.negocios.map((l) => [l.nome, l.natureza, (RLMC_CARTOES.find((c) => c.categoria === l.categoria) || {}).label || l.categoria, nomeTarifarioCurto(l.tarifario) || "—", l.qt, formatEuroArredondado(l.rlmc)]));
+}
+
+function gerarHtmlRelatorio(tipo, per, atual, anterior, objetivos, jev) {
+  const e = escaparHtml, eur = formatEuroArredondado;
+  const seta = (a, b) => (a === b ? "" : a > b ? ' <span class="up">▲</span>' : ' <span class="dn">▼</span>');
+  const linha = (t, a, b, euro) => `<tr><td>${e(t)}</td><td class="n"><b>${euro ? eur(a) : a}</b>${seta(a, b)}</td><td class="n mut">${euro ? eur(b) : b}</td></tr>`;
+  const taxa = (m) => (m.entregues ? `${Math.round((m.fechadas / m.entregues) * 100)}%` : "—");
+  const cats = RLMC_CARTOES.map(({ categoria, label }) => linha(label, atual.negocios.porCategoria[categoria].n, anterior.negocios.porCategoria[categoria].n)).join("");
+  const tiposContacto = Object.entries(atual.porTipo).map(([t, n]) => `${e(t)}: ${n}`).join(" · ") || "—";
+  const objs = objetivos.length ? `<h2>Objetivos do trimestre</h2><table>${objetivos.map((o) => `<tr><td>${e(o.label)}</td><td class="n">${eur(o.real)} / ${eur(o.objetivo)}</td><td class="n"><b>${o.pctReal}%</b> <span class="mut">→ ${o.pctProjecao}% com o pipeline</span></td></tr>`).join("")}</table>` : "";
+  const ritmoTxt = jev && jev.ritmo != null ? ["Muito fraco", "Fraco", "Em linha", "Bom", "Excelente"][Math.max(0, Math.min(4, Math.round(jev.ritmo)))] : null;
+  const ind = jev ? `<h2>Indicações (Jev)</h2><div class="box"><p>Ritmo do período: <b>${e(ritmoTxt || "—")}</b></p><p>Foco para o próximo período: <b>${e(AREAS_FOCO_RELATORIO[jev.foco].rotulo)}</b></p><p>${e(AREAS_FOCO_RELATORIO[jev.foco].conselho)}</p>${jev.segundo ? `<p class="mut">Em segundo lugar: <b>${e(AREAS_FOCO_RELATORIO[jev.segundo].rotulo)}</b>. ${e(AREAS_FOCO_RELATORIO[jev.segundo].conselho)}</p>` : ""}</div>` : "";
+  return `<!doctype html><html lang="pt"><head><meta charset="utf-8"><title>Relatório ${e(nomePeriodoRelatorio(tipo, per))}</title><style>
+body{font:13px/1.45 -apple-system,Segoe UI,Arial,sans-serif;color:#1a1a1a;margin:0;padding:24px 28px}
+h1{font-size:20px;margin:0}h2{font-size:14px;margin:22px 0 6px;border-bottom:2px solid #e60000;padding-bottom:3px}
+.sub{color:#555;margin:2px 0 14px}table{width:100%;border-collapse:collapse;table-layout:fixed}td:first-child,th:first-child{width:48%}td,th{padding:4px 6px;border-bottom:1px solid #eee;text-align:left}
+th{color:#555;font-weight:600}.n{text-align:right;white-space:nowrap}.mut{color:#666}.up{color:#0a7d33}.dn{color:#c40000}
+.box{background:#f6f6f6;border-left:4px solid #e60000;padding:8px 12px}.box p{margin:4px 0}
+.btnprint{display:none}@media print{body{padding:0}}
+</style></head><body>
+<h1>Relatório ${e(TIPOS_RELATORIO.find((t) => t[0] === tipo)[1].toLowerCase())}</h1>
+<div class="sub">${e(nomePeriodoRelatorio(tipo, per))}${tipo === "semana" ? "" : ` · ${e(formatarDataIsoPT(per[0]))} a ${e(formatarDataIsoPT(per[1]))}`} · comparado com o período anterior</div>
+<h2>Atividade</h2><table><tr><th></th><th class="n">Este período</th><th class="n">Anterior</th></tr>
+${linha("Contactos registados", atual.contactos, anterior.contactos)}
+${linha("Clientes contactados", atual.clientesContactados, anterior.clientesContactados)}
+${linha("Propostas entregues", atual.entregues, anterior.entregues)}
+${linha("Clientes com proposta entregue", atual.clientesComProposta, anterior.clientesComProposta)}
+${linha("Propostas fechadas", atual.fechadas, anterior.fechadas)}
+<tr><td>Taxa de fecho (fechadas / entregues)</td><td class="n"><b>${taxa(atual)}</b></td><td class="n mut">${taxa(anterior)}</td></tr></table>
+<div class="mut" style="margin-top:4px">Contactos por tipo: ${tiposContacto}</div>
+<h2>Negócios implementados</h2><table><tr><th></th><th class="n">Este período</th><th class="n">Anterior</th></tr>
+${linha("Negócios fechados", atual.negocios.n, anterior.negocios.n)}
+${linha("Valor total (RLMC)", atual.negocios.valor, anterior.negocios.valor, true)}
+${linha("Refidelizações", atual.negocios.refid.n, anterior.negocios.refid.n)}
+${linha("Valor das refidelizações (RLMC)", atual.negocios.refid.valor, anterior.negocios.refid.valor, true)}
+${linha("Nova Receita", atual.negocios.nova.n, anterior.negocios.nova.n)}
+${linha("Valor da Nova Receita (RLMC)", atual.negocios.nova.valor, anterior.negocios.nova.valor, true)}</table>
+<h2>Negócios por categoria</h2><table><tr><th></th><th class="n">Este período</th><th class="n">Anterior</th></tr>${cats}</table>
+<div class="mut" style="margin-top:4px">Smart Solutions inclui IoT (os negócios não os distinguem).</div>
+${objs}${ind}
+${detalheImpressao(atual)}
+</body></html>`;
+}
+
+/* Vista dinâmica dos Relatórios (2026-10-06): cartões com tendência, gráfico de evolução com
+   tooltip, anéis de objetivos, funil, categorias e indicações do Jev. Tudo em SVG/CSS
+   (sem bibliotecas). Clicar num cartão muda a métrica do gráfico. O PDF usa gerarHtmlRelatorio. */
+const METRICAS_REL = [
+  { k: "contactos", label: "Contactos", cor: "#2563eb", get: (m) => m.contactos },
+  { k: "entregues", label: "Propostas entregues", cor: "#e60000", get: (m) => m.entregues },
+  { k: "fechadas", label: "Propostas fechadas", cor: "#059669", get: (m) => m.fechadas },
+  { k: "negocios", label: "Negócios fechados", cor: "#d97706", get: (m) => m.negocios.n },
+  { k: "valor", label: "Valor fechado (RLMC)", cor: "#7c3aed", euro: true, get: (m) => m.negocios.valor },
+];
+const PERIODOS_NO_GRAFICO = 8;
+function rotuloCurtoPeriodo(tipo, per) {
+  const d = new Date(per[0] + "T00:00:00");
+  if (tipo === "mes") return MESES_PT_LABEL[d.getMonth()].slice(0, 3);
+  if (tipo === "trimestre") return `T${Math.floor(d.getMonth() / 3) + 1} ${String(d.getFullYear()).slice(2)}`;
+  return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function caminhoSuave(pts) {
+  if (!pts.length) return "";
+  return pts.reduce((d, p, i) => { if (!i) return `M${p.x},${p.y}`; const q = pts[i - 1], mx = (q.x + p.x) / 2; return `${d} C${mx},${q.y} ${mx},${p.y} ${p.x},${p.y}`; }, "");
+}
+function fmtMetrica(met, v) { return met.euro ? formatEuroArredondado(v) : String(v); }
+
+function Sparkline({ valores, cor }) {
+  const w = 120, h = 36, max = Math.max(1, ...valores), n = valores.length;
+  const pts = valores.map((v, i) => ({ x: n > 1 ? (i / (n - 1)) * w : w / 2, y: h - 4 - (v / max) * (h - 8) }));
+  const linha = caminhoSuave(pts);
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-9" aria-hidden="true" preserveAspectRatio="none">
+      <path d={`${linha} L${w},${h} L0,${h} Z`} fill={cor} opacity="0.12" />
+      <path d={linha} fill="none" stroke={cor} strokeWidth="2" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      {pts.length > 0 && <circle cx={pts[n - 1].x} cy={pts[n - 1].y} r="3" fill={cor} />}
+    </svg>
+  );
+}
+
+function ChipVariacao({ atual, anterior, euro }) {
+  const dif = atual - anterior;
+  const pct = anterior ? Math.round((dif / anterior) * 100) : null;
+  const cor = dif > 0 ? "bg-emerald-50 text-emerald-700" : dif < 0 ? "bg-red-50 text-red-700" : "bg-neutral-100 text-neutral-500";
+  const txt = dif === 0 ? "= igual" : `${dif > 0 ? "▲ +" : "▼ "}${euro ? formatEuroArredondado(dif) : dif}${pct != null ? ` (${pct > 0 ? "+" : ""}${pct}%)` : ""}`;
+  return <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-full whitespace-nowrap ${cor}`}>{txt}</span>;
+}
+
+function GraficoEvolucao({ pontos, met }) {
+  const [hover, setHover] = useState(null);
+  const W = 640, H = 230, PL = 36, PR = 14, PT = 16, PB = 28;
+  const max = Math.max(1, ...pontos.map((p) => p.valor)) * 1.15, n = pontos.length;
+  const X = (i) => PL + (n > 1 ? (i / (n - 1)) * (W - PL - PR) : (W - PL - PR) / 2);
+  const Y = (v) => PT + (1 - v / max) * (H - PT - PB);
+  const pts = pontos.map((p, i) => ({ x: X(i), y: Y(p.valor) }));
+  const linha = caminhoSuave(pts);
+  const grelha = [0, 0.5, 1].map((f) => ({ y: Y((max / 1.15) * f), v: Math.round((max / 1.15) * f) }));
+  const mover = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * W;
+    setHover(Math.max(0, Math.min(n - 1, Math.round(((x - PL) / (W - PL - PR)) * (n - 1)))));
+  };
+  const h = hover != null ? hover : n - 1;
+  return (
+    <div className="relative">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`Evolução de ${met.label} nos últimos ${n} períodos`} onMouseMove={mover} onMouseLeave={() => setHover(null)}>
+        <defs><linearGradient id={`g-${met.k}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={met.cor} stopOpacity="0.28" /><stop offset="1" stopColor={met.cor} stopOpacity="0" /></linearGradient></defs>
+        {grelha.map((g, i) => (<g key={i}><line x1={PL} x2={W - PR} y1={g.y} y2={g.y} stroke="#e5e5e5" strokeDasharray="3 4" /><text x={PL - 6} y={g.y + 4} textAnchor="end" fontSize="10" fill="#8a8a8a">{met.euro ? `${g.v}€` : g.v}</text></g>))}
+        <path d={`${linha} L${X(n - 1)},${Y(0)} L${X(0)},${Y(0)} Z`} fill={`url(#g-${met.k})`} />
+        <path d={linha} fill="none" stroke={met.cor} strokeWidth="3" strokeLinecap="round" />
+        {pontos.map((p, i) => (<text key={i} x={X(i)} y={H - 8} textAnchor="middle" fontSize="10" fill={i === n - 1 ? "#1a1a1a" : "#8a8a8a"} fontWeight={i === n - 1 ? 700 : 400}>{p.label}</text>))}
+        <line x1={X(h)} x2={X(h)} y1={PT} y2={Y(0)} stroke={met.cor} strokeOpacity="0.35" />
+        {pts.map((p, i) => (<circle key={i} cx={p.x} cy={p.y} r={i === h ? 6 : 3} fill="#fff" stroke={met.cor} strokeWidth="2.5" />))}
+      </svg>
+      <div className="absolute -translate-x-1/2 -translate-y-full pointer-events-none bg-neutral-900 text-white text-xs font-semibold rounded-lg px-2.5 py-1 whitespace-nowrap shadow-lg"
+        style={{ left: `${(X(h) / W) * 100}%`, top: `${(Y(pontos[h].valor) / H) * 100 - 3}%` }}>
+        {fmtMetrica(met, pontos[h].valor)} <span className="font-normal text-neutral-300">· {pontos[h].nome}</span>
+      </div>
+    </div>
+  );
+}
+
+function AnelProgresso({ pct, pctProj, tam = 150, rotulo, sub }) {
+  const r = 52, c = 2 * Math.PI * r, [m, setM] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setM(true), 60); return () => clearTimeout(t); }, []);
+  const cor = pct >= 90 ? "#059669" : pctProj >= 90 ? "#d97706" : "#e60000";
+  const arco = (p) => `${m ? (Math.min(100, p) / 100) * c : 0} ${c}`;
+  return (
+    <div className="relative" style={{ width: tam, height: tam }}>
+      <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90" role="img" aria-label={`${rotulo}: ${pct}% atingido, ${pctProj}% com o pipeline`}>
+        <circle cx="60" cy="60" r={r} fill="none" stroke="#eeeeee" strokeWidth="12" />
+        <circle cx="60" cy="60" r={r} fill="none" stroke={cor} strokeOpacity="0.25" strokeWidth="12" strokeLinecap="round" strokeDasharray={arco(pctProj)} style={{ transition: "stroke-dasharray .9s ease" }} />
+        <circle cx="60" cy="60" r={r} fill="none" stroke={cor} strokeWidth="12" strokeLinecap="round" strokeDasharray={arco(pct)} style={{ transition: "stroke-dasharray .9s ease" }} />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+        <div className="text-3xl font-extrabold tracking-tight">{pct}%</div>
+        <div className="text-[10px] text-neutral-500 leading-tight">{sub}</div>
+      </div>
+    </div>
+  );
+}
+
+function BarraAnimada({ pct, cor, fundo = "bg-neutral-100", altura = "h-2" }) {
+  const [m, setM] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setM(true), 60); return () => clearTimeout(t); }, []);
+  return <div className={`${altura} ${fundo} rounded-full overflow-hidden`}><div className="h-full rounded-full" style={{ width: m ? `${Math.max(0, Math.min(100, pct))}%` : 0, background: cor, transition: "width .8s ease" }} /></div>;
+}
+
+function CartaoRel({ titulo, children, className = "", acao }) {
+  return (
+    <section className={`bg-white rounded-2xl border border-neutral-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.04)] p-4 ${className}`}>
+      <div className="flex items-center justify-between mb-3"><h2 className="text-sm font-semibold text-neutral-800">{titulo}</h2>{acao}</div>
+      {children}
+    </section>
+  );
+}
+
+function BarrasPeriodo({ porDia, per }) {
+  const hojeIso = isoDeData(new Date());
+  const fim = per[1] < hojeIso ? per[1] : hojeIso;
+  const dias = [];
+  for (let d = new Date(per[0] + "T00:00:00"); isoDeData(d) <= fim; d.setDate(d.getDate() + 1)) dias.push(isoDeData(d));
+  const semanal = dias.length > 31;
+  const baldes = [];
+  if (semanal) { for (let i = 0; i < dias.length; i += 7) { const g = dias.slice(i, i + 7); baldes.push({ label: `S${baldes.length + 1}`, nome: `${formatarDataIsoPT(g[0])} a ${formatarDataIsoPT(g[g.length - 1])}`, v: g.reduce((t, x) => t + (porDia[x] || 0), 0) }); } }
+  else dias.forEach((x) => baldes.push({ label: x.slice(8), nome: formatarDataIsoPT(x), v: porDia[x] || 0 }));
+  const max = Math.max(1, ...baldes.map((b) => b.v)), n = Math.max(1, baldes.length), W = 640, H = 150, bw = Math.min(40, (W - 20) / n - 4);
+  const [h, setH] = useState(null);
+  const [m, setM] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setM(true), 60); return () => clearTimeout(t); }, []);
+  return (
+    <div className="relative">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Contactos registados por dia">
+        <line x1="0" x2={W} y1={H - 22} y2={H - 22} stroke="#e5e5e5" />
+        {baldes.map((b, i) => { const x = 10 + (i + 0.5) * ((W - 20) / n), alt = (b.v / max) * (H - 50); return (
+          <g key={i} onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)}>
+            <rect x={x - bw / 2 - 2} y="0" width={bw + 4} height={H} fill="transparent" />
+            <rect x={x - bw / 2} y={H - 22 - (m ? alt : 0)} width={bw} height={m ? alt : 0} rx="3" fill={h === i ? "#1d4ed8" : "#2563eb"} fillOpacity={b.v ? 1 : 0.15} style={{ transition: "all .6s ease" }} />
+            {b.v > 0 && <text x={x} y={H - 26 - alt} textAnchor="middle" fontSize="10" fontWeight="700" fill="#262626">{b.v}</text>}
+            {(n <= 16 || i % Math.ceil(n / 16) === 0) && <text x={x} y={H - 7} textAnchor="middle" fontSize="9" fill="#8a8a8a">{b.label}</text>}
+          </g>); })}
+      </svg>
+      {h != null && <div className="absolute top-0 right-0 bg-neutral-900 text-white text-xs rounded-lg px-2.5 py-1 pointer-events-none">{baldes[h].nome}: <b>{baldes[h].v}</b> contacto{baldes[h].v === 1 ? "" : "s"}</div>}
+    </div>
+  );
+}
+
+function TabelaDetalhe({ colunas, linhas, vazio }) {
+  const [tudo, setTudo] = useState(false);
+  const vis = tudo ? linhas : linhas.slice(0, 6);
+  if (!linhas.length) return <div className="text-xs text-neutral-400 py-2">{vazio}</div>;
+  return (
+    <div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead><tr className="text-neutral-500 text-left">{colunas.map((c) => <th key={c.t} scope="col" className={`font-medium py-1.5 pr-3 ${c.dir ? "text-right" : ""}`}>{c.t}</th>)}</tr></thead>
+          <tbody>{vis.map((l, i) => (
+            <tr key={i} className="border-t border-neutral-100">{colunas.map((c) => <td key={c.t} className={`py-1.5 pr-3 ${c.dir ? "text-right whitespace-nowrap" : ""} ${c.forte ? "font-medium" : "text-neutral-600"}`}>{c.v(l)}</td>)}</tr>
+          ))}</tbody>
+        </table>
+      </div>
+      {linhas.length > 6 && <button onClick={() => setTudo((v) => !v)} className="text-xs text-neutral-500 underline mt-1">{tudo ? "Mostrar menos" : `Ver todos (${linhas.length})`}</button>}
+    </div>
+  );
+}
+
+function imprimirHtmlRelatorio(html) {
+  const f = document.createElement("iframe");
+  f.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
+  f.onload = () => { try { f.contentWindow.focus(); f.contentWindow.print(); } finally { setTimeout(() => f.remove(), 3000); } };
+  f.srcdoc = html;
+  document.body.appendChild(f);
+}
+
+function RelatoriosView() {
+  const { todosClientes } = useClientesNovos();
+  const { negocios } = useNegocios();
+  const { objetivosCategoriaDoTrimestre } = useObjetivosTrimestrais();
+  const [tipo, setTipo] = useState("semana");
+  const [desloc, setDesloc] = useState(0);
+  const [metSel, setMetSel] = useState("contactos");
+  const [jevPor, setJevPor] = useState({});
+  const [aPedir, setAPedir] = useState(false);
+  const [erro, setErro] = useState("");
+  const serie = useMemo(() => Array.from({ length: PERIODOS_NO_GRAFICO }, (_, i) => {
+    const per = periodoRelatorio(tipo, desloc - (PERIODOS_NO_GRAFICO - 1 - i));
+    return { per, label: rotuloCurtoPeriodo(tipo, per), nome: nomePeriodoRelatorio(tipo, per), m: metricasRelatorio(todosClientes, negocios, per) };
+  }), [tipo, desloc, todosClientes, negocios]);
+  const atual = serie[serie.length - 1], anterior = serie[serie.length - 2];
+  const per = atual.per, a = atual.m, b = anterior.m;
+  const objetivos = useMemo(() => objetivosRelatorio(negocios, objetivosCategoriaDoTrimestre(trimestreChaveDeData(new Date(per[0] + "T00:00:00"))), per), [negocios, per, objetivosCategoriaDoTrimestre]);
+  const chave = `${tipo}|${per[0]}`;
+  const jev = jevPor[chave] || null;
+  const met = METRICAS_REL.find((x) => x.k === metSel);
+  const firebaseUser = useFirebaseAuthUser();
+  const mapaContratos = useContratosPermanencia(firebaseUser);
+  const [detSel, setDetSel] = useState("contactos");
+  const pendentes = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
+  const pipeline = useMemo(() => {
+    const tri = trimestreChaveDeData(new Date(per[0] + "T00:00:00"));
+    return [["EM NEGOCIAÇÃO", "Em negociação", "#d97706"], ["DATA FUTURA", "Data futura", "#0891b2"], ["EM IMPLEMENTAÇÃO", "Em implementação", "#7c3aed"], ["IMPLEMENTADO", "Implementado", "#059669"], ["PERDIDO", "Perdido", "#a3a3a3"]].map(([est, label, cor]) => {
+      const l = negocios.filter((n) => n.estado === est && trimestreChaveDeDataInicio(n.dataInicio) === tri);
+      return { label, cor, n: l.length, valor: l.reduce((t, n) => t + (calcularRlmcAjustadaAtingimento(n) || 0), 0) };
+    });
+  }, [negocios, per]);
+  const totObj = objetivos.reduce((t, o) => t + o.objetivo, 0), totReal = objetivos.reduce((t, o) => t + o.real, 0);
+  const totProj = objetivos.reduce((t, o) => t + (o.pctProjecao / 100) * o.objetivo, 0);
+  const pctObj = totObj ? Math.round((totReal / totObj) * 100) : 0, pctObjProj = totObj ? Math.round((totProj / totObj) * 100) : 0;
+  const pedir = async () => {
+    setAPedir(true); setErro("");
+    try { const r = await pedirIndicacoesJev(tipo, a, b, objetivos); setJevPor((p) => ({ ...p, [chave]: r })); }
+    catch (e) { setErro(`Não foi possível obter as indicações do Jev: ${e.message}`); }
+    setAPedir(false);
+  };
+  const btn = "text-sm px-3.5 py-1.5 rounded-full border transition-colors";
+  const funil = [["Contactos registados", a.contactos, "#2563eb"], ["Clientes contactados", a.clientesContactados, "#0891b2"], ["Propostas entregues", a.entregues, "#e60000"], ["Propostas fechadas", a.fechadas, "#059669"]];
+  const maxCat = Math.max(1, ...RLMC_CARTOES.map((c) => Math.max(a.negocios.porCategoria[c.categoria].n, b.negocios.porCategoria[c.categoria].n)));
+  const rotRitmo = ["Muito fraco", "Fraco", "Em linha", "Bom", "Excelente"];
+  const ritmoIdx = jev && jev.ritmo != null ? Math.max(0, Math.min(4, Math.round(jev.ritmo))) : null;
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="inline-flex bg-neutral-100 rounded-full p-1" role="group" aria-label="Tipo de relatório">
+          {TIPOS_RELATORIO.map(([k, l]) => (
+            <button key={k} onClick={() => { setTipo(k); setDesloc(0); setErro(""); }} aria-pressed={tipo === k}
+              className={`text-sm px-4 py-1.5 rounded-full transition-all ${tipo === k ? "bg-white shadow font-semibold text-neutral-900" : "text-neutral-500 hover:text-neutral-800"}`}>{l}</button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1">
+          <button onClick={() => setDesloc((d) => d - 1)} aria-label="Período anterior" className={`${btn} border-neutral-200 hover:bg-neutral-50 px-3`}>◀</button>
+          <span className="text-sm font-medium text-neutral-800 min-w-[11rem] text-center">{atual.nome}</span>
+          <button onClick={() => setDesloc((d) => Math.min(0, d + 1))} disabled={desloc >= 0} aria-label="Período seguinte" className={`${btn} border-neutral-200 hover:bg-neutral-50 px-3 disabled:opacity-30`}>▶</button>
+          {desloc < 0 && <button onClick={() => setDesloc(0)} className="text-xs text-neutral-500 underline ml-1">Hoje</button>}
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <button onClick={pedir} disabled={aPedir} className={`${btn} border-emerald-600 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40`}>{aPedir ? "A pedir ao Jev…" : jev ? "Atualizar indicações" : "Pedir indicações ao Jev"}</button>
+          <button onClick={() => imprimirHtmlRelatorio(gerarHtmlRelatorio(tipo, per, a, b, objetivos, jev))} className={`${btn} bg-neutral-900 text-white border-neutral-900 hover:bg-neutral-700`}>Imprimir / PDF</button>
+        </div>
+      </div>
+      {erro && <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{erro}</div>}
+
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
+        {METRICAS_REL.map((x) => (
+          <button key={x.k} onClick={() => setMetSel(x.k)} aria-pressed={metSel === x.k}
+            className={`text-left bg-white rounded-2xl border p-3.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] transition-all hover:-translate-y-0.5 hover:shadow-md ${metSel === x.k ? "border-neutral-900 ring-1 ring-neutral-900" : "border-neutral-200/80"}`}>
+            <div className="flex items-center gap-1.5 text-xs text-neutral-500"><span className="w-2 h-2 rounded-full" style={{ background: x.cor }} />{x.label}</div>
+            <div className="flex items-end justify-between gap-2 mt-1.5">
+              <div className="text-3xl font-extrabold tracking-tight leading-none">{fmtMetrica(x, x.get(a))}</div>
+              <ChipVariacao atual={x.get(a)} anterior={x.get(b)} euro={x.euro} />
+            </div>
+            <div className="mt-2"><Sparkline valores={serie.map((s) => x.get(s.m))} cor={x.cor} /></div>
+          </button>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+        <CartaoRel titulo={`Evolução · ${met.label}`} className="xl:col-span-2" acao={<span className="text-[11px] text-neutral-400">últimos {PERIODOS_NO_GRAFICO} períodos · passa o rato</span>}>
+          <GraficoEvolucao pontos={serie.map((s) => ({ label: s.label, nome: s.nome, valor: met.get(s.m) }))} met={met} />
+        </CartaoRel>
+        <CartaoRel titulo={`Objetivos · ${labelTrimestre(trimestreChaveDeData(new Date(per[0] + "T00:00:00")))}`}>
+          {objetivos.length ? (
+            <div className="space-y-3">
+              <div className="flex justify-center"><AnelProgresso pct={pctObj} pctProj={pctObjProj} sub={`${formatEuroArredondado(totReal)} / ${formatEuroArredondado(totObj)}`} rotulo="Objetivos do trimestre" /></div>
+              <div className="text-center text-[11px] text-neutral-500">Com o pipeline: <b className="text-neutral-800">{pctObjProj}%</b></div>
+              <div className="space-y-2">
+                {objetivos.map((o) => (
+                  <div key={o.categoria}>
+                    <div className="flex justify-between text-[11px] text-neutral-600"><span className="truncate">{o.label}</span><b>{o.pctReal}% <span className="font-normal text-neutral-400">→ {o.pctProjecao}%</span></b></div>
+                    <BarraAnimada pct={o.pctReal} cor={o.pctReal >= 90 ? "#059669" : o.pctProjecao >= 90 ? "#d97706" : "#e60000"} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : <div className="text-xs text-neutral-400">Sem objetivos definidos para este trimestre (Comissões).</div>}
+        </CartaoRel>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+        <CartaoRel titulo="Funil do período">
+          <div className="space-y-2.5">
+            {funil.map(([t, v, cor], i) => (
+              <div key={t}>
+                <div className="flex justify-between text-xs"><span className="text-neutral-600">{t}</span><span><b>{v}</b>{i > 0 && funil[i - 1][1] > 0 && <span className="text-neutral-400"> · {Math.round((v / funil[i - 1][1]) * 100)}%</span>}</span></div>
+                <BarraAnimada pct={funil[0][1] ? (v / funil[0][1]) * 100 : 0} cor={cor} altura="h-2.5" />
+              </div>
+            ))}
+            <div className="text-[11px] text-neutral-400">% = passagem do passo anterior. Contactos por tipo: {Object.entries(a.porTipo).map(([t, n]) => `${t} ${n}`).join(" · ") || "—"}</div>
+          </div>
+        </CartaoRel>
+        <CartaoRel titulo="Negócios por categoria" acao={<span className="text-[11px] text-neutral-400"><span className="inline-block w-2 h-2 rounded-full bg-neutral-800 mr-1" />agora <span className="inline-block w-2 h-2 rounded-full bg-neutral-300 mx-1 ml-2" />anterior</span>}>
+          <div className="space-y-2.5">
+            {RLMC_CARTOES.map((c) => { const x = a.negocios.porCategoria[c.categoria], y = b.negocios.porCategoria[c.categoria]; return (
+              <div key={c.categoria}>
+                <div className="flex justify-between text-xs"><span className="text-neutral-600 truncate">{c.label}</span><span><b>{x.n}</b> <span className="text-neutral-400">{formatEuroArredondado(x.valor)}</span></span></div>
+                <div className="space-y-0.5"><BarraAnimada pct={(x.n / maxCat) * 100} cor="#262626" altura="h-1.5" /><BarraAnimada pct={(y.n / maxCat) * 100} cor="#d4d4d4" altura="h-1.5" /></div>
+              </div>); })}
+            <div className="text-[11px] text-neutral-400">Smart Solutions inclui IoT (os negócios não os distinguem). Refidelizações: {a.negocios.refid.n} · Nova Receita: {a.negocios.nova.n}</div>
+          </div>
+        </CartaoRel>
+        <CartaoRel titulo="Indicações do Jev" className="lg:col-span-2 xl:col-span-1">
+          {jev ? (
+            <div className="space-y-3">
+              <div>
+                <div className="text-[11px] text-neutral-500 mb-1">Ritmo do período</div>
+                <div className="flex gap-1">{rotRitmo.map((r, i) => <div key={r} className="flex-1 h-2 rounded-full" style={{ background: i <= ritmoIdx ? ["#e60000", "#ea580c", "#d97706", "#65a30d", "#059669"][ritmoIdx] : "#eeeeee" }} />)}</div>
+                <div className="text-sm font-semibold mt-1">{ritmoIdx != null ? rotRitmo[ritmoIdx] : "—"}</div>
+              </div>
+              <div className="rounded-xl bg-red-50 border border-red-100 p-3">
+                <div className="text-[11px] text-red-700 font-semibold uppercase tracking-wide">Foco para o próximo período</div>
+                <div className="text-sm font-bold mt-0.5">{AREAS_FOCO_RELATORIO[jev.foco].rotulo}</div>
+                <p className="text-xs text-neutral-700 mt-1">{AREAS_FOCO_RELATORIO[jev.foco].conselho}</p>
+              </div>
+              {jev.segundo && <div className="text-xs text-neutral-600"><b>Em segundo lugar:</b> {AREAS_FOCO_RELATORIO[jev.segundo].rotulo}. {AREAS_FOCO_RELATORIO[jev.segundo].conselho}</div>}
+            </div>
+          ) : (
+            <div className="text-xs text-neutral-500 space-y-2">
+              <p>Carrega em <b>Pedir indicações ao Jev</b> para saberes onde concentrar o esforço no próximo período.</p>
+              <p className="text-neutral-400">Ao Jev vão só totais do período (nunca nomes, NIFs nem contactos).</p>
+            </div>
+          )}
+        </CartaoRel>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+        <CartaoRel titulo="Contactos por dia" className="xl:col-span-2" acao={<span className="text-[11px] text-neutral-400">{a.contactos} no período · {a.clientesContactados} cliente{a.clientesContactados === 1 ? "" : "s"}</span>}>
+          <BarrasPeriodo key={chave} porDia={a.porDia} per={per} />
+        </CartaoRel>
+        <CartaoRel titulo="Este período vs. média dos anteriores">
+          <table className="w-full text-xs">
+            <thead><tr className="text-neutral-500 text-left"><th scope="col" className="font-medium py-1"></th><th scope="col" className="font-medium text-right">Agora</th><th scope="col" className="font-medium text-right">Média</th><th scope="col" className="font-medium text-right">Melhor</th></tr></thead>
+            <tbody>{METRICAS_REL.map((x) => { const ant = serie.slice(0, -1).map((q) => x.get(q.m)), media = ant.reduce((t, v) => t + v, 0) / Math.max(1, ant.length), melhor = Math.max(0, ...ant), v = x.get(a);
+              return (<tr key={x.k} className="border-t border-neutral-100"><td className="py-1.5 text-neutral-600">{x.label}</td><td className="text-right font-semibold">{fmtMetrica(x, v)}</td><td className="text-right text-neutral-500">{fmtMetrica(x, Math.round(media * 10) / 10)}</td><td className="text-right text-neutral-500">{fmtMetrica(x, melhor)}{v > melhor && <span className="text-emerald-600"> ★</span>}</td></tr>); })}</tbody>
+          </table>
+          <div className="text-[11px] text-neutral-400 mt-1">Média e melhor dos {PERIODOS_NO_GRAFICO - 1} períodos anteriores. ★ = recorde.</div>
+        </CartaoRel>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <CartaoRel titulo={`Pipeline · ${labelTrimestre(trimestreChaveDeData(new Date(per[0] + "T00:00:00")))}`}>
+          <div className="space-y-2.5">
+            {pipeline.map((x) => { const maxV = Math.max(1, ...pipeline.map((q) => q.valor)); return (
+              <div key={x.label}>
+                <div className="flex justify-between text-xs"><span className="text-neutral-600">{x.label}</span><span><b>{x.n}</b> <span className="text-neutral-400">{formatEuroArredondado(x.valor)}</span></span></div>
+                <BarraAnimada pct={(x.valor / maxV) * 100} cor={x.cor} altura="h-2" />
+              </div>); })}
+            <div className="text-[11px] text-neutral-400">Negócios com data de início neste trimestre, valor em RLMC ajustada.</div>
+          </div>
+        </CartaoRel>
+        <CartaoRel titulo="Pendentes agora" acao={<span className="text-[11px] text-neutral-400">o que ainda falta fazer</span>}>
+          <div className="grid grid-cols-2 gap-2">
+            {[["Próximos passos de hoje ou atrasados", pendentes.passos.length, "#e60000"], ["Propostas sem resposta há 7+ dias", pendentes.propostas.length, "#d97706"], ["Sem contacto há 90+ dias", pendentes.semContacto.length, "#2563eb"],
+              ["Permanências a acabar em 1 mês", pendentes.renovacoes.filter((x) => x.dias <= 30).length, "#e60000"], ["Permanências a acabar em 1 a 3 meses", pendentes.renovacoes.filter((x) => x.dias > 30 && x.dias <= 90).length, "#d97706"], ["Permanências a acabar em 3 a 6 meses", pendentes.renovacoes.filter((x) => x.dias > 90).length, "#0891b2"]].map(([t, n, cor]) => (
+              <div key={t} className="rounded-xl border border-neutral-100 bg-neutral-50 p-2.5">
+                <div className="text-2xl font-extrabold leading-none" style={{ color: n ? cor : "#a3a3a3" }}>{n}</div>
+                <div className="text-[11px] text-neutral-500 mt-1 leading-tight">{t}</div>
+              </div>))}
+          </div>
+        </CartaoRel>
+      </div>
+
+      <CartaoRel titulo="Detalhe do período" acao={
+        <div className="inline-flex bg-neutral-100 rounded-full p-0.5" role="group" aria-label="Detalhe">
+          {[["contactos", `Contactos (${a.det.contactos.length})`], ["propostas", `Propostas entregues (${a.det.propostas.length})`], ["fechadas", `Propostas fechadas (${a.det.fechadas.length})`], ["negocios", `Negócios (${a.det.negocios.length})`]].map(([k, l]) => (
+            <button key={k} onClick={() => setDetSel(k)} aria-pressed={detSel === k} className={`text-xs px-3 py-1 rounded-full transition-all ${detSel === k ? "bg-white shadow font-semibold" : "text-neutral-500 hover:text-neutral-800"}`}>{l}</button>))}
+        </div>}>
+        {detSel === "contactos" && <TabelaDetalhe vazio="Sem contactos neste período." linhas={a.det.contactos.sort((x, y) => y.n - x.n)} colunas={[{ t: "Cliente", forte: true, v: (l) => l.nome }, { t: "Contactos", dir: true, v: (l) => l.n }, { t: "Tipo", v: (l) => l.tipos }, { t: "Último", v: (l) => new Date(l.ultimo).toLocaleDateString("pt-PT") }, { t: "Nota", v: (l) => l.nota || "—" }]} />}
+        {detSel === "propostas" && <TabelaDetalhe vazio="Sem propostas entregues neste período." linhas={a.det.propostas} colunas={[{ t: "Cliente", forte: true, v: (l) => l.nome }, { t: "Entregue em", v: (l) => new Date(l.em).toLocaleDateString("pt-PT") }, { t: "Serviços", dir: true, v: (l) => l.servicos }, { t: "Total mensal", dir: true, v: (l) => formatEuro(l.total) }, { t: "Estado", v: (l) => (l.fechada ? "Fechada" : "Por fechar") }]} />}
+        {detSel === "fechadas" && <TabelaDetalhe vazio="Sem propostas fechadas neste período." linhas={a.det.fechadas} colunas={[{ t: "Cliente", forte: true, v: (l) => l.nome }, { t: "Fechada em", v: (l) => formatarDataIsoPT(l.em) }, { t: "Serviços", dir: true, v: (l) => l.servicos }, { t: "Total mensal", dir: true, v: (l) => formatEuro(l.total) }]} />}
+        {detSel === "negocios" && <TabelaDetalhe vazio="Sem negócios implementados neste período." linhas={a.det.negocios} colunas={[{ t: "Empresa", forte: true, v: (l) => l.nome }, { t: "Natureza", v: (l) => l.natureza }, { t: "Categoria", v: (l) => (RLMC_CARTOES.find((c) => c.categoria === l.categoria) || {}).label || l.categoria }, { t: "Tarifário", v: (l) => nomeTarifarioCurto(l.tarifario) || "—" }, { t: "Qt", dir: true, v: (l) => l.qt }, { t: "RLMC", dir: true, v: (l) => formatEuroArredondado(l.rlmc) }, { t: "Início", v: (l) => (l.data ? formatarDataIsoPT(l.data) : "—") }]} />}
+      </CartaoRel>
+    </div>
+  );
 }
 
 function HojeView() {
@@ -15081,6 +15599,7 @@ function App() {
         <ErrorBoundary key={pontoAtivo}>
           {pontoAtivo === "assuntos" && <HojeView />}
           {pontoAtivo === "assuntos-progresso" && <AssuntosView />}
+          {pontoAtivo === "relatorios" && <RelatoriosView />}
           {pontoAtivo === "negocios" && <NegociosView />}
           {pontoAtivo === "comissoes" && <ComissoesView />}
           {pontoAtivo === "clientes" && <ClientesView />}
