@@ -1050,6 +1050,44 @@ function calcularUtilizacaoSegmento(segmento) {
   return { ratio: usado / principal.atribuido.comparavel, nome: principal.nome, principal };
 }
 
+// "Consumos mensais partilhados" dentro do bloco de uma linha: quanto ESTA linha gastou do
+// plafond partilhado (ex. "Aditivo IOYM partilhado 60GB nac +  5.9 GB (6017 MB*)") em MB, ou null.
+function lerConsumoPartilhadoLinha(segmento) {
+  // O bloco "Conta Vodafone" (pool da conta) vem colado ao último número — não é consumo dessa linha.
+  segmento = segmento.split("Conta Vodafone")[0];
+  const i = segmento.indexOf("Consumos mensais partilhados");
+  if (i === -1) return null;
+  const m = /[\d.,]+\s?(?:GB|MB)\s?\(([\d.,]+)\s?MB\*?\)/.exec(segmento.slice(i));
+  return m ? parseFloat(m[1].replace(",", ".")) : null;
+}
+
+// Plafond partilhado da CONTA (bloco "Conta Vodafone"): aditivo (nome, GB incluídos, custo),
+// consumo total do pool e consumo por número. null quando a fatura não tem este bloco.
+// Formato confirmado numa fatura real (2026-10-06): linha do aditivo com o total do pool e, a
+// seguir, uma linha "<nº>  <GB> (<MB>*)" por número.
+function extrairPlafondPartilhado(texto) {
+  const reNum = /^(\d{9,12})\s+[\d.,]+\s?(?:GB|MB)\s?\(([\d.,]+)\s?MB\*?\)/gm;
+  const porNumero = [];
+  let m, primeiro = -1;
+  while ((m = reNum.exec(texto)) !== null) {
+    if (primeiro === -1) primeiro = m.index;
+    porNumero.push({ numero: m[1], mb: parseFloat(m[2].replace(",", ".")) });
+  }
+  if (!porNumero.length) return null;
+  const rePool = /Consumos mensais partilhados\s+utilizado\n([^\n]+?)\s{2,}[\d.,]+\s?(?:GB|MB)\s?\(([\d.,]+)\s?MB\*?\)/g;
+  let pool = null;
+  while ((m = rePool.exec(texto)) !== null && m.index < primeiro) pool = m;
+  if (!pool) return null;
+  const gb = /(\d+)\s?GB/.exec(pool[1]);
+  const custo = /Aditivo Dados partilhado[^€\n]*€\s*(-?[\d.,]+)/.exec(texto);
+  return {
+    nome: pool[1].trim(), utilizadoMB: parseFloat(pool[2].replace(",", ".")),
+    incluidoMB: gb ? Number(gb[1]) * 1024 : null,
+    custo: custo ? parseFloat(custo[1].replace(",", ".")) : null,
+    porNumero,
+  };
+}
+
 // Lê, dentro de um bloco por Nº/Serviço, a Mensalidade, o Total sem IVA, a soma de
 // quaisquer linhas de "Desconto" e as frases de fidelização ("...contrato do tipo
 // X, com data de fim DD-MM-AAAA..."). Suplementares nunca é procurado por nome de
@@ -1100,6 +1138,7 @@ function analisarSegmentoDetalheServico(segmento) {
     fidelizacoes,
     tiposCustoExtra,
     utilizacao: calcularUtilizacaoSegmento(segmento),
+    consumoPartilhadoMB: lerConsumoPartilhadoLinha(segmento),
     // Decomposição completa do bloco (coluna "Detalhe") e detalhe legível dos consumos
     // (atribuído/utilizado reais) — pedido explícito do utilizador (2026-09-12).
     itens: extrairItensDetalheSegmento(segmento),
@@ -1141,6 +1180,7 @@ function analisarLinhasFinanceirasPorServico(texto, nomeFicheiro) {
     const fidelizacoes = [...new Set(segmentos.flatMap((s) => s.fidelizacoes))];
     const tiposCustoExtra = [...new Set(segmentos.flatMap((s) => s.tiposCustoExtra || []))];
     const utilizacao = primeiroNaoNulo("utilizacao");
+    const consumoPartilhadoMB = primeiroNaoNulo("consumoPartilhadoMB");
     // Junta os itens de TODOS os segmentos deste número (ex. o caso real de um bloco
     // "Net Voz" repartido em 2 mini-tabelas com o mesmo número) — a decomposição
     // completa do bloco, não só o resumo Mensalidade/Suplementares/Desconto. Pedido
@@ -1155,6 +1195,7 @@ function analisarLinhasFinanceirasPorServico(texto, nomeFicheiro) {
       mensalidade: "", suplementares: "", desconto: "", total: "", fidelizacao: fidelizacoes.join("; "),
       custoExtraTipo: tiposCustoExtra.join(", "),
       utilizacaoMedia: "", tipoUtilizacao: "", observacao: "",
+      consumoPartilhadoMB,
       utilizacaoRatio: utilizacao ? utilizacao.ratio : null, utilizacaoNomePacote: utilizacao ? utilizacao.nome : "",
       // Plafond/utilizado em bruto (texto da fatura + valor comparável em MB) — usado
       // pelas métricas por acesso da Fase D (top consumidores, detalhe por acesso).
@@ -1326,6 +1367,7 @@ function agruparPorContaEMes(faturasAnalisadas) {
         reconciliacao: f.reconciliacao,
         nomeFicheiro: f.nome,
         linhas: f.linhas,
+        partilhado: f.partilhado || null,
       }))
       .sort((a, b) => a.ordem - b.ordem),
   }));
@@ -2198,7 +2240,7 @@ async function guardarJsonDadosPrivados(handleProjeto, nomeFicheiro, dados) {
 // forma que afete o resultado (não é preciso para mudanças só de apresentação, ex.
 // gerarHtmlAnaliseFaturas) — sem isso, análises antigas ficam mostradas como válidas
 // mesmo depois de a lógica que as gerou já não existir.
-const VERSAO_LOGICA_ANALISE_FATURAS = 2;
+const VERSAO_LOGICA_ANALISE_FATURAS = 3; // 3 (2026-10-06): desconto por valores negativos + plafond partilhado
 
 // Agrega as linhas extraídas por Nº/Serviço INDIVIDUAL (uma linha por serviço real,
 // não por tarifário agrupado) — usado só pelo Excel "Análise por Linha", que precisa
@@ -9134,7 +9176,9 @@ function calcularSinaisLinhas(contas) {
     const roam = [...extra].filter((t) => t === "roaming" || t === "chamadas internacionais");
     if (roam.length && Math.max(...suplementares) >= 5) sinais.push({ k: "roaming", t: `custos de ${roam.join(" e ")} (variável até ${formatEuro(Math.max(...suplementares))}/mês)` });
     if (ratios.length && Math.max(...ratios) < 0.02 && Math.max(...suplementares) < 0.5) sinais.push({ k: "semconsumo", t: `sem consumos nos ${ratios.length} mês(es) medido(s) — paga mensalidade sem utilizar` });
-    const esg = serie.filter((s) => typeof s.l.utilizacaoRatio === "number" && s.l.utilizacaoRatio >= 1).map((s) => s.label);
+    const partMB = serie.map((s) => s.l.consumoPartilhadoMB).filter((v) => typeof v === "number");
+    // Com plafond partilhado, gastar o plafond individual não é "esgotar": o excesso sai do pool.
+    const esg = partMB.length ? [] : serie.filter((s) => typeof s.l.utilizacaoRatio === "number" && s.l.utilizacaoRatio >= 1).map((s) => s.label);
     if (esg.length) sinais.push({ k: "pico", t: `plafond esgotado em ${esg.join(", ")}` });
     else if (totais.length >= 3) {
       const i = totais.findIndex((v, ix) => ix < totais.length - 1 && v >= 5 + 1.5 * media(totais.filter((_, j) => j !== ix)));
@@ -9145,6 +9189,7 @@ function calcularSinaisLinhas(contas) {
       totalMedio: Number(media(totais).toFixed(2)), meses: serie.length,
       usoMedioPct: ratios.length ? Math.round(media(ratios) * 100) : null,
       usoMaxPct: ratios.length ? Math.round(Math.max(...ratios) * 100) : null,
+      partilhadoGB: partMB.length ? Number((partMB[partMB.length - 1] / 1024).toFixed(1)) : null,
       pacote: ult.utilizacaoNomePacote || "", extra: [...extra], suplMedio: Number(media(suplementares).toFixed(2)),
       sinais,
     });
@@ -9161,7 +9206,7 @@ async function pedirParecerTarifarioJev(l, indice) {
   const state = {
     linha: `Linha ${indice + 1}`, tarifario: l.tarifario, mensalidade: l.mensalidade, mesesAnalisados: l.meses,
     totalMedioMensal: l.totalMedio, gastoVariavelMedio: l.suplMedio, pacoteMedido: l.pacote || null,
-    utilizacaoMediaPct: l.usoMedioPct, utilizacaoMaximaPct: l.usoMaxPct, custosExtra: l.extra,
+    utilizacaoMediaPct: l.usoMedioPct, utilizacaoMaximaPct: l.usoMaxPct, custosExtra: l.extra, consumoPartilhadoGB: l.partilhadoGB,
     sinaisDetetados: l.sinais.map((s) => s.k),
   };
   const questions = {
@@ -9175,6 +9220,26 @@ async function pedirParecerTarifarioJev(l, indice) {
 }
 
 const ROTULOS_SINAL = { gasto: "🔴 Gasto invulgar", roaming: "✈ Roaming/internacional", semconsumo: "⚪ Sem consumo", pico: "📈 Pico" };
+
+// Plafond partilhado da conta no mês mais recente: quanto do pool foi usado e por quem.
+function PlafondPartilhado({ contas }) {
+  const periodos = (contas || []).flatMap((c) => c.periodos.filter((p) => p.partilhado).map((p) => ({ conta: c.conta, p })));
+  if (!periodos.length) return null;
+  const { conta, p } = periodos.sort((a, b) => b.p.ordem - a.p.ordem)[0];
+  const d = p.partilhado, gb = (mb) => (mb / 1024).toFixed(1).replace(".", ",");
+  const pct = d.incluidoMB ? Math.round((d.utilizadoMB / d.incluidoMB) * 100) : null;
+  const top = [...d.porNumero].sort((a, b) => b.mb - a.mb).slice(0, 3);
+  return (
+    <div className="mt-2 border border-neutral-100 rounded-md px-3 py-2 text-xs bg-neutral-50">
+      <div className="font-medium text-neutral-800">Plafond partilhado · {d.nome} <span className="font-normal text-neutral-500">({p.label}, conta {conta})</span></div>
+      <div className="text-neutral-600">
+        {gb(d.utilizadoMB)} GB usados{d.incluidoMB ? ` de ${gb(d.incluidoMB)} GB (${pct}%)` : ""}
+        {d.custo != null ? ` · custo do aditivo ${formatEuro(d.custo)}/mês` : ""} · {d.porNumero.length} número(s) a consumir
+      </div>
+      <div className="text-neutral-500">Maiores consumos: {top.map((t) => `${t.numero} (${gb(t.mb)} GB)`).join(" · ")}</div>
+    </div>
+  );
+}
 
 function LinhasARever({ contas }) {
   const linhas = useMemo(() => calcularSinaisLinhas(contas), [contas]);
@@ -9206,6 +9271,7 @@ function LinhasARever({ contas }) {
         )}
       </div>
       {erro && <div className="text-[11px] text-amber-700 pt-1">{erro}</div>}
+      {aberto && <PlafondPartilhado contas={contas} />}
       {aberto && (
         <div className="space-y-1.5 pt-2 max-h-96 overflow-y-auto">
           {linhas.map((l) => {
@@ -9213,7 +9279,7 @@ function LinhasARever({ contas }) {
             return (
               <div key={l.numero} className="border border-neutral-100 rounded-md px-3 py-2 text-xs">
                 <div className="flex items-baseline justify-between gap-2 flex-wrap">
-                  <div className="font-medium text-neutral-800">{l.numero} <span className="font-normal text-neutral-500">· {nomeTarifarioCurto(l.tarifario) || l.tarifario}</span></div>
+                  <div className="font-medium text-neutral-800">{l.numero} <span className="font-normal text-neutral-500">· {nomeTarifarioCurto(l.tarifario) || l.tarifario}{l.partilhadoGB != null ? ` · ${String(l.partilhadoGB).replace(".", ",")} GB do plafond partilhado` : ""}</span></div>
                   <div className="flex gap-1 flex-wrap">
                     {l.sinais.length === 0 && <span className="text-neutral-400">sem sinais</span>}
                     {l.sinais.map((s) => <span key={s.k} className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700">{ROTULOS_SINAL[s.k]}</span>)}
@@ -9415,7 +9481,7 @@ function AnaliseFaturasView() {
         }
         const reconciliacao = reconciliarRubricas(rubricas, somaMensalidadePorNumero);
         if (!reconciliacao.confirmado) avisosGerais.push(...reconciliacao.avisos.map((a) => `${f.nome}: ${a}`));
-        porFatura.push({ nome: f.nome, conta, periodo, linhas, rubricas, reconciliacao, somaMensalidadePorNumero });
+        porFatura.push({ nome: f.nome, conta, periodo, linhas, rubricas, reconciliacao, somaMensalidadePorNumero, partilhado: extrairPlafondPartilhado(texto) });
       } catch (e) {
         avisosGerais.push(`${f.nome}: erro ao ler (${e.message}).`);
       }
