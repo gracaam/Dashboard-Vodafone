@@ -7885,7 +7885,7 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
 
 function ClientesView() {
   const { todosClientes, clientesSemNif, adicionar, fonteExcel, aCarregarExcel, precisaPermissaoExcel, continuarExcel, ligarExcel, recarregarExcel,
-    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, obterExtras, definirExtras, obterNotasFidelizacao, removerNotaFidelizacaoNoIndice, obterTodosExtras, obterPropostas, fecharProposta } = useClientesNovos();
+    firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, obterExtras, definirExtras, obterNotasFidelizacao, removerNotaFidelizacaoNoIndice, obterTodosExtras, obterPropostas, guardarPropostas, fecharProposta } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
   const { todos: todaCarteira } = useCarteiraFidelizar();
   const mapaContratos = useContratosPermanencia(firebaseUser);
@@ -7972,6 +7972,16 @@ function ClientesView() {
   // = fecho + duração). Esses contratos acrescentam-se aos que já existem na conta
   // (nunca substituem — mesma regra do merge por conta), para o alerta a 6 meses do fim
   // disparar sozinho na ficha e na Carteira a Fidelizar. Nunca escreve no Excel.
+  // Apaga uma proposta entregue ainda por fechar (ex.: registada por engano ou repetida).
+  // As fechadas não têm ✕ — já geraram contratos.
+  const apagarPropostaEntregue = async (indice) => {
+    if (!nifSelecionado || !window.confirm("Apagar esta proposta entregue? Só desaparece do registo; não mexe nos contratos.")) return;
+    try {
+      const atuais = (await obterPropostas(nifSelecionado)) || [];
+      await guardarPropostas(nifSelecionado, atuais.filter((x, j) => j !== indice));
+      setPropostas((await obterPropostas(nifSelecionado)) || []);
+    } catch (e) { window.alert(`Não foi possível apagar: ${e.message}`); }
+  };
   const fecharPropostaEntregue = async (indice, dataFecho) => {
     if (!nifSelecionado || !dataFecho) return;
     const proposta = propostas[indice];
@@ -8033,13 +8043,16 @@ function ClientesView() {
     const extrasAGravar = perguntaChaveMudou && extras.produtosPontuados
       ? { ...extras, produtosPontuados: { ...extras.produtosPontuados, desatualizado: true } }
       : extras;
+    // Cliente novo: o documento base tem de existir ANTES dos extras — `adicionar` na
+    // nuvem usa .set() sem merge e, se corresse depois (ou ao mesmo tempo), apagava os
+    // extras acabados de gravar (era o erro ao criar um cliente já com todos os dados).
+    if (ehNovo) {
+      await adicionar({ n: nif, e: novoBase.e, t: novoBase.t, v: [0, 0], d: [0, 0], i: 0, f: [0, 0], manual: true });
+      await adicionarClienteAoExcel({ n: nif, e: novoBase.e }, "").catch(() => false);
+    }
     await definirExtras(nif, extrasAGravar);
     if (perguntaChaveMudou) await marcarProdutosDesatualizados(nif);
     obterTodosExtras().then(setExtrasCampanha);
-    if (ehNovo) {
-      adicionar({ n: nif, e: novoBase.e, t: novoBase.t, v: [0, 0], d: [0, 0], i: 0, f: [0, 0], manual: true });
-      await adicionarClienteAoExcel({ n: nif, e: novoBase.e }, "").catch(() => false);
-    }
     const nome = ehNovo ? novoBase.e : clienteAtual.e;
     setAvisoSucesso(`"${nome}" guardado`);
     setEhNovo(false); setNifSelecionado(""); setExtras({}); setExtrasOriginais({});
@@ -8278,7 +8291,11 @@ function ClientesView() {
                           ✓ Proposta fechada em {p.fechadaEm ? formatarDataIsoPT(p.fechadaEm) : "—"}
                         </span>
                       ) : (
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">Por fechar</span>
+                        <>
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">Por fechar</span>
+                          <button onClick={() => apagarPropostaEntregue(i)} aria-label={`Apagar proposta entregue em ${em}`} title="Apagar esta proposta entregue"
+                            className="ml-auto text-neutral-400 hover:text-red-600 px-1">✕</button>
+                        </>
                       )}
                     </div>
                     {p.fechada ? (
@@ -9906,8 +9923,13 @@ function PropostasView() {
   // foi entregue hoje, guardando um retrato das linhas (para ao fechar se saber o que
   // fechar). Só faz sentido para um cliente com ficha (nunca um prospeto, que não tem
   // ficha de cliente onde guardar). Nunca grava contratos nesta ação — só regista.
+  // Evita registar a mesma proposta várias vezes (cada clique somava +1 no Resumo da semana):
+  // depois de entregue, o botão fica desligado até as linhas ou o cliente mudarem.
+  const [entregueSig, setEntregueSig] = useState("");
+  const sigAtual = `${nifAlvo}|${JSON.stringify(linhas)}`;
   const propostaEntregue = async () => {
-    if (!podeGerar || !registo || alvo !== "cliente") return;
+    if (!podeGerar || !registo || alvo !== "cliente" || entregueSig === sigAtual) return;
+    setEntregueSig(sigAtual);
     const usadas = linhasPropostaExcel(linhas, false);
     const retrato = usadas.map((l) => {
       const dur = numProposta(String(l.duracao || "").replace(/\D/g, ""));
@@ -9924,6 +9946,7 @@ function PropostasView() {
       setAviso(`Proposta registada como entregue para ${nomeAlvo} (${new Date().toLocaleDateString("pt-PT")}). Vê a ficha do cliente.`);
       setTimeout(() => setAviso(""), 10000);
     } catch (e) {
+      setEntregueSig("");
       setAviso(`Não foi possível registar a proposta: ${e.message}`);
     }
   };
@@ -10139,8 +10162,8 @@ function PropostasView() {
             <button onClick={apresentarPdf} disabled={!podeGerar} className="text-sm px-3.5 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-40">
               Apresentar proposta (PDF)
             </button>
-            <button onClick={propostaEntregue} disabled={!podeGerar || alvo !== "cliente" || !registo}
-              title={alvo !== "cliente" ? "Só para clientes com ficha (onde fica registada a entrega)" : "Regista na ficha do cliente que esta proposta foi entregue hoje"}
+            <button onClick={propostaEntregue} disabled={!podeGerar || alvo !== "cliente" || !registo || entregueSig === sigAtual}
+              title={entregueSig === sigAtual ? "Esta proposta já foi registada como entregue. Altera uma linha para registar uma nova." : alvo !== "cliente" ? "Só para clientes com ficha (onde fica registada a entrega)" : "Regista na ficha do cliente que esta proposta foi entregue hoje"}
               className="text-sm px-3.5 py-2 rounded-md border border-emerald-600 text-emerald-700 font-medium hover:bg-emerald-50 disabled:opacity-40">
               Proposta Entregue
             </button>
