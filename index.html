@@ -11893,11 +11893,14 @@ function PainelValidacaoPipeIndisponivel() {
   );
 }
 
+// Wrapper: escolhe o componente ANTES de qualquer hook (nº de hooks tem de ser sempre igual
+// entre renders; nuvemAtiva pode mudar de false→true na mesma sessão ao migrar).
 function PainelValidacaoPipe({ negocios, wbAtual, nuvemAtiva }) {
-  // Guarda ANTES de qualquer hook — nunca depois (nº de hooks tem de ser sempre igual
-  // entre renders; nuvemAtiva pode mudar de false→true na mesma sessão ao migrar).
   if (nuvemAtiva) return <PainelValidacaoPipeIndisponivel />;
+  return <PainelValidacaoPipeLocal negocios={negocios} wbAtual={wbAtual} />;
+}
 
+function PainelValidacaoPipeLocal({ negocios, wbAtual }) {
   const [aberto, setAberto] = useState(false);
   const firebaseUser = useFirebaseAuthUser();
   const [aGuardar, setAGuardar] = useState(false);
