@@ -5772,6 +5772,19 @@ function useClientesNovos() {
   const clientesSemNif = nuvemAtiva ? [] : clientesSemNifLocal;
 
   const adicionar = (r, ...resto) => (nuvemAtiva ? nuvem.definir : adicionarLocal)(nomeEmMaiusculas(r), ...resto);
+  // Corrige só o nome (2026-10-07). Na nuvem faz merge no documento — NUNCA .set() inteiro, que
+  // apagaria extras/propostas/contactos. Localmente só os clientes criados à mão (os do Excel
+  // vêm do ficheiro). Devolve true se gravou.
+  const renomear = async (nif, nome) => {
+    const e = String(nome || "").trim().toLocaleUpperCase("pt-PT");
+    if (!e) return false;
+    if (nuvemAtiva) { await firebaseDb.collection("clientes").doc(String(nif)).set({ e }, { merge: true }); return true; }
+    if (!clientesNovos.some((c) => c.n === nif)) return false;
+    const novos = clientesNovos.map((c) => (c.n === nif ? { ...c, e } : c));
+    setClientesNovos(novos);
+    localStorage.setItem("clientes-novos", JSON.stringify(novos));
+    return true;
+  };
   const removerAutoCriado = nuvemAtiva
     ? (nif, linhaExcel) => {
         const alvo = nuvem.itens.find((c) => c.n === nif && c.autoOrigemLinhaExcel === linhaExcel);
@@ -6129,7 +6142,7 @@ function useClientesNovos() {
   };
 
   return {
-    todosClientes, clientesSemNif, adicionar, removerAutoCriado,
+    todosClientes, clientesSemNif, adicionar, renomear, removerAutoCriado,
     fonteExcel: fonte, aCarregarExcel: aCarregar, precisaPermissaoExcel: precisaPermissao,
     continuarExcel: continuar, ligarExcel: ligar, recarregarExcel: recarregar,
     firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar: todosClientesLocal.length,
@@ -8527,7 +8540,7 @@ function ContratosPermanenciaCard({ nif, firebaseUser, mapa }) {
 }
 
 function ClientesView() {
-  const { todosClientes, clientesSemNif, adicionar, fonteExcel, aCarregarExcel, precisaPermissaoExcel, continuarExcel, ligarExcel, recarregarExcel,
+  const { todosClientes, clientesSemNif, adicionar, renomear, fonteExcel, aCarregarExcel, precisaPermissaoExcel, continuarExcel, ligarExcel, recarregarExcel,
     firebaseUser, nuvemAtiva, migrarParaNuvem, aMigrar, nParaMigrar, obterExtras, definirExtras, obterNotasFidelizacao, removerNotaFidelizacaoNoIndice, obterTodosExtras, obterPropostas, guardarPropostas, fecharProposta } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
   const { todos: todaCarteira } = useCarteiraFidelizar();
@@ -8546,6 +8559,13 @@ function ClientesView() {
   const [propostas, setPropostas] = useState([]);
   const [avisoSucesso, setAvisoSucesso] = useState("");
   const [erroNif, setErroNif] = useState("");
+  const [nomeEmEdicao, setNomeEmEdicao] = useState(null);
+  const guardarNome = async () => {
+    try {
+      if (await renomear(clienteAtual.n, nomeEmEdicao)) { setAvisoSucesso("Nome corrigido"); setTimeout(() => setAvisoSucesso(""), 3000); setNomeEmEdicao(null); }
+      else window.alert("Este cliente vem do Excel — o nome só se corrige na nuvem ou no próprio Excel.");
+    } catch (e) { window.alert(`Não foi possível gravar o nome: ${e.message}`); }
+  };
   const [catalogoProdutos, setCatalogoProdutos] = useState(null);
   const [aCalcularProdutos, setACalcularProdutos] = useState(false);
   const [erroProdutos, setErroProdutos] = useState("");
@@ -8664,7 +8684,7 @@ function ClientesView() {
     }
   };
 
-  const selecionarCliente = (nif) => { setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif); if (nif) carregarExtras(nif); else setExtras({}); irParaTopo(); };
+  const selecionarCliente = (nif) => { setNomeEmEdicao(null); setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif); if (nif) carregarExtras(nif); else setExtras({}); irParaTopo(); };
   const abrirNovo = () => { setEhNovo(true); setNifSelecionado(""); setAvisoSucesso(""); setErroNif(""); setNovoBase({ e: "", n: "", t: "Convergente Móvel + Fixo" }); setExtras({}); setExtrasOriginais({}); irParaTopo(); };
   const limpar = () => { setEhNovo(false); setNifSelecionado(""); setExtras({}); setExtrasOriginais({}); };
   const mudarExtra = (key, value) => setExtras((prev) => ({ ...prev, [key]: value }));
@@ -8673,6 +8693,7 @@ function ClientesView() {
     if (ehNovo) {
       const erro = validarNifNovoRegisto(novoBase.n, todosClientes, todosProspetos);
       if (erro) { setErroNif(erro); return; }
+      if (!novoBase.e.trim() || /^[\d\s]+$/.test(novoBase.e)) { window.alert("Escreve o nome da empresa no campo Nome / Entidade (não o NIF)."); return; }
     }
     setErroNif("");
     const nif = ehNovo ? novoBase.n.trim() : clienteAtual?.n;
@@ -8853,7 +8874,16 @@ function ClientesView() {
                   <div className="text-xs font-medium text-neutral-400">DADOS JÁ CONHECIDOS (Excel)</div>
                   <span className="text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">✓ verificado</span>
                 </div>
-                <div className="text-base font-medium">{clienteAtual.e}</div>
+                {nomeEmEdicao === null ? (
+                  <div className="text-base font-medium">{clienteAtual.e} <button onClick={() => setNomeEmEdicao(clienteAtual.e)} className="text-xs text-neutral-400 hover:text-neutral-800 ml-2" title="Corrigir o nome deste cliente">✏ Corrigir nome</button></div>
+                ) : (
+                  <div className="flex gap-2 items-center">
+                    <input autoFocus value={nomeEmEdicao} onChange={(e) => setNomeEmEdicao(e.target.value)} onKeyDown={(e) => e.key === "Enter" && guardarNome()} aria-label="Nome do cliente"
+                      className="flex-1 px-3 py-1.5 rounded-md border border-neutral-300 text-sm" />
+                    <button onClick={guardarNome} className="text-xs px-3 py-1.5 rounded-md bg-neutral-900 text-white">Guardar nome</button>
+                    <button onClick={() => setNomeEmEdicao(null)} className="text-xs text-neutral-500">Cancelar</button>
+                  </div>
+                )}
                 <div className="text-sm text-neutral-500 mt-0.5">NIF {clienteAtual.n} · {clienteAtual.t}</div>
                 <StatsCliente c={clienteAtual} />
               </>
