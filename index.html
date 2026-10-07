@@ -10404,6 +10404,10 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
   const apagar = ehProspeto ? [] : linhasPropostaExcel(linhas, false).filter((l) => l.acao === "Apagar serviço");
   const nomeProposto = (l) => nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual);
   const duracoes = [...new Set(ls.map((l) => dur(l.duracao)).filter((d) => d !== "—"))];
+  // Pedido do Augusto (2026-10-07): propostas com serviços Fixos ou Móveis indicam o Suporte Especializado.
+  const suporteHtml = ls.some((l) => ["Fixo", "Móvel"].includes(tipoServicoProposta(l)))
+    ? `<div class="suporte"><div class="sk">NOVO · Incluído nos seus serviços</div><div class="sb"><div><h2>Suporte Especializado</h2><p>Os serviços passam a incluir o <b>Suporte Especializado</b>, um novo serviço de atendimento para clientes empresariais que permite <b>acesso direto a um assistente humano</b>, sem passar pela jornada digital ou pelo Toby.</p></div><div class="sn"><span>Ligue</span><b>16918</b></div></div></div>`
+    : "";
 
   // ---- Resumo (folha 2) e tabela (folha 3)
   let resumo, tabela, cancelar = "";
@@ -10502,6 +10506,9 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
     .passo h2 { color: #fff; font-size: 20px; margin-bottom: 8px; } .passo p { color: #e6e6e6; font-size: 13px; } .passo .val { margin-top: 10px; font-weight: 700; color: #fff; }
     .passo .rep { border-left: 4px solid ${V}; padding-left: 16px; } .passo .rep b { display: block; font-size: 18px; } .passo .rep span { display: block; font-size: 13px; color: #e6e6e6; line-height: 1.6; } .passo .rep .tel { font-size: 17px; font-weight: 700; color: #fff; margin-top: 6px; }
     .apoio { font-size: 12px; color: #555; }
+    .suporte { margin: 16px 0; border: 2px solid ${V}; border-radius: 10px; overflow: hidden; break-inside: avoid; } .suporte .sk { background: ${V}; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 5px 16px; }
+    .suporte .sb { display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: center; padding: 14px 16px; } .suporte h2 { margin: 0 0 4px; font-size: 18px; color: ${VE}; } .suporte p { margin: 0; font-size: 13px; }
+    .suporte .sn { text-align: center; border-left: 3px solid ${V}; padding-left: 20px; } .suporte .sn span { display: block; font-size: 12px; color: #555; } .suporte .sn b { font-size: 34px; color: ${V}; line-height: 1.1; }
     .btnprint { position: fixed; top: 12px; right: 12px; padding: 8px 14px; border: 0; background: ${V}; color: #fff; border-radius: 8px; cursor: pointer; z-index: 9; font: inherit; }
     @media print { body { background: #fff; } .capa, .corpo { margin: 0; width: auto; } .corpo { padding: 0; } .btnprint { display: none; } }
   </style></head><body>
@@ -10516,6 +10523,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
     <p class="intro">Revimos os serviços de comunicações de ${cliente} e preparámos ${ehProspeto ? "esta proposta à medida da utilização da empresa" : "uma proposta ajustada à utilização real da empresa"}. Estes são os números que importam.</p>
     ${resumo}
     ${mudaHtml}
+    ${suporteHtml}
     <div class="vf">
       <h2>Vodafone Business</h2>
       <p>O maior operador internacional de comunicações, com rede própria móvel e fixa em Portugal e uma estrutura dedicada às empresas.</p>
@@ -10547,7 +10555,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
       <div><h2>Próximo passo</h2><p>Para avançar, basta responder ao email ou ligar-me. Trato da ativação e acompanho a mudança de cada serviço.</p><p>Na adjudicação são precisos: Pedido de Ativação de Serviços, certidão comercial, NIF e identificação do representante legal.</p><p class="val">Proposta válida até ${validade}.</p></div>
       <div class="rep"><b>${nomeRep}</b><span>${cargoRep} · Vodafone Business</span><span class="tel">${telRep.replace(/^Tlm\.\s*/, "")}</span><span>augusto.graca@vodafone.com</span></div>
     </div>
-    <p class="apoio">Apoio a Clientes Empresariais 16914 · Suporte Técnico 16916 (24x7)</p>
+    <p class="apoio">Apoio a Clientes Empresariais 16914 · Suporte Técnico 16916 (24x7)${suporteHtml ? " · Suporte Especializado 16918" : ""}</p>
   </div>
   </main>
   </body></html>`;
