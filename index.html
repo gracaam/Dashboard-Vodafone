@@ -14842,10 +14842,19 @@ function AdicionarProdutoDeEmail({ handleProjeto, nuvemAtiva, categoriaAtual, ex
   const podeGuardar = nuvemAtiva || !!handleProjeto;
 
   const ler = async (files) => {
-    const f = files.find((x) => /\.msg$/i.test(x.name));
+    const f = files.find((x) => /\.(msg|pdf)$/i.test(x.name));
     setErro(""); setOk("");
-    if (!f) { setErro("Arrasta um e-mail guardado como Outlook Item (.msg)."); return; }
+    if (!f) { setErro("Arrasta um e-mail guardado como Outlook Item (.msg) ou um PDF."); return; }
     try {
+      if (/\.pdf$/i.test(f.name)) { // PDF solto: o produto nasce só com o ficheiro
+        setRascunho({
+          nome: f.name.replace(/\.pdf$/i, "").replace(/_+/g, " ").trim(),
+          categoria: categoriaAtual && categoriaAtual !== "todos" ? categoriaAtual : "campanhas-em-vigor",
+          termina: "", linhas: "", corpo: "",
+          anexos: [{ nome: f.name, bytes: new Uint8Array(await f.arrayBuffer()), usar: true }], ignorados: 0,
+        });
+        return;
+      }
       const m = lerMsgOutlook(await f.arrayBuffer(), true);
       const nome = (m.assunto || f.name.replace(/\.msg$/i, "")).replace(/^\s*((re|fw|fwd|enc|res)\s*:\s*)+/i, "").trim();
       const categoria = categoriaAtual && categoriaAtual !== "todos" ? categoriaAtual : "campanhas-em-vigor";
@@ -14902,16 +14911,16 @@ function AdicionarProdutoDeEmail({ handleProjeto, nuvemAtiva, categoriaAtual, ex
           onDragOver={(e) => { e.preventDefault(); setAArrastar(true); }} onDragLeave={() => setAArrastar(false)}
           onDrop={(e) => { e.preventDefault(); setAArrastar(false); ler([...e.dataTransfer.files]); }}
           className={`border border-dashed rounded-md px-3 py-3 cursor-pointer text-center text-xs ${aArrastar ? "border-red-500 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-500 hover:border-neutral-400"}`}>
-          <input ref={inputRef} type="file" accept=".msg" className="hidden" onChange={(e) => { ler([...e.target.files]); e.target.value = ""; }} />
-          📥 Arrasta aqui o e-mail de uma campanha da Vodafone (.msg) para criar um produto — ou clica para escolher
-          <div className="text-[11px] text-neutral-400 mt-0.5">Só e-mails de campanhas/produtos: o texto fica guardado no catálogo. Não uses e-mails de clientes.</div>
+          <input ref={inputRef} type="file" accept=".msg,.pdf,application/pdf" className="hidden" onChange={(e) => { ler([...e.target.files]); e.target.value = ""; }} />
+          📥 Arrasta aqui o e-mail de uma campanha (.msg) ou um PDF para criar um produto — ou clica para escolher
+          <div className="text-[11px] text-neutral-400 mt-0.5">Escolhes a categoria a seguir. Em e-mails, o texto fica guardado no catálogo: não uses e-mails de clientes.</div>
         </div>
       )}
       {ok && <div role="status" className="text-xs text-emerald-700">✓ {ok}</div>}
       {erro && <div className="text-xs text-red-600">{erro}</div>}
       {rascunho && (
         <div className="border border-neutral-300 rounded-lg bg-white p-3 space-y-2.5">
-          <div className="text-xs font-medium text-neutral-400">NOVO PRODUTO A PARTIR DO E-MAIL — confirma antes de guardar</div>
+          <div className="text-xs font-medium text-neutral-400">NOVO PRODUTO — confirma antes de guardar</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <label className="text-xs text-neutral-500">Nome
               <input value={rascunho.nome} onChange={(e) => mudar("nome", e.target.value)} className="w-full mt-0.5 px-2.5 py-1.5 rounded-md border border-neutral-300 text-sm text-neutral-900" /></label>
