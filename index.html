@@ -15940,6 +15940,7 @@ function CampanhaPorProdutoView() {
           {!aCorrer && falhas > 0 && (
             <span className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
               ⚠ {falhas} pedido(s) ao Jev falharam nesta corrida — aparecem marcados como "erro" na lista. Corre de novo para os tentar outra vez.
+              {resultados && resultados.some((r) => r.erro) && <span className="block mt-0.5 text-[11px] text-amber-900">Motivo do 1.º erro: {String((resultados.find((r) => r.erro) || {}).erro).slice(0, 300)}</span>}
             </span>
           )}
         </div>
