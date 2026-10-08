@@ -7250,7 +7250,7 @@ function lerCabecalhosEml(texto) {
 }
 // Outlook Item (.msg) = ficheiro OLE/CFB. Leitor mínimo: só os streams de propriedades
 // do topo (assunto, remetente, destinatários, data) — corpo e anexos nunca são lidos.
-function lerMsgOutlook(ab) {
+function lerMsgOutlook(ab, completo) {
   const dv = new DataView(ab), u8 = new Uint8Array(ab);
   if (dv.getUint32(0, true) !== 0xE011CFD0) throw new Error("não é um ficheiro .msg do Outlook");
   const tam = 1 << dv.getUint16(0x1E, true), off = (s) => (s + 1) * tam, FIM = 0xFFFFFFFE;
@@ -7313,7 +7313,19 @@ function lerMsgOutlook(ab) {
   const corpo = texto(topo, "1000");
   const nomeDe = (texto(topo, "0C1A") || texto(topo, "0042")).trim();
   if (nomeDe && de[0] && !nomeDe.includes("@")) nomes[de[0]] = nomeDe;
-  return { assunto, de, outros: [...new Set(outros)], em, nomes, telefone: telefoneNaAssinatura(corpo), proximoEm: detetarDataPedido(assunto + "\n" + corpo, em) };
+  const base = { assunto, de, outros: [...new Set(outros)], em, nomes, telefone: telefoneNaAssinatura(corpo), proximoEm: detetarDataPedido(assunto + "\n" + corpo, em) };
+  if (!completo) return base;
+  // Modo completo (só para campanhas de produtos, 2026-10-08): corpo (texto simples; se faltar, HTML sem tags) e anexos.
+  let corpoTxt = corpo;
+  if (!corpoTxt.trim()) {
+    const h = topo.find((e) => e.nome === "__substg1.0_10130102");
+    if (h) { const b = conteudo(h); let t; try { t = new TextDecoder("utf-8", { fatal: true }).decode(b); } catch (e) { t = new TextDecoder("windows-1252").decode(b); } corpoTxt = t.replace(/<(style|script)[\s\S]*?<\/\1>/gi, " ").replace(/<br\s*\/?>|<\/(p|div|tr|li|h\d)>/gi, "\n").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&"); }
+  }
+  const anexos = topo.filter((e) => e.tipo === 1 && e.nome.startsWith("__attach_version1.0_")).map((a) => {
+    const l = filhos(a.idx), d = l.find((e) => e.nome === "__substg1.0_37010102");
+    return { nome: (texto(l, "3707") || texto(l, "3704")).trim(), bytes: d ? conteudo(d).slice() : null };
+  }).filter((x) => x.nome && x.bytes);
+  return { ...base, corpo: corpoTxt, anexos };
 }
 
 // 1.º telefone português no texto do email antes do histórico citado ("De:"/"From:"),
@@ -14650,6 +14662,135 @@ function NovoProdutoCategoria({ handleProjeto, categoriaId, categoriaLabel, subp
   );
 }
 
+/* ===== Produto a partir de e-mail de campanha (.msg) — 2026-10-08, pedido do Augusto =====
+   Largas o e-mail → pré-visualização editável (nome, categoria, validade, características,
+   anexos PDF) → só grava ao confirmar. Só para campanhas/produtos da Vodafone: o texto do
+   e-mail vai para o catálogo (Firestore), por isso NÃO largar e-mails de clientes. */
+async function guardarAnexoProduto(subpasta, f, handleProjeto, nuvemAtiva) {
+  if (nuvemAtiva) await guardarFicheiroProdutoNuvem(subpasta, f);
+  if (handleProjeto) {
+    const pasta09 = await handleProjeto.getDirectoryHandle("09_Produtos Vodafone", { create: true });
+    const destino = await obterPastaAninhada(pasta09, subpasta);
+    const fh = await destino.getFileHandle(f.name, { create: true });
+    const w = await fh.createWritable(); await w.write(f); await w.close();
+  }
+}
+function linhasUteisDoEmail(corpo) {
+  return String(corpo || "").split(/\n\s*(De|From|-----Original)\s*:/i)[0]
+    .replace(/\[cid:[^\]]*\]/gi, " ").replace(/<\s*(https?:|mailto:)[^>]*>/gi, " ").replace(/\S*(https?:\/\/|www\.)\S*/gi, " ")
+    .split(/\r?\n/).map((l) => l.replace(/\s+/g, " ").trim()).filter((l) => l.length >= 12 && l.length <= 200);
+}
+function AdicionarProdutoDeEmail({ handleProjeto, nuvemAtiva, categoriaAtual, existentes, onAdicionado }) {
+  const [rascunho, setRascunho] = useState(null);
+  const [aArrastar, setAArrastar] = useState(false);
+  const [aGuardar, setAGuardar] = useState(false);
+  const [erro, setErro] = useState("");
+  const [ok, setOk] = useState("");
+  const inputRef = React.useRef(null);
+  const podeGuardar = nuvemAtiva || !!handleProjeto;
+
+  const ler = async (files) => {
+    const f = files.find((x) => /\.msg$/i.test(x.name));
+    setErro(""); setOk("");
+    if (!f) { setErro("Arrasta um e-mail guardado como Outlook Item (.msg)."); return; }
+    try {
+      const m = lerMsgOutlook(await f.arrayBuffer(), true);
+      const nome = (m.assunto || f.name.replace(/\.msg$/i, "")).replace(/^\s*((re|fw|fwd|enc|res)\s*:\s*)+/i, "").trim();
+      const categoria = categoriaAtual && categoriaAtual !== "todos" ? categoriaAtual : "campanhas-em-vigor";
+      const termina = detetarDataPedido(`${m.assunto}\n${m.corpo}`, m.em) || "";
+      setRascunho({
+        nome, categoria, termina,
+        linhas: linhasUteisDoEmail(m.corpo).slice(0, 6).join("\n"),
+        corpo: m.corpo || "",
+        anexos: (m.anexos || []).filter((a) => /\.(pdf|html?)$/i.test(a.nome)).map((a) => ({ ...a, usar: true })),
+        ignorados: (m.anexos || []).filter((a) => !/\.(pdf|html?)$/i.test(a.nome)).length,
+      });
+    } catch (e) { setErro(`Não consegui ler o e-mail: ${e.message}`); }
+  };
+
+  const guardar = async () => {
+    const r = rascunho;
+    if (!r.nome.trim()) { setErro("Escreve o nome do produto."); return; }
+    if (existentes.some((p) => p.categoriaId === r.categoria && p.nome === r.nome.trim())) { setErro("Já existe um produto com este nome nesta categoria — muda o nome."); return; }
+    if (!podeGuardar) { setErro("Inicia sessão (nuvem) ou liga a pasta do projeto."); return; }
+    const ehCamp = r.categoria === "campanhas-em-vigor";
+    const subpasta = ehCamp ? SUBPASTA_CAMPANHAS : (PASTA_POR_CATEGORIA_PRODUTOS[r.categoria] || [{}])[0].pasta;
+    setAGuardar(true); setErro("");
+    try {
+      let ficheiros = r.anexos.filter((a) => a.usar).map((a) => new File([a.bytes], a.nome, { type: tipoFicheiroPorExtensao(a.nome) }));
+      if (ehCamp && !ficheiros.length) {
+        // Sem anexo, a campanha abre o próprio texto do e-mail.
+        const html = `<!doctype html><meta charset="utf-8"><title>${escaparHtml(r.nome)}</title><body style="font-family:sans-serif;max-width:720px;margin:24px auto;white-space:pre-wrap">${escaparHtml(r.corpo)}</body>`;
+        ficheiros = [new File([html], `${nomeFicheiroSeguro(r.nome)}.html`, { type: "text/html" })];
+      }
+      if (ficheiros.length && !subpasta) { setErro("Esta categoria ainda não tem pasta definida — desmarca os anexos ou escolhe outra categoria."); setAGuardar(false); return; }
+      for (const f of ficheiros) await guardarAnexoProduto(subpasta, f, handleProjeto, nuvemAtiva);
+      const caracteristicas = r.linhas.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+        const i = l.indexOf(":");
+        return i > 0 && i < 40 && l.slice(i + 1).trim() ? { etiqueta: l.slice(0, i).trim(), valor: l.slice(i + 1).trim() } : { etiqueta: "", valor: l.replace(/:\s*$/, "") };
+      });
+      const entry = { nome: r.nome.trim(), categoriaId: r.categoria, subtitulo: "", caracteristicas, nota: "" };
+      if (ehCamp) {
+        Object.assign(entry, { subtitulo: r.termina ? `Válida até ${formatarDataIsoPT(r.termina)}` : "", dataCampanha: r.termina || "",
+          adicionadaEm: new Date().toISOString().slice(0, 10), ficheiro: { nome: ficheiros[0].name, tipo: tipoFicheiroPorExtensao(ficheiros[0].name) } });
+      } else if (ficheiros.length) entry.ficheiroFonte = `${subpasta}/${ficheiros[0].name}`;
+      await adicionarProdutoAoCatarogo(entry, handleProjeto, nuvemAtiva);
+      setOk(`"${entry.nome}" adicionado a ${(CATEGORIAS_PRODUTOS_VODAFONE.find((c) => c.id === r.categoria) || {}).label}.`);
+      setRascunho(null);
+      if (onAdicionado) await onAdicionado();
+    } catch (e) { setErro(`Não consegui guardar: ${e.message}`); }
+    setAGuardar(false);
+  };
+  const mudar = (campo, v) => setRascunho((r) => ({ ...r, [campo]: v }));
+
+  return (
+    <div className="mt-4 space-y-2">
+      {!rascunho && (
+        <div onClick={() => inputRef.current && inputRef.current.click()}
+          onDragOver={(e) => { e.preventDefault(); setAArrastar(true); }} onDragLeave={() => setAArrastar(false)}
+          onDrop={(e) => { e.preventDefault(); setAArrastar(false); ler([...e.dataTransfer.files]); }}
+          className={`border border-dashed rounded-md px-3 py-3 cursor-pointer text-center text-xs ${aArrastar ? "border-red-500 bg-red-50 text-red-700" : "border-neutral-300 text-neutral-500 hover:border-neutral-400"}`}>
+          <input ref={inputRef} type="file" accept=".msg" className="hidden" onChange={(e) => { ler([...e.target.files]); e.target.value = ""; }} />
+          📥 Arrasta aqui o e-mail de uma campanha da Vodafone (.msg) para criar um produto — ou clica para escolher
+          <div className="text-[11px] text-neutral-400 mt-0.5">Só e-mails de campanhas/produtos: o texto fica guardado no catálogo. Não uses e-mails de clientes.</div>
+        </div>
+      )}
+      {ok && <div role="status" className="text-xs text-emerald-700">✓ {ok}</div>}
+      {erro && <div className="text-xs text-red-600">{erro}</div>}
+      {rascunho && (
+        <div className="border border-neutral-300 rounded-lg bg-white p-3 space-y-2.5">
+          <div className="text-xs font-medium text-neutral-400">NOVO PRODUTO A PARTIR DO E-MAIL — confirma antes de guardar</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label className="text-xs text-neutral-500">Nome
+              <input value={rascunho.nome} onChange={(e) => mudar("nome", e.target.value)} className="w-full mt-0.5 px-2.5 py-1.5 rounded-md border border-neutral-300 text-sm text-neutral-900" /></label>
+            <label className="text-xs text-neutral-500">Categoria
+              <select value={rascunho.categoria} onChange={(e) => mudar("categoria", e.target.value)} className="w-full mt-0.5 px-2.5 py-1.5 rounded-md border border-neutral-300 text-sm text-neutral-900 bg-white">
+                {CATEGORIAS_PRODUTOS_VODAFONE.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}</select></label>
+          </div>
+          {rascunho.categoria === "campanhas-em-vigor" && (
+            <label className="text-xs text-neutral-500 block">Termina em (se o e-mail indicar)
+              <input type="date" value={rascunho.termina} onChange={(e) => mudar("termina", e.target.value)} className="block mt-0.5 px-2.5 py-1.5 rounded-md border border-neutral-300 text-sm text-neutral-900" /></label>
+          )}
+          <label className="text-xs text-neutral-500 block">Características — uma por linha ("Etiqueta: valor"); apaga o que não interessa
+            <textarea rows={6} value={rascunho.linhas} onChange={(e) => mudar("linhas", e.target.value)} className="w-full mt-0.5 px-2.5 py-1.5 rounded-md border border-neutral-300 text-sm text-neutral-900" /></label>
+          <div className="text-xs text-neutral-500">
+            Anexos (PDF/HTML):{" "}
+            {rascunho.anexos.length === 0 ? <span className="text-neutral-400">nenhum{rascunho.categoria === "campanhas-em-vigor" ? " — a campanha vai abrir o texto do e-mail" : ""}</span> :
+              rascunho.anexos.map((a, i) => (
+                <label key={i} className="inline-flex items-center gap-1 mr-3 text-neutral-700">
+                  <input type="checkbox" checked={a.usar} onChange={(e) => setRascunho((r) => ({ ...r, anexos: r.anexos.map((x, j) => j === i ? { ...x, usar: e.target.checked } : x) }))} />{a.nome}</label>))}
+            {rascunho.ignorados > 0 && <span className="text-neutral-400"> · {rascunho.ignorados} anexo(s) de outro tipo ignorado(s)</span>}
+          </div>
+          <div className="flex gap-2">
+            <button onClick={guardar} disabled={aGuardar} className="text-xs px-3 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">{aGuardar ? "A guardar…" : "Guardar produto"}</button>
+            <button onClick={() => { setRascunho(null); setErro(""); }} className="text-xs text-neutral-500">Cancelar</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProdutosVodafoneView({ ligacaoPasta }) {
   const [dados, setDados] = useState(null);
   const [aCarregar, setACarregar] = useState(true);
@@ -14824,6 +14965,9 @@ function ProdutosVodafoneView({ ligacaoPasta }) {
           </div>
         )}
       </div>
+
+      <AdicionarProdutoDeEmail handleProjeto={ligacaoPasta.pronto ? ligacaoPasta.handle : null} nuvemAtiva={nuvemAtivaProdutos}
+        categoriaAtual={categoriaSel} existentes={todosProdutos} onAdicionado={recarregarCatalogo} />
 
       <div className="mt-5">
         {produtosFiltrados.length === 0 ? (
