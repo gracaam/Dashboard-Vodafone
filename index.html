@@ -10349,7 +10349,9 @@ function AnaliseRapidaForm({ analise, mudarAnalise, toggleServicoAtual }) {
 // "Inalterado" (por defeito) e "Apagar serviço" NÃO entram na proposta.
 // "Manter" = fidelizar com o MESMO tarifário (só se mexer no valor/desconto).
 // "Alterar tarifário"/"Upgrade" = trocar de tarifário (novo valor).
-const ACOES_PROPOSTA = ["Inalterado", "Manter", "Alterar tarifário", "Upgrade", "Apagar serviço"];
+// "Novo" (2026-10-09) = serviço que o cliente ainda não tem: sem permanência, valor atual,
+// desconto nem tarifário atual — só novo tarifário e novo valor.
+const ACOES_PROPOSTA = ["Inalterado", "Manter", "Alterar tarifário", "Upgrade", "Novo", "Apagar serviço"];
 
 // Durações oficiais de contrato (mesmas de MESES_OPCOES, sem o 0 = "indefinido").
 // Dropdown nas propostas (Cliente e Prospeto), para nunca haver durações escritas à mão.
@@ -10390,7 +10392,7 @@ function valorLinhaProspeto(l) {
   if (unit === null) return null;
   return Number((unit * quantidadeLinhaProposta(l)).toFixed(2));
 }
-function mostraNovoTarifarioProposta(l) { return l.acao === "Alterar tarifário" || l.acao === "Upgrade"; }
+function mostraNovoTarifarioProposta(l) { return l.acao === "Alterar tarifário" || l.acao === "Upgrade" || l.acao === "Novo"; }
 function mostraNovoValorProposta(l) { return l.acao === "Manter" || mostraNovoTarifarioProposta(l); }
 
 // "Novo Tarifário" a mostrar: em "Manter" repete o tarifário atual (fidelização com o
@@ -10442,11 +10444,11 @@ function gerarPropostaExcel(nomeAlvo, linhas, data, ehProspeto) {
       return [
         l.conta || "",
         l.servico || "",
-        l.fim ? formatarDataIsoPT(l.fim) : "",
-        l.fim ? diasEntreDatasIso(hoje, l.fim) : "",
-        numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
-        numProposta(l.desconto) != null ? numProposta(l.desconto) : "",
-        nomeTarifarioCurto(l.produtoAtual),
+        l.fim && l.acao !== "Novo" ? formatarDataIsoPT(l.fim) : "",
+        l.fim && l.acao !== "Novo" ? diasEntreDatasIso(hoje, l.fim) : "",
+        l.acao !== "Novo" && numProposta(l.valorMensal) != null ? numProposta(l.valorMensal) : "",
+        l.acao !== "Novo" && numProposta(l.desconto) != null ? numProposta(l.desconto) : "",
+        l.acao === "Novo" ? "" : nomeTarifarioCurto(l.produtoAtual),
         l.acao || "Inalterado",
         nomeTarifarioCurto(novoTarifarioLinhaProposta(l)),
         novoVal && numProposta(l.novoValor) != null ? numProposta(l.novoValor) : "",
@@ -10489,7 +10491,7 @@ const PROPOSTA_NUMEROS_VODAFONE = [
 // Valor que o cliente paga HOJE por uma linha: valor mensal menos o desconto extra
 // que o Augusto escreve à mão (quando existe). "Inalterado" não entra na proposta.
 function valorAtualLinhaProposta(l) {
-  if (l.acao === "Inalterado") return null;
+  if (l.acao === "Inalterado" || l.acao === "Novo") return null;
   const base = numProposta(l.valorMensal);
   if (base === null) return null;
   const desc = numProposta(l.desconto) || 0;
@@ -10899,7 +10901,7 @@ function PropostasView() {
 
   const atualizarLinha = (key, campos) => setLinhas((prev) => prev.map((l) => (l.key === key ? { ...l, ...campos } : l)));
   const togglarConta = (conta) => setContasSel((prev) => (prev.includes(conta) ? prev.filter((c) => c !== conta) : [...prev, conta]));
-  const adicionarManual = (conta) => setLinhas((prev) => [...prev, { key: `manual::${conta}::${Date.now()}`, conta, manual: true, servico: "", fim: "", produtoAtual: "", valorMensal: "", desconto: "", duracao: "", quantidade: 1, acao: "Alterar tarifário", novoTarifario: "", novoValor: "" }]);
+  const adicionarManual = (conta) => setLinhas((prev) => [...prev, { key: `manual::${conta}::${Date.now()}`, conta, manual: true, servico: "", fim: "", produtoAtual: "", valorMensal: "", desconto: "", duracao: "", quantidade: 1, acao: "Novo", novoTarifario: "", novoValor: "" }]);
   const removerLinha = (key) => setLinhas((prev) => prev.filter((l) => l.key !== key));
 
   const ehProspeto = alvo === "prospeto";
@@ -11104,16 +11106,19 @@ function PropostasView() {
                                 : <span className="font-medium">{l.servico || "—"}</span>}
                             </td>
                             <td className="p-2"><select value={l.tipo || ""} onChange={(e) => atualizarLinha(l.key, { tipo: e.target.value })} title="Bloco do PDF (Soluções propostas)" className="px-2 py-1 rounded border border-neutral-300 text-xs"><option value="">Auto: {tipoAutomaticoProposta(l)}</option>{TIPOS_SERVICO_PROPOSTA.map((t) => <option key={t} value={t}>{t}</option>)}</select></td>
+                            {l.acao === "Novo" ? <><td className="p-2 text-neutral-300">—</td><td className="p-2 text-neutral-300">—</td><td className="p-2 text-neutral-300">—</td></> : <>
                             <td className="p-2 text-neutral-500">{l.fim ? `${formatarDataIsoPT(l.fim)} (${diasEntreDatasIso(new Date().toISOString().slice(0, 10), l.fim)}d)` : "—"}</td>
                             <td className="p-2"><input value={l.valorMensal} onChange={(e) => atualizarLinha(l.key, { valorMensal: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" />
                               {l.semInicio ? <div className="text-[10px] text-amber-700" title="O ficheiro de contratos não tem Data de Início — valor do contrato sem atualização anual">sem Data de Início</div>
                                 : l.fatorInflacao > 1 ? <div className="text-[10px] text-neutral-500" title="Valor do contrato atualizado com as subidas anuais de preço">contrato {formatEuro(l.valorContrato)} · +{((l.fatorInflacao - 1) * 100).toFixed(1).replace(".", ",")}%</div> : null}</td>
                             <td className="p-2"><input value={l.desconto} onChange={(e) => atualizarLinha(l.key, { desconto: e.target.value })} inputMode="decimal" placeholder="€" className="w-20 px-2 py-1 rounded border border-neutral-300 text-xs" /></td>
+                            </>}
+                            {l.acao === "Novo" ? <td className="p-2 text-neutral-300">—</td> :
                             <td className="p-2">
                               {l.manual
                                 ? <input value={l.produtoAtual} onChange={(e) => atualizarLinha(l.key, { produtoAtual: e.target.value })} placeholder="Produto atual" className="w-36 px-2 py-1 rounded border border-neutral-300 text-xs" />
                                 : <span title={l.produtoAtual || ""}>{nomeTarifarioCurto(l.produtoAtual) || "—"}</span>}
-                            </td>
+                            </td>}
                             <td className="p-2">
                               <select value={l.acao} onChange={(e) => atualizarLinha(l.key, { acao: e.target.value })} className="px-2 py-1 rounded border border-neutral-300 text-xs">
                                 {ACOES_PROPOSTA.map((a) => <option key={a} value={a}>{a}</option>)}
