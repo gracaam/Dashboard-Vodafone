@@ -10757,6 +10757,35 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
   </body></html>`;
 }
 
+// Lê um Excel gravado por gerarPropostaExcel (2026-10-09) e devolve as linhas para
+// repor na proposta. Cliente: cabeçalho começa em "Conta"; Prospeto: em "Serviço" com
+// "Quantidade". Só lê o que o próprio dashboard escreveu — não adivinha outros formatos.
+function lerPropostaExcel(ab) {
+  const wb = XLSX.read(ab, { type: "array" });
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: "" });
+  const titulo = String((rows[0] || [])[0] || "").replace(/^Proposta\s*[—-]\s*/, "").trim();
+  const i = rows.findIndex((r) => String(r[0]).trim() === "Conta" || (String(r[0]).trim() === "Serviço" && String(r[3]).trim() === "Quantidade"));
+  if (i < 0) return { erro: "Este ficheiro não parece uma proposta gravada pelo dashboard." };
+  const modo = String(rows[i][0]).trim() === "Conta" ? "cliente" : "prospeto";
+  const txt = (v) => String(v === null || v === undefined ? "" : v).trim();
+  const num = (v) => (v === "" ? "" : String(v));
+  const linhas = [];
+  for (let k = i + 1; k < rows.length; k++) {
+    const r = rows[k];
+    if (r.every((c) => c === "")) break;
+    if (modo === "prospeto") {
+      linhas.push({ servico: txt(r[0]), valorMensal: num(r[1]), produtoAtual: txt(r[2]), quantidade: r[3] === "" ? 1 : r[3], duracao: txt(r[5]) });
+    } else {
+      const acao = ACOES_PROPOSTA.includes(txt(r[7])) ? txt(r[7]) : "Inalterado";
+      linhas.push({
+        conta: txt(r[0]), servico: txt(r[1]), fim: paraDataIsoContrato(r[2]) || "", valorMensal: num(r[4]), desconto: num(r[5]),
+        produtoAtual: txt(r[6]), acao, novoTarifario: acao === "Manter" ? "" : txt(r[8]), novoValor: num(r[9]), duracao: txt(r[10]),
+      });
+    }
+  }
+  return { modo, titulo, linhas };
+}
+
 function PropostasView() {
   const { todosClientes, adicionarProposta } = useClientesNovos();
   const { todosProspetos } = useProspetosNovos();
@@ -10769,6 +10798,9 @@ function PropostasView() {
   const [contasSel, setContasSel] = useState([]);
   const [linhas, setLinhas] = useState([]);
   const [aviso, setAviso] = useState("");
+  const importRef = React.useRef(null); // linhas lidas do Excel, aplicadas quando as linhas dos contratos forem reconstruídas
+  const [versaoImport, setVersaoImport] = useState(0);
+  const inputImportRef = React.useRef(null);
   const [pdfHtml, setPdfHtml] = useState("");
   const [pedidoPdf, setPedidoPdf] = useState(false);
   const iframePdfRef = React.useRef(null);
@@ -10895,9 +10927,26 @@ function PropostasView() {
       prev.filter((l) => l.manual && contasSel.includes(l.conta)).forEach((l) => {
         if (!novas.some((x) => x.key === l.key)) novas.push(l);
       });
+      // Importação de um Excel (2026-10-09): cada linha do ficheiro repõe a edição na linha do
+      // contrato com a mesma conta+serviço; as que não encontram par ficam como linhas manuais.
+      const imp = importRef.current;
+      if (imp) {
+        importRef.current = null;
+        const norm = (x) => `${x.conta}|${String(x.servico).toLowerCase()}`;
+        const usadas = new Set();
+        imp.forEach((l, n) => {
+          const par = novas.find((x) => !x.manual && !usadas.has(x.key) && norm(x) === norm(l));
+          if (par) {
+            usadas.add(par.key);
+            Object.assign(par, { valorMensal: l.valorMensal, desconto: l.desconto, acao: l.acao, novoTarifario: l.novoTarifario, novoValor: l.novoValor, duracao: l.duracao });
+          } else {
+            novas.push({ quantidade: 1, ...l, key: `manual::${l.conta}::${Date.now()}_${n}`, manual: true });
+          }
+        });
+      }
       return novas;
     });
-  }, [contasSel, docContratos]); // eslint-disable-line
+  }, [contasSel, docContratos, versaoImport]); // eslint-disable-line
 
   const atualizarLinha = (key, campos) => setLinhas((prev) => prev.map((l) => (l.key === key ? { ...l, ...campos } : l)));
   const togglarConta = (conta) => setContasSel((prev) => (prev.includes(conta) ? prev.filter((c) => c !== conta) : [...prev, conta]));
@@ -10917,6 +10966,23 @@ function PropostasView() {
     XLSX.writeFile(wb, nome);
     setAviso(`Excel gravado: ${nome}`);
     setTimeout(() => setAviso(""), 8000);
+  };
+  const importarExcel = async (f) => {
+    if (!f) return;
+    try {
+      const r = lerPropostaExcel(await f.arrayBuffer());
+      if (r.erro) { setAviso(r.erro); return; }
+      if (r.modo !== alvo) { setAviso(`Este Excel é de ${r.modo === "cliente" ? "Cliente" : "Prospeto"} — muda "Proposta para" para ${r.modo === "cliente" ? "Cliente" : "Prospeto"} e escolhe o mesmo nome.`); return; }
+      if (!r.linhas.length) { setAviso("O Excel não tem linhas de serviços."); return; }
+      if (ehProspeto) {
+        setLinhas(r.linhas.map((l, n) => ({ ...l, key: `manual::(prospeto)::${Date.now()}_${n}`, conta: "(prospeto)", manual: true, fim: "", desconto: "", acao: "", novoTarifario: "", novoValor: "" })));
+      } else {
+        importRef.current = r.linhas;
+        setContasSel([...new Set(r.linhas.map((l) => l.conta))]);
+        setVersaoImport((v) => v + 1);
+      }
+      setAviso(`Importadas ${r.linhas.length} linha(s) do Excel${r.titulo && r.titulo !== nomeAlvo ? ` (o ficheiro é de "${r.titulo}")` : ""}. Confirma os valores antes de gravar de novo.`);
+    } catch (e) { setAviso(`Não consegui ler o Excel: ${e.message}`); }
   };
   const apresentarPdf = () => {
     if (!podeGerar) return;
@@ -11029,6 +11095,15 @@ function PropostasView() {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <input ref={inputImportRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={(e) => { importarExcel(e.target.files[0]); e.target.value = ""; }} />
+        <button onClick={() => inputImportRef.current && inputImportRef.current.click()} disabled={!nomeAlvo}
+          title="Repõe a proposta a partir de um Excel gravado pelo dashboard" className="text-sm px-3.5 py-2 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50 disabled:opacity-40">
+          Importar proposta (Excel)
+        </button>
+        <span className="text-xs text-neutral-400">Repõe uma proposta gravada antes em Excel, sem escrever tudo de novo.</span>
       </div>
 
       {contasSel.length > 0 && (
