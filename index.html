@@ -10713,12 +10713,14 @@ const DESCRITIVO_TARIFARIOS = [
   { re: /infinity max|\bi ?max\b|∞ ?max/, nome: "Biz Infinity Max", texto: "Chamadas, SMS e MMS ilimitados; internet no telemóvel ilimitada até 1 Gbps; 1.000 min/SMS internacionais para Europa, EUA, Canadá e Brasil (partilháveis na conta); 5 GB de banda larga móvel individual incluídos; roaming fora da UE com 50 GB/ano + 100 minutos; Nº Fixo no Telemóvel + One Net e Suporte Especializado incluídos." },
   { re: /infinity start|\bi ?start\b|∞ ?start/, nome: "Biz Infinity Start", texto: "Chamadas e SMS ilimitados; internet no telemóvel ilimitada até 1 Gbps; 25 min/SMS para a Europa; Suporte Especializado incluído." },
   { re: /\b[1-4]p\b|net voz|tv net|\bnet biz\b|pacote/, pacote: true },
-  { re: /v2 ?plus/, nome: "Biz V2 Plus", texto: "5.000 min/SMS nacionais e em roaming na UE; 10 GB de internet no telemóvel até 800 Mbps; Suporte Especializado incluído." },
+  { re: /v2 ?plus|\bv2 ?p\b/, nome: "Biz V2 Plus", texto: "5.000 min/SMS nacionais e em roaming na UE; 10 GB de internet no telemóvel até 800 Mbps; Suporte Especializado incluído." },
   { re: /\bmax\b/, nome: "Biz Max", texto: "5.000 min/SMS nacionais e em roaming na UE; 500 GB de internet no telemóvel + 50 GB partilhados na conta, até 800 Mbps (5G); opção de 500 min/SMS internacionais para Europa, EUA e Canadá; Nº Fixo no Telemóvel + One Net e Suporte Especializado incluídos." },
   { re: /standard/, nome: "Biz Standard", texto: "5.000 min/SMS nacionais e em roaming na UE; 300 GB de internet no telemóvel + 10 GB partilhados na conta, até 800 Mbps; Nº Fixo no Telemóvel + One Net e Suporte Especializado incluídos." },
   { re: /\bstart\b/, nome: "Biz Start", texto: "4.000 min/SMS nacionais e em roaming na UE; 150 GB de internet no telemóvel até 600 Mbps (5G); Suporte Especializado incluído." },
+  { re: /one ?net analytics/, nome: "One Net Analytics", texto: "Análise das chamadas da solução One Net (número chamado e chamador, volume de chamadas recebidas e efetuadas por terminal e no total) num portal de visualização, com perfis de administrador e de consulta; requer uma companhia One Net." },
+  { re: /business wi-?fi/, nome: "Vodafone Business Wi-Fi", texto: "Solução Wi-Fi empresarial Vodafone, por ponto de acesso (até 7 pontos nesta oferta), com instalação incluída no preço e a funcionar sobre a conectividade Vodafone do cliente." },
   { re: /e-?fax/, nome: "One Net — Número de e-Fax", texto: "Receção e envio de fax diretamente no computador/email, sem equipamento de fax." },
-  { re: /n[rº.]* ?empresa|n[uú]mero de empresa/, nome: "One Net — Número de Empresa", texto: "Número único da empresa, apresentado nas chamadas feitas pelos utilizadores (fixo, móvel ou PC); as chamadas para este número são encaminhadas para os utilizadores da empresa." },
+  { re: /n[rº.]* ?empresa|n[uú]mero (?:de )?empresa/, nome: "One Net — Número de Empresa", texto: "Número único da empresa, apresentado nas chamadas feitas pelos utilizadores (fixo, móvel ou PC); as chamadas para este número são encaminhadas para os utilizadores da empresa." },
   { re: /n[aã]o geogr[aá]fico|\b80[08]\b|\b70[07]\b/, nome: "One Net — Número Não Geográfico", texto: "Número 800/808/700 para contacto dos clientes com a empresa, encaminhado para os utilizadores One Net." },
   { re: /one ?net.*(user|utilizador).*fixo|utilizador fixo/, nome: "One Net — Utilizador Fixo", texto: "Extensão da central telefónica na nuvem One Net, com telefone fixo, chamadas para redes nacionais e para a rede fixa de destinos internacionais, e Google Workspace Business Starter." },
   { re: /one ?net.*(user|utilizador).*m[oó]vel|utilizador m[oó]vel/, nome: "One Net — Utilizador Móvel", texto: "Integra o telemóvel na central telefónica One Net (extensão, transferência de chamadas e número fixo no telemóvel)." },
@@ -10747,7 +10749,7 @@ function descritivoTarifario(nome) {
   return null;
 }
 
-function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
+function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia, descritivosProprios) {
   // Redesenho 2026-10-05 (crítica de design): folha 2 = Resumo com a poupança/total em
   // destaque e a conta explicada; folha 3 = Detalhe (soluções, tabela, descritivo);
   // folha 4 = Condições + Novidade + Próximo passo/contacto. Sem índice; letra ≥ 9 pt.
@@ -10800,7 +10802,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
 
   // Descritivo: o nome mostrado é o MESMO da tabela (antes vinha do catálogo e não batia).
   const vistosDesc = new Set();
-  const descritivos = ls.map((l) => { const d = descritivoTarifario(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual); return d && { ...d, nome: nomeProposto(l) }; })
+  const descritivos = ls.map((l) => { const orig = ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual; const d = descritivoTarifario(orig) || (((descritivosProprios || {})[nomeTarifarioCurto(orig).toLowerCase()] || "").trim() ? { texto: descritivosProprios[nomeTarifarioCurto(orig).toLowerCase()].trim() } : null); return d && { ...d, nome: nomeProposto(l) }; })
     .filter((d) => d && !vistosDesc.has(d.texto) && vistosDesc.add(d.texto));
   const descritivoHtml = descritivos.length
     ? `<h3>O que inclui cada tarifário</h3><div class="desc">${descritivos.map((d) => `<p><b>${esc(d.nome)}</b> — ${esc(d.texto)}</p>`).join("")}</div>`
@@ -10984,6 +10986,24 @@ function PropostasView() {
       setNoticiaEstado("Notícia guardada. Vai aparecer em todas as propostas.");
     } catch (e) { setNoticiaEstado(`Não foi possível guardar: ${e.message}`); }
   };
+  // Descritivos escritos à mão para tarifários que o código não conhece (2026-10-11, pedido do
+  // Augusto). Chave = nome curto em minúsculas. Guardados na nuvem: meta/proposta_descritivos.
+  const [descProprios, setDescProprios] = useState({});
+  const [descAberto, setDescAberto] = useState(false);
+  const [descEstado, setDescEstado] = useState("");
+  useEffect(() => {
+    if (!firebaseUser) return;
+    firebaseDb.collection("meta").doc("proposta_descritivos").get()
+      .then((d) => { if (d.exists) setDescProprios((d.data() || {}).mapa || {}); })
+      .catch(() => {});
+  }, [firebaseUser]);
+  const guardarDescritivos = async () => {
+    if (!firebaseUser) { setDescEstado("Entra com o login para guardar na nuvem."); return; }
+    try {
+      await firebaseDb.collection("meta").doc("proposta_descritivos").set({ mapa: descProprios, atualizadoEm: new Date().toISOString() });
+      setDescEstado("Guardado. Vai aparecer nas propostas com estes tarifários.");
+    } catch (e) { setDescEstado(`Não foi possível guardar: ${e.message}`); }
+  };
   const escolherImagemNoticia = (file) => {
     if (!file) return;
     const img = new Image();
@@ -11116,6 +11136,9 @@ function PropostasView() {
   const removerLinha = (key) => setLinhas((prev) => prev.filter((l) => l.key !== key));
 
   const ehProspeto = alvo === "prospeto";
+  const tarifariosSemDescritivo = [...new Map(linhasPropostaPdf(linhas, ehProspeto)
+    .map((l) => nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual))
+    .filter((n) => n && !descritivoTarifario(n)).map((n) => [n.toLowerCase(), n])).values()];
 
   // Só se pode gravar/apresentar quando há pelo menos uma linha que ENTRA na proposta
   // (Inalterado e Apagar serviço não contam — num Prospeto não há ações, entram todas).
@@ -11148,7 +11171,7 @@ function PropostasView() {
   };
   const apresentarPdf = () => {
     if (!podeGerar) return;
-    setPdfHtml(gerarPropostaHtml(nomeAlvo, linhas, new Date(), ehProspeto, noticia));
+    setPdfHtml(gerarPropostaHtml(nomeAlvo, linhas, new Date(), ehProspeto, noticia, descProprios));
   };
 
   // "Proposta Entregue" (2026-09-30) — regista na ficha do CLIENTE que esta proposta
@@ -11422,6 +11445,28 @@ function PropostasView() {
             </button>
             <div className="text-sm text-neutral-600 ml-auto">Total mensal na proposta: <b>{formatEuro(total)}</b></div>
           </div>
+        </div>
+      )}
+
+      {tarifariosSemDescritivo.length > 0 && (
+        <div className="bg-white border border-neutral-200 rounded-lg p-4 space-y-3">
+          <button onClick={() => setDescAberto((v) => !v)} className="vf-hit44 text-sm font-medium text-neutral-800">
+            {descAberto ? "▾" : "▸"} Descritivo dos tarifários sem texto <span className="text-xs text-neutral-500 ml-2">({tarifariosSemDescritivo.filter((n) => !(descProprios[n.toLowerCase()] || "").trim()).length} por preencher)</span>
+          </button>
+          {descAberto && (
+            <div className="space-y-2">
+              <p className="text-xs text-neutral-500">Estes tarifários desta proposta não têm descritivo no PDF. Escreve uma frase para cada um (só características, sem preços); fica guardada para as próximas propostas.</p>
+              {tarifariosSemDescritivo.map((n) => (
+                <label key={n} className="block text-xs text-neutral-500">{n}
+                  <textarea value={descProprios[n.toLowerCase()] || ""} onChange={(e) => setDescProprios({ ...descProprios, [n.toLowerCase()]: e.target.value })} rows={2} className="mt-1 w-full px-3 py-2 rounded-md border border-neutral-300 text-sm" />
+                </label>
+              ))}
+              <div className="flex items-center gap-2">
+                <button onClick={guardarDescritivos} className="text-sm px-3.5 py-1.5 rounded-md bg-neutral-900 text-white">Guardar descritivos</button>
+                {descEstado && <span className="text-xs text-neutral-500">{descEstado}</span>}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
