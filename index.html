@@ -98,6 +98,24 @@
     .vf-sidebar .vf-side-pe { padding-left: 8px; padding-right: 8px; text-align: center; }
     .vf-main { margin-left: 64px !important; padding-left: 16px !important; padding-right: 16px !important; }
   }
+
+  /* Efeitos estilo Magic UI (2026-10-11), só CSS, sem dependências. */
+  /* Blur Fade: "backwards" (não "both") para não deixar filter/transform no fim — um filter
+     residual quebraria os pop-ups position:fixed que vivem dentro das linhas. */
+  @keyframes vf-blurfade { from { opacity: 0; filter: blur(6px); transform: translateY(6px); } }
+  .vf-blurfade { animation: vf-blurfade .5s ease-out backwards; }
+  /* Border Beam: um feixe vermelho que percorre a borda do cartão (precisa de Chrome/Edge 85+). */
+  @property --vf-beam { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+  @keyframes vf-beam { to { --vf-beam: 360deg; } }
+  .vf-beam { position: relative; }
+  .vf-beam::before {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 2px; pointer-events: none;
+    background: conic-gradient(from var(--vf-beam), transparent 0 78%, #E60000 96%, transparent 100%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    animation: vf-beam 6s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) { .vf-blurfade, .vf-beam::before { animation: none; } }
 </style>
 </head>
 <body>
@@ -5685,6 +5703,36 @@ const TONS_KPI = {
   amarelo: { background: "#FEF3C7", color: "#92400E", borderColor: "#FDE68A", sub: "#92400E" },
   verde: { background: "#CCFBF1", color: "#0F5F58", borderColor: "#99F6E4", sub: "#0F5F58" },
 };
+
+// Number Ticker (estilo Magic UI, sem dependências): conta até ao valor. Só anima inteiros
+// ("12", "1 234€", "45%"); qualquer outro texto ("—", "3/5", "12,5%") aparece como veio.
+// No fim mostra sempre o valor original, por isso o formato final nunca muda.
+const reduzirMovimento = () => !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+const parseInteiroAnimavel = (v) => {
+  if (typeof v === "number") return { alvo: v, sufixo: "" };
+  const m = String(v).match(/^(\d[\d\s  ]*)(€|%)?$/);
+  return m ? { alvo: parseInt(m[1].replace(/\D/g, ""), 10), sufixo: m[2] || "" } : { alvo: null, sufixo: "" };
+};
+function NumeroAnimado({ valor }) {
+  const { alvo, sufixo } = parseInteiroAnimavel(valor);
+  const de = React.useRef(0); // parte do último valor mostrado, não de 0 (ex.: contador de selecionados)
+  const [n, setN] = useState(() => (Number.isFinite(alvo) && !reduzirMovimento() ? de.current : null));
+  useEffect(() => {
+    if (!Number.isFinite(alvo) || reduzirMovimento()) { if (Number.isFinite(alvo)) de.current = alvo; setN(null); return; }
+    const ini = de.current;
+    let raf, t0;
+    const passo = (t) => {
+      t0 = t0 ?? t;
+      const p = Math.min(1, (t - t0) / 800);
+      if (p < 1) { setN(Math.round(ini + (alvo - ini) * (1 - (1 - p) ** 3))); raf = requestAnimationFrame(passo); }
+      else { de.current = alvo; setN(null); }
+    };
+    raf = requestAnimationFrame(passo);
+    return () => cancelAnimationFrame(raf);
+  }, [alvo]);
+  return <>{n === null ? valor : n.toLocaleString("pt-PT") + sufixo}</>;
+}
+
 function CartoesKpi({ itens }) {
   return (
     <div className="grid gap-3 mb-6" style={{ gridTemplateColumns: `repeat(${Math.min(itens.length, 4)}, minmax(0, 1fr))` }}>
@@ -5693,7 +5741,7 @@ function CartoesKpi({ itens }) {
         return (
           <div key={k.rotulo} className="rounded-[20px] border px-5 py-4" style={{ background: t.background, color: t.color, borderColor: t.borderColor }}>
             <div className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: t.sub }}>{k.rotulo}</div>
-            <div className="font-display font-extrabold text-[42px] leading-none mt-2 tracking-tight">{k.valor}</div>
+            <div className="font-display font-extrabold text-[42px] leading-none mt-2 tracking-tight"><NumeroAnimado valor={k.valor} /></div>
             {k.detalhe && <div className="text-xs mt-2" style={{ color: t.sub }}>{k.detalhe}</div>}
           </div>
         );
@@ -7590,7 +7638,7 @@ function ConcluirPassoDialogo({ c, passo, onFechar }) {
 
 function GrupoHoje({ titulo, cor, itens, vazio, render }) {
   return (
-    <section className="border border-neutral-200 rounded-lg bg-white">
+    <section className="vf-blurfade border border-neutral-200 rounded-lg bg-white">
       <h2 className={`px-3 py-2 border-b border-neutral-200 text-sm font-semibold ${cor === "red" ? "text-red-700" : cor === "amber" ? "text-amber-700" : "text-neutral-700"}`}>
         {titulo} <span className="font-normal text-neutral-500">({itens.length})</span>
       </h2>
@@ -7953,9 +8001,9 @@ function BarraAnimada({ pct, cor, fundo = "bg-neutral-100", altura = "h-2" }) {
   return <div className={`${altura} ${fundo} rounded-full overflow-hidden`}><div className="h-full rounded-full" style={{ width: m ? `${Math.max(0, Math.min(100, pct))}%` : 0, background: cor, transition: "width .8s ease" }} /></div>;
 }
 
-function CartaoRel({ titulo, children, className = "", acao }) {
+function CartaoRel({ titulo, children, className = "", acao, destaque = false }) {
   return (
-    <section className={`bg-white rounded-2xl border border-neutral-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.04)] p-4 ${className}`}>
+    <section className={`bg-white rounded-2xl border border-neutral-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.04)] p-4 ${destaque ? "vf-beam " : ""}${className}`}>
       <div className="flex items-center justify-between mb-3"><h2 className="text-sm font-semibold text-neutral-800">{titulo}</h2>{acao}</div>
       {children}
     </section>
@@ -8193,12 +8241,12 @@ function RelatoriosView() {
             <div className="text-[11px] text-neutral-400">Negócios com data de início neste trimestre, valor em RLMC ajustada.</div>
           </div>
         </CartaoRel>
-        <CartaoRel titulo="Pendentes agora" acao={<span className="text-[11px] text-neutral-400">o que ainda falta fazer</span>}>
+        <CartaoRel titulo="Pendentes agora" destaque={pendentes.passos.length + pendentes.propostas.length > 0} acao={<span className="text-[11px] text-neutral-400">o que ainda falta fazer</span>}>
           <div className="grid grid-cols-2 gap-2">
             {[["Próximos passos de hoje ou atrasados", pendentes.passos.length, "#e60000"], ["Propostas sem resposta há 7+ dias", pendentes.propostas.length, "#d97706"], ["Sem contacto há 90+ dias", pendentes.semContacto.length, "#2563eb"],
               ["Permanências a acabar em 1 mês", pendentes.renovacoes.filter((x) => x.dias <= 30).length, "#e60000"], ["Permanências a acabar em 1 a 3 meses", pendentes.renovacoes.filter((x) => x.dias > 30 && x.dias <= 90).length, "#d97706"], ["Permanências a acabar em 3 a 6 meses", pendentes.renovacoes.filter((x) => x.dias > 90).length, "#0891b2"]].map(([t, n, cor]) => (
               <div key={t} className="rounded-xl border border-neutral-100 bg-neutral-50 p-2.5">
-                <div className="text-2xl font-extrabold leading-none" style={{ color: n ? cor : "#a3a3a3" }}>{n}</div>
+                <div className="text-2xl font-extrabold leading-none" style={{ color: n ? cor : "#a3a3a3" }}><NumeroAnimado valor={n} /></div>
                 <div className="text-[11px] text-neutral-500 mt-1 leading-tight">{t}</div>
               </div>))}
           </div>
