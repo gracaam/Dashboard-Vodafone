@@ -7117,19 +7117,22 @@ function HistoricoContactosCard({ cliente }) {
    Lista de quem contactar, calculada só com dados que já existem: fim de permanência
    (contratos_permanencia), propostas entregues ainda não fechadas (campo `propostas`)
    e histórico de contactos (campo `contactos`). Só grava ao registar um contacto. */
+// Assuntos dados como resolvidos (pop-up "Resolvido"): entradas do histórico com `resolveu` = chave do assunto.
+const chavesResolvidas = (c) => new Set((Array.isArray(c && c.contactos) ? c.contactos : []).map((x) => x && x.resolveu).filter(Boolean));
 function calcularListaHoje(clientes, mapaContratos, hoje = new Date()) {
   const hojeIso = hoje.toISOString().slice(0, 10);
   const renovacoes = [], propostas = [], passos = [], semContacto = [];
   clientes.forEach((c) => {
+    const resolvidas = chavesResolvidas(c);
     const f = calcularFimMaisProximo(mapaContratos.get(String(c.n)), hoje);
-    if (f && !f.terminado && f.dias <= 183) renovacoes.push({ c, ...f });
+    if (f && !f.terminado && f.dias <= 183 && !resolvidas.has(`renovacao:${f.conta}:${f.fim}`)) renovacoes.push({ c, ...f });
     (Array.isArray(c.propostas) ? c.propostas : []).forEach((p) => {
-      if (p.fechada || !p.entregueEm) return;
+      if (p.fechada || !p.entregueEm || resolvidas.has(`proposta:${p.entregueEm}`)) return;
       const dias = diasEntreDatasIso(p.entregueEm.slice(0, 10), hojeIso);
       if (dias >= DIAS_PROPOSTA_SEM_RESPOSTA) propostas.push({ c, dias, total: p.total, entregueEm: p.entregueEm });
     });
     // Só o contacto mais recente conta: registar um contacto novo "fecha" o passo anterior.
-    const ultimo = contactosOrdenados(c)[0];
+    const ultimo = contactosOrdenados(c).find((x) => !x.resolveu);
     if (ultimo) {
       if (ultimo.proximoEm && ultimo.proximoEm <= hojeIso) passos.push({ c, ultimo, atraso: diasEntreDatasIso(ultimo.proximoEm, hojeIso) });
       const dias = diasEntreDatasIso(ultimo.em.slice(0, 10), hojeIso);
@@ -7170,6 +7173,7 @@ function listarTarifariosAntigos(clientes, mapaContratos, hoje = new Date()) {
   const hojeIso = hoje.toISOString().slice(0, 10);
   const out = [];
   clientes.forEach((c) => {
+    if (chavesResolvidas(c).has("antigo")) return;
     const doc = mapaContratos.get(String(c.n));
     const itens = [];
     Object.values((doc && doc.contas) || {}).forEach((dados) => ((dados && dados.contratos) || []).forEach((k) => {
@@ -7476,7 +7480,52 @@ function ImportarEmailsOutlook({ clientes, obterExtras, definirExtras }) {
 
 // Fora do HojeView de propósito: definido lá dentro, cada re-render recriava o
 // componente e fechava o formulário aberto.
-function LinhaHoje({ c, children, email, obterExtras, concluir }) {
+// Pop-up "Resolvido": pede o que ficou resolvido, com data, e grava no histórico de contactos da
+// ficha (tipo "Resolvido"). `chave` identifica o assunto para sair da lista de hoje.
+function ResolverDialogo({ nif, nome, resumo, chave, onFechar, onGravar }) {
+  const [nota, setNota] = useState("");
+  const [data, setData] = useState(new Date().toISOString().slice(0, 10));
+  const [estado, setEstado] = useState("");
+  useEffect(() => {
+    const f = (e) => { if (e.key === "Escape") onFechar(); };
+    window.addEventListener("keydown", f);
+    return () => window.removeEventListener("keydown", f);
+  }, []);
+  const gravar = async () => {
+    if (!nota.trim() || !data) { setEstado("Escreve o que ficou resolvido."); return; }
+    setEstado("A gravar…");
+    const em = new Date(`${data}T12:00:00`).toISOString();
+    try {
+      if (nif) await registarContacto(nif, { tipo: "Resolvido", nota: `${resumo ? resumo + " — " : ""}${nota.trim()}`, em, proximoPasso: "", proximoEm: null, ...(chave ? { resolveu: chave } : {}) });
+      if (onGravar) await onGravar({ resolucao: nota.trim(), resolvidoEm: data });
+      onFechar();
+    } catch (e) { setEstado(`Não foi possível gravar: ${e.message}`); }
+  };
+  const cls = "px-2 py-1.5 rounded border border-neutral-300 text-sm w-full";
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onFechar}>
+      <div role="dialog" aria-modal="true" aria-label="Assunto resolvido" onClick={(e) => e.stopPropagation()} className="bg-white rounded-lg shadow-xl w-full max-w-md p-4 space-y-3">
+        <div className="text-sm font-semibold">Assunto resolvido</div>
+        <div className="text-xs text-neutral-500">{nome}{resumo ? ` · ${resumo}` : ""}</div>
+        <label className="block text-xs text-neutral-500">O que ficou resolvido
+          <textarea autoFocus rows={3} value={nota} onChange={(e) => setNota(e.target.value)} placeholder="Ex.: negócio fechado, serviços em implementação" className={`${cls} mt-1`} />
+        </label>
+        <label className="block text-xs text-neutral-500">Data
+          <input type="date" value={data} onChange={(e) => setData(e.target.value)} className={`${cls} mt-1`} />
+        </label>
+        {!nif && <div className="text-xs text-amber-700">Este cliente não foi encontrado nas fichas — a resolução fica só guardada no assunto, não no histórico do cliente.</div>}
+        {estado && <div className="text-xs text-amber-700">{estado}</div>}
+        <div className="flex justify-end gap-2">
+          <button onClick={onFechar} className="text-sm px-3 py-1.5 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50">Cancelar</button>
+          <button onClick={gravar} className="text-sm px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700">Resolvido e guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LinhaHoje({ c, children, email, obterExtras, concluir, resolver }) {
+  const [resolvendo, setResolvendo] = useState(false);
   const [aberto, setAberto] = useState(false);
   const [semEmail, setSemEmail] = useState(false);
   const [concluindo, setConcluindo] = useState(false);
@@ -7487,11 +7536,13 @@ function LinhaHoje({ c, children, email, obterExtras, concluir }) {
         <span className="text-xs text-neutral-500 flex-1 min-w-0 break-words" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{children}</span>
         {email && <button onClick={async () => setSemEmail(!(await gerarEmailHoje(c, email, obterExtras)))} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap shrink-0">Gerar email</button>}
         {concluir != null && <button onClick={() => setConcluindo(true)} title="Dá o passo como feito e regista no histórico o que fizeste" className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0">Concluir</button>}
+        {resolver && <button onClick={() => setResolvendo(true)} title="Dá o assunto como resolvido e regista na ficha do cliente" className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0">Resolvido</button>}
         <button onClick={() => setAberto((v) => !v)} className="text-xs text-neutral-500 hover:text-red-600 underline whitespace-nowrap shrink-0">{aberto ? "Fechar" : "Registar contacto"}</button>
       </div>
       {semEmail && <div className="text-[11px] text-amber-700">A ficha deste cliente não tem email — escreve-o no Outlook (ou no campo Email da ficha, para as próximas vezes).</div>}
       {aberto && <RegistoContactoForm nif={c.n} onFeito={() => setAberto(false)} />}
       {concluindo && <ConcluirPassoDialogo c={c} passo={concluir} onFechar={() => setConcluindo(false)} />}
+      {resolvendo && <ResolverDialogo nif={c.n} nome={c.e} resumo={resolver.resumo} chave={resolver.chave} onFechar={() => setResolvendo(false)} />}
     </div>
   );
 }
@@ -8183,7 +8234,7 @@ function HojeView() {
   const { renovacoes, propostas, passos, semContacto } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const antigos = useMemo(() => listarTarifariosAntigos(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const em = (tipo, x) => ({ email: textoEmailHoje(tipo, x.c, x), obterExtras });
-  const renov = (x) => <LinhaHoje key={x.c.n} c={x.c} {...em("renovacao", x)}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {rotuloConta(x.conta)}</LinhaHoje>;
+  const renov = (x) => <LinhaHoje key={x.c.n} c={x.c} resolver={{ chave: `renovacao:${x.conta}:${x.fim}`, resumo: `Permanência termina a ${formatarDataIsoPT(x.fim)}` }} {...em("renovacao", x)}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {rotuloConta(x.conta)}</LinhaHoje>;
   return (
     <div className="space-y-5">
       {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
@@ -8214,13 +8265,13 @@ function HojeView() {
           // Sem "sobe/desce" (2026-10-04): a "Multa Mensal" do contrato não é a mensalidade
           // e o preço de tabela ignora descontos — a diferença dava valores enganadores.
           return (
-            <LinhaHoje key={x.c.n} c={x.c} {...em("antigo", x)}>
+            <LinhaHoje key={x.c.n} c={x.c} resolver={{ chave: "antigo", resumo: "Tarifários antigos" }} {...em("antigo", x)}>
               {Object.entries(porSug).map(([sug, g]) => `${g.n}× ${[...g.produtos].slice(0, 2).join(", ")} → ${sug}`).join(" · ")}
             </LinhaHoje>
           );
         }} />
       <GrupoHoje titulo={`Propostas entregues sem resposta há ${DIAS_PROPOSTA_SEM_RESPOSTA}+ dias`} itens={propostas} vazio="Nenhuma proposta à espera de resposta."
-        render={(x, i) => <LinhaHoje key={`${x.c.n}-${i}`} c={x.c} {...em("proposta", x)}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</LinhaHoje>} />
+        render={(x, i) => <LinhaHoje key={`${x.c.n}-${i}`} c={x.c} resolver={{ chave: `proposta:${x.entregueEm}`, resumo: `Proposta de ${new Date(x.entregueEm).toLocaleDateString("pt-PT")}` }} {...em("proposta", x)}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</LinhaHoje>} />
       <GrupoHoje titulo={`Sem contacto há mais de ${DIAS_SEM_CONTACTO} dias`} itens={semContacto} vazio="Ninguém (só conta clientes com pelo menos um contacto registado)."
         render={(x) => <LinhaHoje key={x.c.n} c={x.c} {...em("semContacto", x)}>último: {new Date(x.ultimo.em).toLocaleDateString("pt-PT")} · há {x.dias} dias</LinhaHoje>} />
     </div>
@@ -8978,7 +9029,6 @@ function ClientesView() {
         </select>
       </AcoesCabecalho>
 
-      <BlocoCampanha registos={registosFiltrados} todos={registosCampanha} aCarregar={todosClientes.length > 0 && !extrasCampanha} />
 
       <div className="pt-6">
         <div className="font-display font-bold text-2xl mb-3">Ficha de cliente</div>
@@ -9207,6 +9257,9 @@ function ClientesView() {
           </div>
         </>
       )}
+
+      {/* Listagem para campanhas: depois da ficha */}
+      <BlocoCampanha registos={registosFiltrados} todos={registosCampanha} aCarregar={todosClientes.length > 0 && !extrasCampanha} />
     </div>
   );
 }
@@ -10788,7 +10841,7 @@ function lerPropostaExcel(ab) {
 
 function PropostasView() {
   const { todosClientes, adicionarProposta } = useClientesNovos();
-  const { todosProspetos } = useProspetosNovos();
+  const { todosProspetos, adicionar: adicionarProspeto, obterExtras: obterExtrasProspeto, definirExtras: definirExtrasProspeto } = useProspetosNovos();
   const firebaseUser = useFirebaseAuthUser();
   const mapaContratos = useContratosPermanencia(firebaseUser);
 
@@ -10950,7 +11003,7 @@ function PropostasView() {
 
   const atualizarLinha = (key, campos) => setLinhas((prev) => prev.map((l) => (l.key === key ? { ...l, ...campos } : l)));
   const togglarConta = (conta) => setContasSel((prev) => (prev.includes(conta) ? prev.filter((c) => c !== conta) : [...prev, conta]));
-  const adicionarManual = (conta) => setLinhas((prev) => [...prev, { key: `manual::${conta}::${Date.now()}`, conta, manual: true, servico: "", fim: "", produtoAtual: "", valorMensal: "", desconto: "", duracao: "", quantidade: 1, acao: "Novo", novoTarifario: "", novoValor: "" }]);
+  const adicionarManual = (conta, tipo) => setLinhas((prev) => [...prev, { key: `manual::${conta}::${Date.now()}`, conta, manual: true, ...(tipo ? { tipo } : {}), servico: "", fim: "", produtoAtual: "", valorMensal: "", desconto: "", duracao: "", quantidade: 1, acao: "Novo", novoTarifario: "", novoValor: "" }]);
   const removerLinha = (key) => setLinhas((prev) => prev.filter((l) => l.key !== key));
 
   const ehProspeto = alvo === "prospeto";
@@ -10998,22 +11051,30 @@ function PropostasView() {
   const [entregueSig, setEntregueSig] = useState("");
   const sigAtual = `${nifAlvo}|${JSON.stringify(linhas)}`;
   const propostaEntregue = async () => {
-    if (!podeGerar || !registo || alvo !== "cliente" || entregueSig === sigAtual) return;
+    if (!podeGerar || entregueSig === sigAtual) return;
+    if (alvo === "cliente" ? !registo : !/^\d{9}$/.test(nifAlvo)) return;
     setEntregueSig(sigAtual);
-    const usadas = linhasPropostaExcel(linhas, false);
+    const usadas = linhasPropostaExcel(linhas, ehProspeto);
     const retrato = usadas.map((l) => {
       const dur = numProposta(String(l.duracao || "").replace(/\D/g, ""));
       return {
         conta: l.conta || "", servico: l.servico || "", produto: novoTarifarioLinhaProposta(l) || l.produtoAtual || "",
-        valorMensal: numProposta(l.novoValor) != null ? numProposta(l.novoValor) : numProposta(l.valorMensal),
+        valorMensal: ehProspeto ? valorLinhaProspeto(l) : (numProposta(l.novoValor) != null ? numProposta(l.novoValor) : numProposta(l.valorMensal)),
         duracaoMeses: dur, acao: l.acao || "",
       };
     });
-    const proposta = { entregueEm: new Date().toISOString(), linhas: retrato, total: totalProposta(linhas), fechada: false, fechadaEm: null, contratosGerados: false };
+    const proposta = { entregueEm: new Date().toISOString(), linhas: retrato, total: totalProposta(linhas, ehProspeto), fechada: false, fechadaEm: null, contratosGerados: false };
     try {
-      await adicionarProposta(nifAlvo, proposta);
+      if (ehProspeto) {
+        // Prospeto continua prospeto: a proposta fica nos extras do prospeto e só passa para
+        // o cliente quando o negócio é fechado. Prospeto novo (sem ficha) é criado em Prospetos, nunca em Clientes.
+        if (!registo) await adicionarProspeto({ n: nifAlvo, e: nomeAlvo, seg: "", cae: "", caeDesc: "", cls: "Prospect", cidade: "", distrito: "", colab: 0, tel: "", email: "", contacto: "Sem contactos", estado: "", manual: true });
+        const ex = await obterExtrasProspeto(nifAlvo);
+        if (ex === null) throw new Error("não foi possível ler o prospeto");
+        await definirExtrasProspeto(nifAlvo, { propostas: [...(Array.isArray(ex.propostas) ? ex.propostas : []), proposta] });
+      } else await adicionarProposta(nifAlvo, proposta);
       apagarRascunho().then(() => setRascunho(null)).catch(() => {});
-      setAviso(`Proposta registada como entregue para ${nomeAlvo} (${new Date().toLocaleDateString("pt-PT")}). Vê a ficha do cliente.`);
+      setAviso(`Proposta registada como entregue para ${nomeAlvo} (${new Date().toLocaleDateString("pt-PT")}). ${ehProspeto ? "Fica no prospeto até fechares o negócio." : "Vê a ficha do cliente."}`);
       setTimeout(() => setAviso(""), 10000);
     } catch (e) {
       setEntregueSig("");
@@ -11108,13 +11169,14 @@ function PropostasView() {
 
       {contasSel.length > 0 && (
         <div className="space-y-4">
-          {contasSel.map((conta) => {
-            const doConta = linhas.filter((l) => l.conta === conta);
+          {/* Prospeto: um quadro por área (Fixo, Móvel, ...); Cliente: um quadro por conta. */}
+          {(ehProspeto ? TIPOS_SERVICO_PROPOSTA : contasSel).map((conta) => {
+            const doConta = ehProspeto ? linhas.filter((l) => tipoServicoProposta(l) === conta) : linhas.filter((l) => l.conta === conta);
             return (
               <div key={conta} className="bg-white border border-neutral-200 rounded-lg overflow-hidden">
                 <div className="flex items-center justify-between px-4 py-2.5 border-b border-neutral-100">
-                  <div className="text-sm font-medium">{conta === "(prospeto)" ? "Prospeto — serviços" : `Conta ${rotuloConta(conta)}`}</div>
-                  <button onClick={() => adicionarManual(conta)} className="text-xs px-2.5 py-1 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50">+ Adicionar serviço</button>
+                  <div className="text-sm font-medium">{ehProspeto ? conta : `Conta ${rotuloConta(conta)}`}</div>
+                  <button onClick={() => ehProspeto ? adicionarManual(contasSel[0] || "(prospeto)", conta) : adicionarManual(conta)} className="text-xs px-2.5 py-1 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50">+ Adicionar serviço</button>
                 </div>
                 <div className="max-h-[420px] overflow-y-auto">
                   <table className="w-full text-xs">
@@ -11244,8 +11306,8 @@ function PropostasView() {
             <button onClick={apresentarPdf} disabled={!podeGerar} className="text-sm px-3.5 py-2 rounded-md bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-40">
               Apresentar proposta (PDF)
             </button>
-            <button onClick={propostaEntregue} disabled={!podeGerar || alvo !== "cliente" || !registo || entregueSig === sigAtual}
-              title={entregueSig === sigAtual ? "Esta proposta já foi registada como entregue. Altera uma linha para registar uma nova." : alvo !== "cliente" ? "Só para clientes com ficha (onde fica registada a entrega)" : "Regista na ficha do cliente que esta proposta foi entregue hoje"}
+            <button onClick={propostaEntregue} disabled={!podeGerar || (alvo === "cliente" ? !registo : !/^\d{9}$/.test(nifAlvo)) || entregueSig === sigAtual}
+              title={entregueSig === sigAtual ? "Esta proposta já foi registada como entregue. Altera uma linha para registar uma nova." : alvo !== "cliente" ? (/^\d{9}$/.test(nifAlvo) ? "Regista no prospeto que esta proposta foi entregue hoje (passa para o cliente quando fechares o negócio)" : "Indica um NIF com 9 dígitos") : "Regista na ficha do cliente que esta proposta foi entregue hoje"}
               className="text-sm px-3.5 py-2 rounded-md border border-emerald-600 text-emerald-700 font-medium hover:bg-emerald-50 disabled:opacity-40">
               Proposta Entregue
             </button>
@@ -11547,7 +11609,7 @@ function ProspetosView() {
     setAGravarUploadProspetos(false);
     setTimeout(() => setAvisoUploadProspetos(""), 8000);
   };
-  const { todosClientes, adicionar: adicionarClienteNuvem, fonteExcel: fonteExcelClientes, aCarregarExcel: aCarregarExcelClientes, precisaPermissaoExcel: precisaPermissaoClientes, continuarExcel: continuarClientes, ligarExcel: ligarClientes, recarregarExcel: recarregarExcelClientes, nuvemAtiva: nuvemAtivaClientes } = useClientesNovos();
+  const { todosClientes, adicionar: adicionarClienteNuvem, guardarPropostas: guardarPropostasCliente, fonteExcel: fonteExcelClientes, aCarregarExcel: aCarregarExcelClientes, precisaPermissaoExcel: precisaPermissaoClientes, continuarExcel: continuarClientes, ligarExcel: ligarClientes, recarregarExcel: recarregarExcelClientes, nuvemAtiva: nuvemAtivaClientes } = useClientesNovos();
   const { todos: todaCarteira } = useCarteiraFidelizar();
   const [filtroDistrito, setFiltroDistrito] = useState("");
   const [filtroSegmento, setFiltroSegmento] = useState("");
@@ -11694,7 +11756,9 @@ function ProspetosView() {
       // livre adicionarClienteLocal, que só escrevia em localStorage e ficaria
       // "invisível" para quem já migrou Clientes para a nuvem (2026-09-18).
       if (!nuvemAtivaClientes) adicionarClienteLocal(nif, nome);
-      else adicionarClienteNuvem({ n: nif, e: nome, t: "Novo Cliente", v: [0, 0], d: [0, 0], i: 0, f: [0, 0], manual: true });
+      else await adicionarClienteNuvem({ n: nif, e: nome, t: "Novo Cliente", v: [0, 0], d: [0, 0], i: 0, f: [0, 0], manual: true });
+      // As propostas entregues enquanto era prospeto passam para a ficha do cliente (depois de criada).
+      if (Array.isArray(extras.propostas) && extras.propostas.length) await guardarPropostasCliente(nif, extras.propostas).catch(() => {});
       const excelP = await removerProspectDoExcel(nif).catch(() => false);
       const excelC = await adicionarClienteAoExcel(prospetoAtual || { n: nif, e: nome }, extras.simulador).catch(() => false);
       setAvisoSucesso(
@@ -11761,9 +11825,6 @@ function ProspetosView() {
         </select>
       </AcoesCabecalho>
 
-      <BlocoCampanha
-        registos={prospetosFiltrados.map((p) => ({ n: p.n, e: p.e, email: p.email, seg: p.seg, distrito: p.distrito }))}
-        todos={prospetosAbertos.map((p) => ({ n: p.n, e: p.e, email: p.email, seg: p.seg, distrito: p.distrito }))} />
 
       <SemNifAlerta registos={prospetosSemNif} onGuardarNif={guardarNifExistente} />
 
@@ -11862,6 +11923,24 @@ function ProspetosView() {
             )}
           </div>
 
+          {!ehNovo && Array.isArray(extras.propostas) && extras.propostas.length > 0 && (
+            <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-2">
+              <div className="text-xs font-medium text-neutral-400">PROPOSTAS ENTREGUES</div>
+              {extras.propostas.map((p, i) => {
+                const em = p.entregueEm ? new Date(p.entregueEm).toLocaleDateString("pt-PT") : "—";
+                return (
+                  <div key={i} className="flex items-center gap-2 flex-wrap text-sm border border-neutral-100 rounded-md px-3 py-2">
+                    <span className="text-neutral-700">Proposta entregue em <b>{em}</b></span>
+                    <span className="text-xs text-neutral-400">{formatEuro(p.total || 0)} · {(p.linhas || []).length} serviço(s)</span>
+                    <button onClick={() => mudarExtra("propostas", extras.propostas.filter((_, j) => j !== i))} aria-label={`Apagar proposta entregue em ${em}`} title="Apagar (confirma ao guardar a ficha)"
+                      className="ml-auto text-neutral-400 hover:text-red-600 px-1">✕</button>
+                  </div>
+                );
+              })}
+              <div className="text-[11px] text-neutral-400">Passam para a ficha do cliente quando o negócio for fechado.</div>
+            </div>
+          )}
+
           <div className="border border-neutral-200 rounded-lg bg-white p-4">
             <div className="text-xs font-medium text-neutral-400 mb-3">ACOMPANHAMENTO COMERCIAL</div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -11911,6 +11990,11 @@ function ProspetosView() {
           </div>
         </>
       )}
+
+      {/* Listagem para campanhas: depois da ficha */}
+      <BlocoCampanha
+        registos={prospetosFiltrados.map((p) => ({ n: p.n, e: p.e, email: p.email, seg: p.seg, distrito: p.distrito }))}
+        todos={prospetosAbertos.map((p) => ({ n: p.n, e: p.e, email: p.email, seg: p.seg, distrito: p.distrito }))} />
     </div>
   );
 }
@@ -12395,8 +12479,8 @@ function NegociosView() {
   // sincronizarComClientes/removerNegocioDeTodosOsClientes/reverterClienteAutoCriadoSeVazio
   // vivem em useClientesNovos desde o Passo 3 do refactor (2026-09-19) — mexem em dados
   // de Clientes (incl. na nuvem, se migrado), nunca em Negócios.
-  const { todosClientes, sincronizarComClientes, removerNegocioDeTodosOsClientes, reverterClienteAutoCriadoSeVazio } = useClientesNovos();
-  const { todosProspetos, definirExtras: definirExtrasProspeto } = useProspetosNovos();
+  const { todosClientes, sincronizarComClientes, removerNegocioDeTodosOsClientes, reverterClienteAutoCriadoSeVazio, obterPropostas: obterPropostasCliente, guardarPropostas: guardarPropostasCliente } = useClientesNovos();
+  const { todosProspetos, definirExtras: definirExtrasProspeto, obterExtras: obterExtrasProspeto } = useProspetosNovos();
   const { ehCampanha, definir: definirCampanha } = useNegociosCampanha();
   // "Campanha" depois de Negócios migrar para a nuvem (Passo 2, 2026-09-19): passa a
   // viver diretamente no próprio documento (negocio.campanha) — deixa de precisar do
@@ -12561,6 +12645,15 @@ function NegociosView() {
     // extras.negocioFechado que a ficha usa (2026-09-29, deixou de haver uma marca à
     // parte em localStorage["prospetos-fechados"]).
     await definirExtrasProspeto(nif, { negocioFechado: true });
+    // Propostas entregues enquanto prospeto → ficha do cliente (sem duplicar se já lá estiverem).
+    try {
+      const exP = await obterExtrasProspeto(nif);
+      const doProspeto = exP && Array.isArray(exP.propostas) ? exP.propostas : [];
+      const doCliente = await obterPropostasCliente(nif);
+      const jaLa = new Set((Array.isArray(doCliente) ? doCliente : []).map((p) => p.entregueEm));
+      const novas = doProspeto.filter((p) => !jaLa.has(p.entregueEm));
+      if (novas.length) await guardarPropostasCliente(nif, [...(Array.isArray(doCliente) ? doCliente : []), ...novas]);
+    } catch {}
     const excelP = await removerProspectDoExcel(nif).catch(() => false);
     const excelC = await adicionarClienteAoExcel(prospect, "").catch(() => false);
     setAvisoNegocio(
@@ -13897,7 +13990,8 @@ function CalendarioAssuntos({ assuntos, diaFiltro, onSelecionarDia }) {
 // só editáveis ao criar (decisão de manter o âmbito pedido, não abrir tudo). Convertido
 // de função simples para componente próprio (React exige um componente de verdade
 // para poder ter o seu próprio useState de edição, um por cartão).
-function CartaoAssunto({ a, arquivado, atualizar, remover }) {
+function CartaoAssunto({ a, arquivado, atualizar, remover, nif }) {
+  const [resolvendo, setResolvendo] = useState(false);
   const [aEditar, setAEditar] = useState(false);
   const [rascunho, setRascunho] = useState({ comentario: a.comentario, dataPrevista: a.dataPrevista || "" });
 
@@ -13938,9 +14032,12 @@ function CartaoAssunto({ a, arquivado, atualizar, remover }) {
       ) : (
         <div className="text-sm text-neutral-700 whitespace-pre-wrap">{a.comentario}</div>
       )}
+      {a.resolucao && <div className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">Resolvido{a.resolvidoEm ? ` em ${formatarDataIsoPT(a.resolvidoEm)}` : ""}: {a.resolucao}</div>}
+      {resolvendo && <ResolverDialogo nif={nif} nome={a.cliente} resumo={(a.comentario || "").slice(0, 80)} onFechar={() => setResolvendo(false)}
+        onGravar={(r) => atualizar(a.id, { estado: "Resolvido", ...r })} />}
 
       <div className="flex items-center gap-2 pt-1">
-        <select value={a.estado} onChange={(e) => atualizar(a.id, { estado: e.target.value })}
+        <select value={a.estado} onChange={(e) => e.target.value === "Resolvido" ? setResolvendo(true) : atualizar(a.id, { estado: e.target.value })}
           className={`text-[11px] px-2 py-1 rounded-md border ${ASSUNTO_ESTADO_ESTILO[a.estado]}`}>
           {ASSUNTO_ESTADOS.map((e) => <option key={e} value={e}>{e}</option>)}
         </select>
@@ -13960,6 +14057,8 @@ function AssuntosView() {
     setResultadoSincFaltantes(n);
     setTimeout(() => setResultadoSincFaltantes(null), 8000);
   };
+  const { todosClientes: clientesAssuntos } = useClientesNovos();
+  const nifDoAssunto = (a) => { const nome = String(a.cliente || "").trim().toLocaleUpperCase("pt-PT"); const c = clientesAssuntos.find((x) => x.e === nome); return c ? c.n : ""; };
   const [form, setForm] = useState(null);
   const [mostrarArquivo, setMostrarArquivo] = useState(false);
   // Dia selecionado no calendário (formato "AAAA-MM-DD") — null = sem filtro. Clicar
@@ -14115,14 +14214,14 @@ function AssuntosView() {
             </div>
           )}
 
-          <div className="space-y-2">{ativos.map((a) => <CartaoAssunto key={a.id} a={a} arquivado={false} atualizar={atualizar} remover={remover} />)}</div>
+          <div className="space-y-2">{ativos.map((a) => <CartaoAssunto key={a.id} a={a} nif={nifDoAssunto(a)} arquivado={false} atualizar={atualizar} remover={remover} />)}</div>
 
           {arquivados.length > 0 && (
             <div className="pt-2">
               <button onClick={() => setMostrarArquivo((v) => !v)} className="text-xs text-neutral-400 hover:text-neutral-600">
                 {mostrarArquivo ? "▾" : "▸"} {arquivados.length} resolvido{arquivados.length === 1 ? "" : "s"} (arquivo)
               </button>
-              {mostrarArquivo && <div className="space-y-2 pt-2">{arquivados.map((a) => <CartaoAssunto key={a.id} a={a} arquivado={true} atualizar={atualizar} remover={remover} />)}</div>}
+              {mostrarArquivo && <div className="space-y-2 pt-2">{arquivados.map((a) => <CartaoAssunto key={a.id} a={a} nif={nifDoAssunto(a)} arquivado={true} atualizar={atualizar} remover={remover} />)}</div>}
             </div>
           )}
         </div>
