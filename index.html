@@ -114,6 +114,30 @@
     .vf-main { margin-left: 64px !important; padding-left: 16px !important; padding-right: 16px !important; }
   }
 
+  /* Modo escuro (2026-10-11): só com sessão iniciada (o login fica sempre claro). Camada de
+     sobreposição: variáveis + as classes Tailwind mais usadas. PDF, relatórios e emails ficam sempre claros. */
+  :root { --vf-kpi-escuro-bg:#1B1416; --vf-kpi-am-bg:#FEF3C7; --vf-kpi-am-fg:#92400E; --vf-kpi-am-bd:#FDE68A; --vf-kpi-vd-bg:#CCFBF1; --vf-kpi-vd-fg:#0F5F58; --vf-kpi-vd-bd:#99F6E4; }
+  html[data-tema="escuro"] { --vf-bg:#161214; --vf-card:#211B1E; --vf-border:#3A3134; --vf-ink:#F3EEEC; --vf-muted:#B8ACAF; --vf-red-hover:#FF6B6B;
+    --vf-kpi-escuro-bg:#352C30; --vf-kpi-am-bg:#3A2E10; --vf-kpi-am-fg:#FCD34D; --vf-kpi-am-bd:#5C4A17; --vf-kpi-vd-bg:#0F3A36; --vf-kpi-vd-fg:#5EEAD4; --vf-kpi-vd-bd:#14534D; color-scheme: dark; }
+  html[data-tema="escuro"] .bg-white, html[data-tema="escuro"] .hover\:bg-white:hover { background-color: var(--vf-card); }
+  html[data-tema="escuro"] .bg-neutral-50, html[data-tema="escuro"] .bg-neutral-100, html[data-tema="escuro"] .hover\:bg-neutral-50:hover, html[data-tema="escuro"] .hover\:bg-neutral-100:hover { background-color: #2A2326; }
+  html[data-tema="escuro"] .border-neutral-100, html[data-tema="escuro"] .border-neutral-200, html[data-tema="escuro"] .border-neutral-300, html[data-tema="escuro"] .divide-neutral-100 > * + *, html[data-tema="escuro"] .divide-neutral-200 > * + * { border-color: var(--vf-border); }
+  html[data-tema="escuro"] .text-neutral-900, html[data-tema="escuro"] .text-neutral-800, html[data-tema="escuro"] .text-neutral-700 { color: var(--vf-ink); }
+  html[data-tema="escuro"] .text-neutral-600, html[data-tema="escuro"] .text-neutral-500, html[data-tema="escuro"] .text-neutral-400,
+  html[data-tema="escuro"] main .text-neutral-400, html[data-tema="escuro"] main .text-neutral-500 { color: var(--vf-muted); }
+  html[data-tema="escuro"] .bg-red-50, html[data-tema="escuro"] .bg-amber-50, html[data-tema="escuro"] .bg-yellow-50, html[data-tema="escuro"] .bg-emerald-50, html[data-tema="escuro"] .bg-green-50, html[data-tema="escuro"] .bg-blue-50, html[data-tema="escuro"] .bg-sky-50 { background-color: #2A2326; }
+  html[data-tema="escuro"] .text-red-700, html[data-tema="escuro"] .text-red-800, html[data-tema="escuro"] .text-red-600 { color: #FCA5A5; }
+  html[data-tema="escuro"] .text-amber-700, html[data-tema="escuro"] .text-amber-800, html[data-tema="escuro"] .text-amber-900, html[data-tema="escuro"] .text-yellow-800 { color: #FCD34D; }
+  html[data-tema="escuro"] .text-emerald-700, html[data-tema="escuro"] .text-emerald-800, html[data-tema="escuro"] .text-green-700 { color: #6EE7B7; }
+  html[data-tema="escuro"] .text-blue-900, html[data-tema="escuro"] .text-blue-700, html[data-tema="escuro"] .text-blue-800, html[data-tema="escuro"] .text-sky-700 { color: #93C5FD; }
+  html[data-tema="escuro"] input, html[data-tema="escuro"] select, html[data-tema="escuro"] textarea { background-color: #2A2326; color: var(--vf-ink); border-color: var(--vf-border); }
+  html[data-tema="escuro"] main button.bg-neutral-900, html[data-tema="escuro"] main button.bg-black { background: #2A2326; color: var(--vf-ink); border-color: var(--vf-border); }
+  html[data-tema="escuro"] main button.bg-neutral-900:hover, html[data-tema="escuro"] main button.bg-black:hover { background: #352C30; }
+  html[data-tema="escuro"] main button.rounded-full.bg-neutral-900 { background: var(--vf-ink); color: #161214; }
+  html[data-tema="escuro"] svg text { fill: var(--vf-muted); }
+  html[data-tema="escuro"] svg line[stroke="#e5e5e5"] { stroke: var(--vf-border); }
+  html[data-tema="escuro"] svg circle[fill="#fff"] { fill: var(--vf-card); }
+
   /* Efeitos estilo Magic UI (2026-10-11), só CSS, sem dependências. */
   /* Blur Fade: "backwards" (não "both") para não deixar filter/transform no fim — um filter
      residual quebraria os pop-ups position:fixed que vivem dentro das linhas. */
@@ -5714,11 +5738,11 @@ const ICONES_PATHS = {
 // Fila de números-chave no topo de cada separador. `tom` dá o significado: vermelho =
 // o mais importante (só 1 por fila, contorno escuro — o vermelho fica para a marca e para erros), amarelo = atenção, verde = positivo, escuro = neutro forte.
 const TONS_KPI = {
-  vermelho: { background: "#fff", color: "var(--vf-ink)", borderColor: "var(--vf-ink)", borderWidth: 2, sub: "var(--vf-muted)" },
-  branco: { background: "#fff", color: "var(--vf-ink)", borderColor: "var(--vf-border)", sub: "var(--vf-muted)" },
-  escuro: { background: "#1B1416", color: "#fff", borderColor: "#1B1416", sub: "#C9BDBF" },
-  amarelo: { background: "#FEF3C7", color: "#92400E", borderColor: "#FDE68A", sub: "#92400E" },
-  verde: { background: "#CCFBF1", color: "#0F5F58", borderColor: "#99F6E4", sub: "#0F5F58" },
+  vermelho: { background: "var(--vf-card)", color: "var(--vf-ink)", borderColor: "var(--vf-ink)", borderWidth: 2, sub: "var(--vf-muted)" },
+  branco: { background: "var(--vf-card)", color: "var(--vf-ink)", borderColor: "var(--vf-border)", sub: "var(--vf-muted)" },
+  escuro: { background: "var(--vf-kpi-escuro-bg)", color: "#fff", borderColor: "var(--vf-kpi-escuro-bg)", sub: "#C9BDBF" },
+  amarelo: { background: "var(--vf-kpi-am-bg)", color: "var(--vf-kpi-am-fg)", borderColor: "var(--vf-kpi-am-bd)", sub: "var(--vf-kpi-am-fg)" },
+  verde: { background: "var(--vf-kpi-vd-bg)", color: "var(--vf-kpi-vd-fg)", borderColor: "var(--vf-kpi-vd-bd)", sub: "var(--vf-kpi-vd-fg)" },
 };
 
 // Number Ticker (estilo Magic UI, sem dependências): conta até ao valor. Só anima inteiros
@@ -7903,7 +7927,7 @@ function gerarHtmlRelatorio(tipo, per, atual, anterior, objetivos, jev) {
   const ritmoTxt = jev && jev.ritmo != null ? ["Muito fraco", "Fraco", "Em linha", "Bom", "Excelente"][Math.max(0, Math.min(4, Math.round(jev.ritmo)))] : null;
   const ind = jev ? `<h2>Indicações (Jev)</h2><div class="box"><p>Ritmo do período: <b>${e(ritmoTxt || "—")}</b></p><p>Foco para o próximo período: <b>${e(AREAS_FOCO_RELATORIO[jev.foco].rotulo)}</b></p><p>${e(AREAS_FOCO_RELATORIO[jev.foco].conselho)}</p>${jev.segundo ? `<p class="mut">Em segundo lugar: <b>${e(AREAS_FOCO_RELATORIO[jev.segundo].rotulo)}</b>. ${e(AREAS_FOCO_RELATORIO[jev.segundo].conselho)}</p>` : ""}</div>` : "";
   return `<!doctype html><html lang="pt"><head><meta charset="utf-8"><title>Relatório ${e(nomePeriodoRelatorio(tipo, per))}</title><style>
-body{font:13px/1.45 -apple-system,Segoe UI,Arial,sans-serif;color:#1a1a1a;margin:0;padding:24px 28px}
+body{font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;color:#1a1a1a;margin:0;padding:24px 28px}
 h1{font-size:20px;margin:0}h2{font-size:14px;margin:22px 0 6px;border-bottom:2px solid #e60000;padding-bottom:3px}
 .sub{color:#555;margin:2px 0 14px}table{width:100%;border-collapse:collapse;table-layout:fixed}td:first-child,th:first-child{width:48%}td,th{padding:4px 6px;border-bottom:1px solid #eee;text-align:left}
 th{color:#555;font-weight:600}.n{text-align:right;white-space:nowrap}.mut{color:#666}.up{color:#0a7d33}.dn{color:#c40000}
@@ -10807,7 +10831,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia) {
   <style>
     @page { size: A4; margin: 16mm 16mm 14mm; } @page :first { margin: 0; }
     * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    body { font-family: "Segoe UI", "Source Sans 3", Calibri, system-ui, sans-serif; color: #1a1a1a; margin: 0; background: #e9e9e9; font-variant-numeric: tabular-nums; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; color: #1a1a1a; margin: 0; background: #e9e9e9; font-variant-numeric: tabular-nums; }
     .capa { width: 210mm; height: 297mm; margin: 0 auto 14px; position: relative; overflow: hidden; break-after: page; page-break-after: always; background: #fff; }
     .capa img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .capa .info { position: absolute; left: 15mm; right: 15mm; bottom: 62mm; background: #fff; padding: 22px 26px; border-top: 8px solid ${V}; }
@@ -15712,7 +15736,7 @@ function SecaoFidelizacaoTrimestre({ nCarteira }) {
           {FILTROS.map(([id, rotulo]) => (
             <button key={id} type="button" onClick={() => setFiltro(id)} role="tab" aria-selected={filtro === id}
               className="min-h-[40px] px-4 rounded-xl text-sm font-semibold transition-colors"
-              style={filtro === id ? { background: "var(--vf-ink)", color: "#fff" } : { color: "var(--vf-muted)" }}>
+              style={filtro === id ? { background: "var(--vf-ink)", color: "var(--vf-bg)" } : { color: "var(--vf-muted)" }}>
               {rotulo}
             </button>
           ))}
@@ -16412,6 +16436,15 @@ function App() {
   // repor a sessão guardada neste browser.
   const [authPronto, setAuthPronto] = useState(() => !!firebaseAuth.currentUser);
   useEffect(() => firebaseAuth.onAuthStateChanged(() => setAuthPronto(true)), []);
+  // Tema (Claro por omissão; Escuro; Automático = o do sistema). Só se aplica com sessão iniciada.
+  const [tema, setTema] = useState(() => { try { return localStorage.getItem("vf-tema") || "claro"; } catch { return "claro"; } });
+  useEffect(() => {
+    const mq = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+    const aplicar = () => { document.documentElement.dataset.tema = firebaseUser && (tema === "escuro" || (tema === "auto" && mq && mq.matches)) ? "escuro" : "claro"; };
+    aplicar();
+    if (mq && mq.addEventListener) { mq.addEventListener("change", aplicar); return () => mq.removeEventListener("change", aplicar); }
+  }, [tema, firebaseUser]);
+  const mudarTema = () => { const n = tema === "claro" ? "escuro" : tema === "escuro" ? "auto" : "claro"; setTema(n); try { localStorage.setItem("vf-tema", n); } catch {} };
   if (!authPronto) return <div className="min-h-screen flex items-center justify-center text-sm text-neutral-500" style={{ background: "var(--vf-bg)" }}>A ligar à nuvem…</div>;
   if (!firebaseUser) return (
     <div className="min-h-screen flex items-center justify-center px-4" style={{ background: "var(--vf-bg)", color: "var(--vf-ink)" }}>
@@ -16457,6 +16490,7 @@ function App() {
             {firebaseUser ? "Sincronizado na nuvem" : "Só neste computador"}
           </div>
           <div className="text-white text-sm font-semibold mt-1.5 vf-side-txt">Augusto Graça</div>
+          <button onClick={mudarTema} className="text-xs mt-1 mr-3 underline vf-side-txt" style={{ color: "var(--vf-side-text)" }} title="Muda entre Claro, Escuro e Automático">Tema: {tema === "claro" ? "Claro" : tema === "escuro" ? "Escuro" : "Automático"}</button>
           <button onClick={() => firebaseAuth.signOut()} className="text-xs mt-1 underline" style={{ color: "var(--vf-side-text)" }}>Sair</button>
         </div>
       </aside>
