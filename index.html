@@ -35,22 +35,23 @@
   main button.bg-red-600:hover:not(:disabled), main button.bg-blue-600:hover:not(:disabled) {
     background: var(--vf-red-hover); border-color: var(--vf-red-hover);
   }
+  /* Secundários "tintados" (HIG): fundo suave e contorno discreto, só o botão primário (vermelho) pesa. */
   main button.bg-neutral-900, main button.bg-neutral-100, main button.vf-sec {
-    background: #fff; color: var(--vf-ink); border: 1.5px solid var(--vf-ink);
+    background: var(--vf-bg); color: var(--vf-ink); border: 1px solid var(--vf-border); font-weight: 500;
   }
   main button.bg-neutral-900:hover:not(:disabled), main button.bg-neutral-100:hover:not(:disabled), main button.vf-sec:hover:not(:disabled) {
-    background: var(--vf-bg);
+    background: #EDE6E0;
   }
   main button.bg-red-600, main button.bg-blue-600, main button.bg-neutral-900, main button.bg-neutral-100, main button.vf-sec {
     min-height: 44px; padding: 0 18px; border-radius: 12px; font-size: 14px; font-weight: 600;
     display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap;
   }
   main button.rounded-md.border:not([class*="bg-"]) {
-    background: #fff; color: var(--vf-ink); border: 1.5px solid var(--vf-ink);
-    min-height: 44px; padding: 0 16px; border-radius: 12px; font-size: 14px; font-weight: 600;
+    background: var(--vf-bg); color: var(--vf-ink); border: 1px solid var(--vf-border);
+    min-height: 44px; padding: 0 16px; border-radius: 12px; font-size: 14px; font-weight: 500;
     display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap;
   }
-  main button.rounded-md.border:not([class*="bg-"]):hover:not(:disabled) { background: var(--vf-bg); }
+  main button.rounded-md.border:not([class*="bg-"]):hover:not(:disabled) { background: #EDE6E0; }
   main button:has(> svg) { display: inline-flex; align-items: center; gap: 8px; }
   /* Chips de filtro (rounded-full): o ativo fica escuro e cheio, nunca "secundário". */
   main button.rounded-full.border { min-height: 44px; padding: 0 16px; border-radius: 999px; font-size: 13px; }
@@ -60,7 +61,7 @@
   main button.w-8.h-8 { width: 44px; height: 44px; }
   /* HIG (2026-10-11): alvos de 44 px. Botões com contorno mas com hover:bg-* escapavam à regra acima:
      só ganham altura, o aspeto fica como estava. */
-  main button.rounded-md.border[class*="hover:bg-"]:not([class*=" bg-"]):not([class^="bg-"]) { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+  main button.rounded-md.border[class*="hover:bg-"]:not([class*=" bg-"]):not([class^="bg-"]) { min-height: 44px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
   main button.min-h-\[40px\] { min-height: 44px; }
   main button.vf-hit44 { min-height: 44px; display: flex; align-items: center; }
   /* Separadores/chips pequenos (Relatórios) e botões em forma de ligação: o quadrado clicável
@@ -72,8 +73,11 @@
 
   main .bg-white.border.rounded-lg, main .bg-white.rounded-lg.border,
   main .border.border-neutral-200.rounded-lg {
-    border-radius: 18px; border-color: var(--vf-border);
+    border-radius: 16px; border-color: var(--vf-border);
   }
+  /* Escala de raios única (HIG): 8 · 12 · 16 · cápsula. */
+  main .rounded, main .rounded-md, main .rounded-sm { border-radius: 8px; }
+  main .rounded-\[20px\], main .rounded-2xl { border-radius: 16px; }
   main input:not([type=checkbox]):not([type=radio]), main select, main textarea {
     border-color: var(--vf-border); border-radius: 12px;
   }
@@ -5667,18 +5671,18 @@ function sugerirCategorias(analise, clienteAtual) {
 // decisão "ler sempre do Excel ligado") — removido por estar exposto no git.
 const PROSPETOS_BASE = [];
 const PONTOS = [
-  { id: "assuntos", label: "Para começar o dia", eyebrow: "Quem contactar hoje", icone: "lista", ready: true },
+  { id: "assuntos", grupo: "Hoje", label: "Para começar o dia", eyebrow: "Quem contactar hoje", icone: "lista", ready: true },
   { id: "assuntos-progresso", label: "Assuntos em Progresso", eyebrow: "Assuntos em curso", icone: "conversa", ready: true },
-  { id: "negocios", label: "Negócios do Trimestre", eyebrow: "Pipeline comercial", icone: "grafico", ready: true },
-  { id: "comissoes", label: "Comissões", eyebrow: "Remuneração", icone: "euro", ready: true },
-  { id: "clientes", label: "Clientes", eyebrow: "Carteira de clientes", icone: "pessoas", ready: true },
-  { id: "prospetos", label: "Prospetos", eyebrow: "Novos contactos", icone: "alvo", ready: true },
+  { id: "negocios", grupo: "Vendas", label: "Negócios do Trimestre", eyebrow: "Pipeline comercial", icone: "grafico", ready: true },
   { id: "propostas", label: "Propostas", eyebrow: "Documentos comerciais", icone: "documento", ready: true },
-  { id: "produtos", label: "Produtos Vodafone", eyebrow: "Catálogo", icone: "caixa", ready: true },
-  { id: "faturas", label: "Análise de Faturas", eyebrow: "Faturação do cliente", icone: "fatura", ready: true },
+  { id: "comissoes", label: "Comissões", eyebrow: "Remuneração", icone: "euro", ready: true },
+  { id: "relatorios", label: "Relatórios", eyebrow: "Desempenho", icone: "barras", ready: true },
+  { id: "clientes", grupo: "Carteira", label: "Clientes", eyebrow: "Carteira de clientes", icone: "pessoas", ready: true },
+  { id: "prospetos", label: "Prospetos", eyebrow: "Novos contactos", icone: "alvo", ready: true },
   { id: "carteira", label: "Carteira a Fidelizar", eyebrow: "Renovações", icone: "renovar", ready: true },
   { id: "campanha-produto", label: "Campanha por Produto", eyebrow: "Próxima Oferta (Jev)", icone: "campanha", ready: true },
-  { id: "relatorios", label: "Relatórios", eyebrow: "Desempenho", icone: "barras", ready: true },
+  { id: "produtos", grupo: "Ferramentas", label: "Produtos Vodafone", eyebrow: "Catálogo", icone: "caixa", ready: true },
+  { id: "faturas", label: "Análise de Faturas", eyebrow: "Faturação do cliente", icone: "fatura", ready: true },
 ];
 
 // Ícones de traço simples (redesign 2026-09-26) — sem emojis em botões/títulos.
@@ -7993,15 +7997,15 @@ function GraficoEvolucao({ pontos, met }) {
     <div className="relative">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`Evolução de ${met.label} nos últimos ${n} períodos`} onMouseMove={mover} onMouseLeave={() => setHover(null)}>
         <defs><linearGradient id={`g-${met.k}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={met.cor} stopOpacity="0.28" /><stop offset="1" stopColor={met.cor} stopOpacity="0" /></linearGradient></defs>
-        {grelha.map((g, i) => (<g key={i}><line x1={PL} x2={W - PR} y1={g.y} y2={g.y} stroke="#e5e5e5" strokeDasharray="3 4" /><text x={PL - 6} y={g.y + 4} textAnchor="end" fontSize="10" fill="#8a8a8a">{met.euro ? `${g.v}€` : g.v}</text></g>))}
+        {grelha.map((g, i) => (<g key={i}><line x1={PL} x2={W - PR} y1={g.y} y2={g.y} stroke="#e5e5e5" strokeDasharray="3 4" /><text x={PL - 6} y={g.y + 4} textAnchor="end" fontSize="11" fill="#6B5F62">{met.euro ? `${g.v}€` : g.v}</text></g>))}
         <path d={`${linha} L${X(n - 1)},${Y(0)} L${X(0)},${Y(0)} Z`} fill={`url(#g-${met.k})`} />
         <path d={linha} fill="none" stroke={met.cor} strokeWidth="3" strokeLinecap="round" />
-        {pontos.map((p, i) => (<text key={i} x={X(i)} y={H - 8} textAnchor="middle" fontSize="10" fill={i === n - 1 ? "#1a1a1a" : "#8a8a8a"} fontWeight={i === n - 1 ? 700 : 400}>{p.label}</text>))}
+        {pontos.map((p, i) => (<text key={i} x={X(i)} y={H - 8} textAnchor="middle" fontSize="11" fill={i === n - 1 ? "#1a1a1a" : "#6B5F62"} fontWeight={i === n - 1 ? 700 : 400}>{p.label}</text>))}
         <line x1={X(h)} x2={X(h)} y1={PT} y2={Y(0)} stroke={met.cor} strokeOpacity="0.35" />
         {pts.map((p, i) => (<circle key={i} cx={p.x} cy={p.y} r={i === h ? 6 : 3} fill="#fff" stroke={met.cor} strokeWidth="2.5" />))}
       </svg>
-      <div className="absolute -translate-x-1/2 -translate-y-full pointer-events-none bg-neutral-900 text-white text-xs font-semibold rounded-lg px-2.5 py-1 whitespace-nowrap shadow-lg"
-        style={{ left: `${(X(h) / W) * 100}%`, top: `${(Y(pontos[h].valor) / H) * 100 - 3}%` }}>
+      <div className="absolute pointer-events-none bg-neutral-900 text-white text-xs font-semibold rounded-lg px-2.5 py-1 whitespace-nowrap shadow-lg"
+        style={{ left: `${(X(h) / W) * 100}%`, top: `${(Y(pontos[h].valor) / H) * 100 - 3}%`, transform: `translate(${X(h) / W > 0.7 ? "-100%" : X(h) / W < 0.15 ? "0" : "-50%"}, -100%)` }}>
         {fmtMetrica(met, pontos[h].valor)} <span className="font-normal text-neutral-300">· {pontos[h].nome}</span>
       </div>
     </div>
@@ -8064,8 +8068,8 @@ function BarrasPeriodo({ porDia, per }) {
           <g key={i} onMouseEnter={() => setH(i)} onMouseLeave={() => setH(null)}>
             <rect x={x - bw / 2 - 2} y="0" width={bw + 4} height={H} fill="transparent" />
             <rect x={x - bw / 2} y={H - 22 - (m ? alt : 0)} width={bw} height={m ? alt : 0} rx="3" fill={h === i ? "#1d4ed8" : "#2563eb"} fillOpacity={b.v ? 1 : 0.15} style={{ transition: "all .6s ease" }} />
-            {b.v > 0 && <text x={x} y={H - 26 - alt} textAnchor="middle" fontSize="10" fontWeight="700" fill="#262626">{b.v}</text>}
-            {(n <= 16 || i % Math.ceil(n / 16) === 0) && <text x={x} y={H - 7} textAnchor="middle" fontSize="9" fill="#8a8a8a">{b.label}</text>}
+            {b.v > 0 && <text x={x} y={H - 26 - alt} textAnchor="middle" fontSize="11" fontWeight="700" fill="#262626">{b.v}</text>}
+            {(n <= 16 || i % Math.ceil(n / 16) === 0) && <text x={x} y={H - 7} textAnchor="middle" fontSize="11" fill="#6B5F62">{b.label}</text>}
           </g>); })}
       </svg>
       {h != null && <div className="absolute top-0 right-0 bg-neutral-900 text-white text-xs rounded-lg px-2.5 py-1 pointer-events-none">{baldes[h].nome}: <b>{baldes[h].v}</b> contacto{baldes[h].v === 1 ? "" : "s"}</div>}
@@ -16435,12 +16439,15 @@ function App() {
           {PONTOS.map((p) => {
             const ativo = pontoAtivo === p.id;
             return (
-              <button key={p.id} onClick={() => setPontoAtivo(p.id)} aria-current={ativo ? "page" : undefined} title={p.label}
+              <React.Fragment key={p.id}>
+              {p.grupo && <div className="vf-side-txt px-3 pt-2 pb-0.5 text-[11px] font-semibold uppercase tracking-[0.1em]" style={{ color: "var(--vf-side-text)", opacity: 0.7 }}>{p.grupo}</div>}
+              <button onClick={() => setPontoAtivo(p.id)} aria-current={ativo ? "page" : undefined} title={p.label}
                 className={`w-full flex items-center gap-3 px-3 min-h-[44px] rounded-xl text-sm text-left transition-colors ${ativo ? "text-white font-semibold" : "hover:bg-white/5 hover:text-white"}`}
                 style={ativo ? { background: "var(--vf-red)" } : { color: "var(--vf-side-text)" }}>
                 <Icone nome={p.icone} />
                 <span className="truncate vf-side-txt">{p.label}</span>
               </button>
+              </React.Fragment>
             );
           })}
         </nav>
