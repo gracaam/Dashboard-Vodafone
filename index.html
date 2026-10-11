@@ -7531,7 +7531,10 @@ function ImportarEmailsOutlook({ clientes, obterExtras, definirExtras }) {
 // Pop-up "Resolvido": pede o que ficou resolvido, com data, e grava no histórico de contactos da
 // ficha (tipo "Resolvido"). `chave` identifica o assunto para sair da lista de hoje.
 function ResolverDialogo({ nif, nome, resumo, chave, onFechar, onGravar }) {
+  const { todosClientes } = useClientesNovos();
+  const { todosProspetos, obterExtras: obterExtrasProspeto, definirExtras: definirExtrasProspeto } = useProspetosNovos();
   const [nota, setNota] = useState("");
+  const [nifManual, setNifManual] = useState("");
   const [data, setData] = useState(new Date().toISOString().slice(0, 10));
   const [estado, setEstado] = useState("");
   useEffect(() => {
@@ -7539,13 +7542,25 @@ function ResolverDialogo({ nif, nome, resumo, chave, onFechar, onGravar }) {
     window.addEventListener("keydown", f);
     return () => window.removeEventListener("keydown", f);
   }, []);
+  const nifEf = nif || nifManual.replace(/\D/g, "");
+  const alvoManual = !nif && /^\d{9}$/.test(nifEf) ? (todosClientes.find((c) => String(c.n) === nifEf) || todosProspetos.find((p) => String(p.n) === nifEf) || null) : null;
   const gravar = async () => {
     if (!nota.trim() || !data) { setEstado("Escreve o que ficou resolvido."); return; }
+    if (!nifEf) { setEstado("Indica o NIF do cliente ou prospeto."); return; }
+    const ehCliente = todosClientes.some((c) => String(c.n) === nifEf);
+    const ehProspeto = !ehCliente && todosProspetos.some((p) => String(p.n) === nifEf);
+    if (!nif && !ehCliente && !ehProspeto) { setEstado("Este NIF não existe em Clientes nem em Prospetos."); return; }
     setEstado("A gravar…");
     const em = new Date(`${data}T12:00:00`).toISOString();
+    const texto = `${resumo ? resumo + " — " : ""}${nota.trim()}`;
     try {
-      if (nif) await registarContacto(nif, { tipo: "Resolvido", nota: `${resumo ? resumo + " — " : ""}${nota.trim()}`, em, proximoPasso: "", proximoEm: null, ...(chave ? { resolveu: chave } : {}) });
-      if (onGravar) await onGravar({ resolucao: nota.trim(), resolvidoEm: data });
+      if (ehProspeto) {
+        // Prospeto: o registo fica nos extras do prospeto (e passa a ser mostrado na ficha).
+        const ex = await obterExtrasProspeto(nifEf);
+        if (ex === null) throw new Error("não foi possível ler o prospeto");
+        await definirExtrasProspeto(nifEf, { resolvidos: [...(Array.isArray(ex.resolvidos) ? ex.resolvidos : []), { em, tipo: "Resolvido", nota: texto }] });
+      } else await registarContacto(nifEf, { tipo: "Resolvido", nota: texto, em, proximoPasso: "", proximoEm: null, ...(chave ? { resolveu: chave } : {}) });
+      if (onGravar) await onGravar({ resolucao: nota.trim(), resolvidoEm: data, nif: nifEf });
       onFechar();
     } catch (e) { setEstado(`Não foi possível gravar: ${e.message}`); }
   };
@@ -7561,7 +7576,12 @@ function ResolverDialogo({ nif, nome, resumo, chave, onFechar, onGravar }) {
         <label className="block text-xs text-neutral-500">Data
           <input type="date" value={data} onChange={(e) => setData(e.target.value)} className={`${cls} mt-1`} />
         </label>
-        {!nif && <div className="text-xs text-amber-700">Este cliente não foi encontrado nas fichas — a resolução fica só guardada no assunto, não no histórico do cliente.</div>}
+        {!nif && (
+          <label className="block text-xs text-neutral-500">Este assunto não está associado a nenhum cliente — NIF do cliente ou prospeto
+            <input value={nifManual} onChange={(e) => setNifManual(e.target.value)} inputMode="numeric" placeholder="9 dígitos" className={`${cls} mt-1`} />
+            {alvoManual && <span className="block text-emerald-700 mt-1">{alvoManual.e}</span>}
+          </label>
+        )}
         {estado && <div className="text-xs text-amber-700">{estado}</div>}
         <div className="flex justify-end gap-2">
           <button onClick={onFechar} className="text-sm px-3 py-1.5 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50">Cancelar</button>
@@ -11971,6 +11991,15 @@ function ProspetosView() {
             )}
           </div>
 
+          {!ehNovo && Array.isArray(extras.resolvidos) && extras.resolvidos.length > 0 && (
+            <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-1">
+              <div className="text-xs font-medium text-neutral-400">ASSUNTOS RESOLVIDOS</div>
+              {extras.resolvidos.slice().sort((x, y) => y.em.localeCompare(x.em)).map((x, i) => (
+                <div key={i} className="text-xs border-b border-neutral-100 last:border-0 py-1"><span className="text-neutral-500">{new Date(x.em).toLocaleDateString("pt-PT")}</span> · <b>Resolvido</b> · {x.nota}</div>
+              ))}
+            </div>
+          )}
+
           {!ehNovo && Array.isArray(extras.propostas) && extras.propostas.length > 0 && (
             <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-2">
               <div className="text-xs font-medium text-neutral-400">PROPOSTAS ENTREGUES</div>
@@ -14106,7 +14135,7 @@ function AssuntosView() {
     setTimeout(() => setResultadoSincFaltantes(null), 8000);
   };
   const { todosClientes: clientesAssuntos } = useClientesNovos();
-  const nifDoAssunto = (a) => { const nome = String(a.cliente || "").trim().toLocaleUpperCase("pt-PT"); const c = clientesAssuntos.find((x) => x.e === nome); return c ? c.n : ""; };
+  const nifDoAssunto = (a) => { if (a.nif) return a.nif; const nome = String(a.cliente || "").trim().toLocaleUpperCase("pt-PT"); const c = clientesAssuntos.find((x) => x.e === nome); return c ? c.n : ""; };
   const [form, setForm] = useState(null);
   const [mostrarArquivo, setMostrarArquivo] = useState(false);
   // Dia selecionado no calendário (formato "AAAA-MM-DD") — null = sem filtro. Clicar
