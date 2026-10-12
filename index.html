@@ -4496,7 +4496,8 @@ function normalizarRotuloPeriodo(raw) {
 // vem da validação de dados original da folha XP do Excel (ver comentário abaixo em
 // COL_NEGOCIO), só existe aqui no código. Se o Excel também tiver essa validação
 // própria mais tarde, confirmar que o texto bate certo (maiúsculas incluídas).
-const ESTADO_OPCOES = ["DATA FUTURA", "EM IMPLEMENTAÇÃO", "EM NEGOCIAÇÃO", "IMPLEMENTADO", "PERDIDO", "PIPE"];
+// "AGUARDA GRE/DATA" (2026-10-12, pedido do Augusto): cliente já deu o OK e falta a aprovação GRE do simulador ou chegar uma data.
+const ESTADO_OPCOES = ["AGUARDA GRE/DATA", "DATA FUTURA", "EM IMPLEMENTAÇÃO", "EM NEGOCIAÇÃO", "IMPLEMENTADO", "PERDIDO", "PIPE"];
 const TIPO_CLIENTE_OPCOES = ["EMPRESA", "PARTICULAR"];
 
 // Estados manuais de um registo de "Fidelização por trimestre" (2026-09-25, pedido
@@ -7713,7 +7714,7 @@ function GrupoHoje({ titulo, cor, itens, vazio, render }) {
    negócios (Negócios do Trimestre). Valores = RLMC ajustada (o mesmo critério do
    atingimento em Comissões). "Pipeline" = negócios do trimestre ainda em Negociação,
    Data Futura ou Implementação — a projeção assume que fecham todos. */
-const ESTADOS_PIPELINE_RESUMO = ["EM NEGOCIAÇÃO", "DATA FUTURA", "EM IMPLEMENTAÇÃO"];
+const ESTADOS_PIPELINE_RESUMO = ["EM NEGOCIAÇÃO", "AGUARDA GRE/DATA", "DATA FUTURA", "EM IMPLEMENTAÇÃO"];
 function calcularResumoSemanal(clientes, negocios, objetivosCategoria, hoje = new Date()) {
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const seg = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - ((hoje.getDay() + 6) % 7));
@@ -8154,7 +8155,7 @@ function RelatoriosView() {
   const pendentes = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const pipeline = useMemo(() => {
     const tri = trimestreChaveDeData(new Date(per[0] + "T00:00:00"));
-    return [["EM NEGOCIAÇÃO", "Em negociação", "#d97706"], ["DATA FUTURA", "Data futura", "#0891b2"], ["EM IMPLEMENTAÇÃO", "Em implementação", "#7c3aed"], ["IMPLEMENTADO", "Implementado", "#059669"], ["PERDIDO", "Perdido", "#a3a3a3"]].map(([est, label, cor]) => {
+    return [["EM NEGOCIAÇÃO", "Em negociação", "#d97706"], ["AGUARDA GRE/DATA", "Aguarda GRE/data", "#0d9488"], ["DATA FUTURA", "Data futura", "#0891b2"], ["EM IMPLEMENTAÇÃO", "Em implementação", "#7c3aed"], ["IMPLEMENTADO", "Implementado", "#059669"], ["PERDIDO", "Perdido", "#a3a3a3"]].map(([est, label, cor]) => {
       const l = negocios.filter((n) => n.estado === est && trimestreChaveDeDataInicio(n.dataInicio) === tri);
       return { label, cor, n: l.length, valor: l.reduce((t, n) => t + (calcularRlmcAjustadaAtingimento(n) || 0), 0) };
     });
@@ -12212,6 +12213,7 @@ const ESTADO_ESTILO = {
   "IMPLEMENTADO": "bg-emerald-50 text-emerald-800 border-emerald-200",
   "EM IMPLEMENTAÇÃO": "bg-amber-50 text-amber-800 border-amber-200",
   "EM NEGOCIAÇÃO": "bg-blue-50 text-blue-800 border-blue-200",
+  "AGUARDA GRE/DATA": "bg-sky-50 text-sky-700 border-sky-200",
   "PIPE": "bg-neutral-100 text-neutral-600 border-neutral-200",
   "DATA FUTURA": "bg-neutral-100 text-neutral-600 border-neutral-200",
   "PERDIDO": "bg-red-50 text-red-700 border-red-200",
@@ -12224,6 +12226,7 @@ const ESTADO_ESTILO = {
 // comparado é sempre o texto oficial de ESTADO_OPCOES.
 const ESTADO_CHIPS = [
   { valor: "EM NEGOCIAÇÃO", label: "Em Negociação" },
+  { valor: "AGUARDA GRE/DATA", label: "Aguarda GRE/Data" },
   { valor: "DATA FUTURA", label: "Data Futura" },
   { valor: "EM IMPLEMENTAÇÃO", label: "Em Implementação" },
   { valor: "IMPLEMENTADO", label: "Implementado" },
