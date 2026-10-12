@@ -10760,7 +10760,12 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia, descriti
   const dataTxt = new Date(data).toLocaleDateString("pt-PT", { day: "2-digit", month: "long", year: "numeric" });
   const validade = new Date(new Date(data).getTime() + 30 * 864e5).toLocaleDateString("pt-PT", { day: "2-digit", month: "long", year: "numeric" });
   const cliente = esc(nomeAlvo || "");
-  const ls = linhasPropostaPdf(linhas, ehProspeto);
+  // Valores e descritivos saem agrupados por área (Fixo, Móvel, …), pela ordem dos quadros do ecrã.
+  const areaDe = (l) => tipoServicoProposta(l);
+  const ordemArea = (l) => { const i = TIPOS_SERVICO_PROPOSTA.indexOf(areaDe(l)); return i < 0 ? 99 : i; };
+  const ls = linhasPropostaPdf(linhas, ehProspeto).slice().sort((a, b) => ordemArea(a) - ordemArea(b));
+  const varias = new Set(ls.map(areaDe)).size > 1;
+  const comArea = (fn, n) => ls.map((l, i) => (varias && (i === 0 || areaDe(l) !== areaDe(ls[i - 1])) ? `<tr class="area"><td colspan="${n}">${esc(areaDe(l))}</td></tr>` : "") + fn(l)).join("");
   const apagar = ehProspeto ? [] : linhasPropostaExcel(linhas, false).filter((l) => l.acao === "Apagar serviço");
   const nomeProposto = (l) => nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual);
   const duracoes = [...new Set(ls.map((l) => dur(l.duracao)).filter((d) => d !== "—"))];
@@ -10778,7 +10783,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia, descriti
     resumo = `<div class="heroi"><div class="hk">Total mensal da proposta</div><div class="hv">${euro(total)}<small>/mês</small></div><div class="hs">${euro(total * 12)} por ano · valores sem IVA</div></div>
       <div class="factos"><div><b>${nUn}</b><span>${nUn === 1 ? "serviço" : "serviços"} na proposta</span></div>${nPort ? `<div><b>${nPort}</b><span>${nPort === 1 ? "número mantido" : "números mantidos"} por portabilidade</span></div>` : ""}${duracoes.length ? `<div><b>${duracoes.map((d) => d.replace(" meses", "")).join("/")}</b><span>meses de contrato</span></div>` : ""}</div>`;
     tabela = `<table class="tp"><colgroup><col class="s"><col class="t"><col class="v"><col class="q"><col class="v"><col class="d"></colgroup><thead><tr><th>Serviço</th><th>Tarifário</th><th class="r">Valor un.</th><th class="r">Qtd.</th><th class="r">Valor mensal</th><th>Duração</th></tr></thead>
-      <tbody>${ls.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(numProposta(l.valorMensal))}</td><td class="r">${quantidadeLinhaProposta(l)}</td><td class="r"><b>${euro(valorLinhaProspeto(l))}</b></td><td>${dur(l.duracao)}</td></tr>`).join("")}</tbody>
+      <tbody>${comArea((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(numProposta(l.valorMensal))}</td><td class="r">${quantidadeLinhaProposta(l)}</td><td class="r"><b>${euro(valorLinhaProspeto(l))}</b></td><td>${dur(l.duracao)}</td></tr>`, 6)}</tbody>
       <tfoot><tr><td colspan="4">Total mensal</td><td class="r">${euro(total)}</td><td></td></tr></tfoot></table>`;
   } else {
     const totMantidos = ls.reduce((s, l) => s + (valorAtualLinhaProposta(l) || 0), 0);
@@ -10795,17 +10800,17 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia, descriti
       </div>
       <div class="factos"><div><b>${ls.length}</b><span>${ls.length === 1 ? "serviço revisto" : "serviços revistos"}</span></div>${apagar.length ? `<div><b>${apagar.length}</b><span>${apagar.length === 1 ? "serviço a desativar" : "serviços a desativar"}</span></div>` : ""}${duracoes.length ? `<div><b>${duracoes.map((d) => d.replace(" meses", "")).join("/")}</b><span>meses de contrato</span></div>` : ""}</div>`;
     tabela = `<table class="tv"><colgroup><col class="s"><col class="t"><col class="v"><col class="t"><col class="v"><col class="d"></colgroup><thead><tr><th>Serviço</th><th>Tarifário atual</th><th class="r">Atual</th><th>Tarifário proposto</th><th class="r">Proposto</th><th>Duração</th></tr></thead>
-      <tbody>${ls.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td><td>${esc(nomeProposto(l))}</td><td class="r"><b>${euro(valorLinhaProposta(l))}</b></td><td>${dur(l.duracao)}</td></tr>`).join("")}</tbody>
+      <tbody>${comArea((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td><td>${esc(nomeProposto(l))}</td><td class="r"><b>${euro(valorLinhaProposta(l))}</b></td><td>${dur(l.duracao)}</td></tr>`, 6)}</tbody>
       <tfoot><tr><td colspan="2">Total mensal</td><td class="r">${euro(totMantidos)}</td><td></td><td class="r">${euro(totNovo)}</td><td></td></tr></tfoot></table>`;
     if (apagar.length) cancelar = `<h3>Serviços a desativar</h3><table class="tv"><colgroup><col class="s"><col style="width:68%"><col style="width:15%"></colgroup><tbody>${apagar.map((l) => `<tr><td>${esc(l.servico || "")}</td><td>${esc(nomeTarifarioCurto(l.produtoAtual))}</td><td class="r">${euro(valorAtualLinhaProposta(l))}</td></tr>`).join("")}</tbody></table>`;
   }
 
   // Descritivo: o nome mostrado é o MESMO da tabela (antes vinha do catálogo e não batia).
   const vistosDesc = new Set();
-  const descritivos = ls.map((l) => { const orig = ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual; const d = descritivoTarifario(orig) || (((descritivosProprios || {})[nomeTarifarioCurto(orig).toLowerCase()] || "").trim() ? { texto: descritivosProprios[nomeTarifarioCurto(orig).toLowerCase()].trim() } : null); return d && { ...d, nome: nomeProposto(l) }; })
+  const descritivos = ls.map((l) => { const orig = ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual; const d = descritivoTarifario(orig) || (((descritivosProprios || {})[nomeTarifarioCurto(orig).toLowerCase()] || "").trim() ? { texto: descritivosProprios[nomeTarifarioCurto(orig).toLowerCase()].trim() } : null); return d && { ...d, nome: nomeProposto(l), area: areaDe(l) }; })
     .filter((d) => d && !vistosDesc.has(d.texto) && vistosDesc.add(d.texto));
   const descritivoHtml = descritivos.length
-    ? `<h3>O que inclui cada tarifário</h3><div class="desc">${descritivos.map((d) => `<p><b>${esc(d.nome)}</b> — ${esc(d.texto)}</p>`).join("")}</div>`
+    ? `<h3>O que inclui cada tarifário</h3><div class="desc">${descritivos.map((d, i) => (varias && (i === 0 || d.area !== descritivos[i - 1].area) ? `<h4>${esc(d.area)}</h4>` : "") + `<p><b>${esc(d.nome)}</b> — ${esc(d.texto)}</p>`).join("")}</div>`
     : "";
 
   // "O que muda" (Resumo): por tipo de serviço, quantos e para que tarifário.
@@ -10860,6 +10865,7 @@ function gerarPropostaHtml(nomeAlvo, linhas, data, ehProspeto, noticia, descriti
     .r { text-align: right; } tfoot td { font-weight: 800; border-top: 2px solid #1a1a1a; border-bottom: 0; font-size: 13.5px; }
     .nota { font-size: 12px; color: #555; } .desc { display: flex; flex-direction: column; gap: 7px; } .desc p { font-size: 12.5px; line-height: 1.5; break-inside: avoid; }
     .cond ul { columns: 2; column-gap: 26px; display: block; } .cond li { margin-bottom: 6px; break-inside: avoid; }
+    tr.area td { background: #f3f3f3; font-weight: 700; font-size: 12px; color: #555; text-transform: uppercase; letter-spacing: .04em; } .desc h4 { margin: 8px 0 3px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #555; }
     .noticia { display: grid; grid-template-columns: 52mm 1fr; gap: 18px; align-items: start; border-top: 1px solid #e4e4e4; padding-top: 18px; break-inside: avoid; } .noticia:not(:has(img)) { grid-template-columns: 1fr; }
     .noticia img { width: 100%; height: auto; display: block; } .noticia .nk { font-size: 12px; font-weight: 700; color: ${VE}; } .noticia .nt { font-size: 17px; font-weight: 800; margin: 2px 0 6px; } .noticia p { font-size: 12.5px; white-space: pre-line; }
     .passo { margin-top: auto; background: #1a1a1a; color: #fff; padding: 24px 28px; display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; break-inside: avoid; }
