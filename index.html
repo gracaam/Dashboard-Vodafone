@@ -8155,7 +8155,7 @@ function RelatoriosView() {
   const pendentes = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const pipeline = useMemo(() => {
     const tri = trimestreChaveDeData(new Date(per[0] + "T00:00:00"));
-    return [["EM NEGOCIAÇÃO", "Em negociação", "#d97706"], ["AGUARDA GRE/DATA", "Aguarda GRE/data", "#0d9488"], ["DATA FUTURA", "Data futura", "#0891b2"], ["EM IMPLEMENTAÇÃO", "Em implementação", "#7c3aed"], ["IMPLEMENTADO", "Implementado", "#059669"], ["PERDIDO", "Perdido", "#a3a3a3"]].map(([est, label, cor]) => {
+    return [["EM NEGOCIAÇÃO", "Em negociação", "#d97706"], ["AGUARDA GRE/DATA", "Aguarda GRE/data", "#dc2626"], ["DATA FUTURA", "Data futura", "#0891b2"], ["EM IMPLEMENTAÇÃO", "Em implementação", "#7c3aed"], ["IMPLEMENTADO", "Implementado", "#059669"], ["PERDIDO", "Perdido", "#a3a3a3"]].map(([est, label, cor]) => {
       const l = negocios.filter((n) => n.estado === est && trimestreChaveDeDataInicio(n.dataInicio) === tri);
       return { label, cor, n: l.length, valor: l.reduce((t, n) => t + (calcularRlmcAjustadaAtingimento(n) || 0), 0) };
     });
@@ -12213,7 +12213,7 @@ const ESTADO_ESTILO = {
   "IMPLEMENTADO": "bg-emerald-50 text-emerald-800 border-emerald-200",
   "EM IMPLEMENTAÇÃO": "bg-amber-50 text-amber-800 border-amber-200",
   "EM NEGOCIAÇÃO": "bg-blue-50 text-blue-800 border-blue-200",
-  "AGUARDA GRE/DATA": "bg-sky-50 text-sky-700 border-sky-200",
+  "AGUARDA GRE/DATA": "bg-red-600 text-white border-red-600",
   "PIPE": "bg-neutral-100 text-neutral-600 border-neutral-200",
   "DATA FUTURA": "bg-neutral-100 text-neutral-600 border-neutral-200",
   "PERDIDO": "bg-red-50 text-red-700 border-red-200",
@@ -12970,7 +12970,7 @@ function NegociosView() {
         {ESTADO_CHIPS.map((c) => (
           <button key={c.valor} onClick={() => setFiltroEstado((prev) => (prev === c.valor ? "" : c.valor))}
             className={`px-2.5 py-1.5 rounded-full border text-xs font-medium whitespace-nowrap transition-colors ${
-              filtroEstado === c.valor ? "bg-neutral-900 text-white border-neutral-900" : "bg-white text-neutral-600 border-neutral-200 hover:border-neutral-400"}`}>
+              filtroEstado === c.valor ? (c.valor === "AGUARDA GRE/DATA" ? "bg-red-600 text-white border-red-600" : "bg-neutral-900 text-white border-neutral-900") : (c.valor === "AGUARDA GRE/DATA" ? "bg-white text-red-700 border-red-300 hover:border-red-500" : "bg-white text-neutral-600 border-neutral-200 hover:border-neutral-400")}`}>
             {c.label} ({contagensPorEstado[c.valor] || 0})
           </button>
         ))}
