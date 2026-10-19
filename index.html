@@ -6032,10 +6032,10 @@ function useClientesNovos() {
   };
   // Marca a proposta (por índice) como fechada na data indicada. Nunca apaga a proposta
   // — só preenche fechada/fechadaEm/contratosGerados.
-  const fecharProposta = async (nif, indice, dataFecho) => {
+  const fecharProposta = async (nif, indice, dataFecho, extra = {}) => {
     const atuais = await obterPropostas(nif);
     if (!Array.isArray(atuais)) return null;
-    const nova = atuais.map((p, i) => (i === indice ? { ...p, fechada: true, fechadaEm: dataFecho, contratosGerados: true } : p));
+    const nova = atuais.map((p, i) => (i === indice ? { ...p, fechada: true, fechadaEm: dataFecho, contratosGerados: true, ...extra } : p));
     await guardarPropostas(nif, nova);
     return nova;
   };
@@ -7132,6 +7132,7 @@ function PainelCampanhaEmail({ destinatarios }) {
 }
 
 const DIAS_PROPOSTA_SEM_RESPOSTA = 7;
+const DIAS_PROPOSTAS_FECHADAS = 30; // "Propostas fechadas" em Para começar o dia: as dos últimos 30 dias
 const DIAS_SEM_CONTACTO = 90;
 const TIPOS_CONTACTO = ["Telefone", "Email", "Reunião", "Outro"];
 
@@ -7211,12 +7212,13 @@ function HistoricoContactosCard({ cliente }) {
 const chavesResolvidas = (c) => new Set((Array.isArray(c && c.contactos) ? c.contactos : []).map((x) => x && x.resolveu).filter(Boolean));
 function calcularListaHoje(clientes, mapaContratos, hoje = new Date()) {
   const hojeIso = hoje.toISOString().slice(0, 10);
-  const renovacoes = [], propostas = [], passos = [], semContacto = [];
+  const renovacoes = [], propostas = [], passos = [], semContacto = [], fechadas = [];
   clientes.forEach((c) => {
     const resolvidas = chavesResolvidas(c);
     const f = calcularFimMaisProximo(mapaContratos.get(String(c.n)), hoje);
     if (f && !f.terminado && f.dias <= 183 && !resolvidas.has(`renovacao:${f.conta}:${f.fim}`)) renovacoes.push({ c, ...f });
     (Array.isArray(c.propostas) ? c.propostas : []).forEach((p) => {
+      if (p.fechada && p.fechadaEm && p.entregueEm && !resolvidas.has(`fechada:${p.entregueEm}`) && diasEntreDatasIso(p.fechadaEm.slice(0, 10), hojeIso) <= DIAS_PROPOSTAS_FECHADAS) fechadas.push({ c, entregueEm: p.entregueEm, fechadaEm: p.fechadaEm, total: p.total, n: p.fechadasLinhas });
       if (p.fechada || !p.entregueEm || resolvidas.has(`proposta:${p.entregueEm}`)) return;
       const dias = diasEntreDatasIso(p.entregueEm.slice(0, 10), hojeIso);
       if (dias >= DIAS_PROPOSTA_SEM_RESPOSTA) propostas.push({ c, dias, total: p.total, entregueEm: p.entregueEm });
@@ -7233,7 +7235,8 @@ function calcularListaHoje(clientes, mapaContratos, hoje = new Date()) {
   propostas.sort((a, b) => b.dias - a.dias);
   passos.sort((a, b) => b.atraso - a.atraso);
   semContacto.sort((a, b) => b.dias - a.dias);
-  return { renovacoes, propostas, passos, semContacto };
+  fechadas.sort((a, b) => b.fechadaEm.localeCompare(a.fechadaEm));
+  return { renovacoes, propostas, passos, semContacto, fechadas };
 }
 
 // Tarifários extintos ou antigos (2026-10-04, Fase 1 ponto 2). Fonte: Portal Comercial
@@ -7701,7 +7704,7 @@ function ConcluirPassoDialogo({ c, passo, onFechar }) {
 function GrupoHoje({ titulo, cor, itens, vazio, render }) {
   return (
     <section className="vf-blurfade border border-neutral-200 rounded-lg bg-white">
-      <h2 className={`px-3 py-2 border-b border-neutral-200 text-sm font-semibold ${cor === "red" ? "text-red-700" : cor === "amber" ? "text-amber-700" : "text-neutral-700"}`}>
+      <h2 className={`px-3 py-2 border-b border-neutral-200 text-sm font-semibold ${cor === "red" ? "text-red-700" : cor === "amber" ? "text-amber-700" : cor === "green" ? "text-emerald-700" : "text-neutral-700"}`}>
         {titulo} <span className="font-normal text-neutral-500">({itens.length})</span>
       </h2>
       {itens.length ? itens.map(render) : <div className="px-3 py-2 text-xs text-neutral-400">{vazio}</div>}
@@ -8341,7 +8344,7 @@ function HojeView() {
     obterTodosExtras().then(setExtrasHoje).catch(() => {});
   }, [firebaseUser, todosClientes.length]);
   const campanhas = useMemo(() => avisosCampanhas(catalogoHoje, todosClientes, mapaContratos, extrasHoje), [catalogoHoje, todosClientes, mapaContratos, extrasHoje]);
-  const { renovacoes, propostas, passos, semContacto } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
+  const { renovacoes, propostas, passos, semContacto, fechadas } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const antigos = useMemo(() => listarTarifariosAntigos(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const em = (tipo, x) => ({ email: textoEmailHoje(tipo, x.c, x), obterExtras });
   const renov = (x) => <LinhaHoje key={x.c.n} c={x.c} resolver={{ chave: `renovacao:${x.conta}:${x.fim}`, resumo: `Permanência termina a ${formatarDataIsoPT(x.fim)}` }} {...em("renovacao", x)}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {rotuloConta(x.conta)}</LinhaHoje>;
@@ -8382,6 +8385,8 @@ function HojeView() {
         }} />
       <GrupoHoje titulo={`Propostas entregues sem resposta há ${DIAS_PROPOSTA_SEM_RESPOSTA}+ dias`} itens={propostas} vazio="Nenhuma proposta à espera de resposta."
         render={(x, i) => <LinhaHoje key={`${x.c.n}-${i}`} c={x.c} resolver={{ chave: `proposta:${x.entregueEm}`, resumo: `Proposta de ${new Date(x.entregueEm).toLocaleDateString("pt-PT")}` }} {...em("proposta", x)}>entregue a {new Date(x.entregueEm).toLocaleDateString("pt-PT")} · há {x.dias} dias{x.total ? ` · ${formatEuro(x.total)}/mês` : ""}</LinhaHoje>} />
+      <GrupoHoje titulo={`Propostas fechadas (últimos ${DIAS_PROPOSTAS_FECHADAS} dias)`} cor="green" itens={fechadas} vazio="Nenhuma proposta fechada recentemente."
+        render={(x, i) => <LinhaHoje key={`${x.c.n}-f${i}`} c={x.c} resolver={{ chave: `fechada:${x.entregueEm}`, resumo: `Proposta fechada em ${formatarDataIsoPT(x.fechadaEm)}` }}>fechada em {formatarDataIsoPT(x.fechadaEm)} · {formatEuro(x.total || 0)}{x.n ? ` · ${x.n} serviço(s) com contrato` : ""}</LinhaHoje>} />
       <GrupoHoje titulo={`Sem contacto há mais de ${DIAS_SEM_CONTACTO} dias`} itens={semContacto} vazio="Ninguém (só conta clientes com pelo menos um contacto registado)."
         render={(x) => <LinhaHoje key={x.c.n} c={x.c} {...em("semContacto", x)}>último: {new Date(x.ultimo.em).toLocaleDateString("pt-PT")} · há {x.dias} dias</LinhaHoje>} />
     </div>
@@ -8880,6 +8885,7 @@ function ClientesView() {
   // Histórico de propostas entregues/fechadas deste cliente (2026-09-30) — campo
   // próprio do cliente, lido à parte dos extras (ver obterPropostas).
   const [propostas, setPropostas] = useState([]);
+  const [fechoAberto, setFechoAberto] = useState(null); // painel "que serviços fechaste" de uma proposta entregue
   const [avisoSucesso, setAvisoSucesso] = useState("");
   const [erroNif, setErroNif] = useState("");
   const [nomeEmEdicao, setNomeEmEdicao] = useState(null);
@@ -8968,17 +8974,21 @@ function ClientesView() {
       setPropostas((await obterPropostas(nifSelecionado)) || []);
     } catch (e) { window.alert(`Não foi possível apagar: ${e.message}`); }
   };
-  const fecharPropostaEntregue = async (indice, dataFecho) => {
+  // Abre o painel com as linhas da proposta para assinalar as que fecharam (2026-10-19, pedido do Augusto).
+  const abrirFecho = (indice) => {
+    const p = propostas[indice];
+    if (!p) return;
+    setFechoAberto({ indice, linhas: (p.linhas || []).map((l) => ({ ...l, sel: !!l.duracaoMeses && l.acao !== "Apagar serviço" })) });
+  };
+  const fecharPropostaEntregue = async (indice, dataFecho, linhasEscolhidas) => {
     if (!nifSelecionado || !dataFecho) return;
     const proposta = propostas[indice];
     if (!proposta) return;
-    const novoMapa = new Map((mapaContratos.get(nifSelecionado) || { contas: {} }).contas ? Object.entries(mapaContratos.get(nifSelecionado).contas) : []);
+    const docContratos = mapaContratos.get(nifSelecionado); // cliente sem contratos guardados → sem documento
+    const novoMapa = new Map(Object.entries((docContratos && docContratos.contas) || {}));
     const nif = nifSelecionado;
-    const linhasFechaveis = (proposta.linhas || []).filter((l) => l.duracaoMeses && l.servico);
-    if (!linhasFechaveis.length) {
-      window.alert("Esta proposta não tem serviços com duração definida — não há contratos para gerar. Confirma a duração nas linhas da proposta (na Propostas) e entrega de novo.");
-      return;
-    }
+    const linhasFechaveis = (linhasEscolhidas || []).filter((l) => l.duracaoMeses);
+    if (!linhasFechaveis.length) { window.alert("Assinala pelo menos um serviço com duração para gerar contratos."); return; }
     try {
       // Agrupa por conta e acrescenta os contratos novos aos existentes dessa conta.
       const porConta = new Map();
@@ -8989,7 +8999,7 @@ function ClientesView() {
         const fim = somarMesesIso(inicio, Number(l.duracaoMeses));
         porConta.get(conta).push({
           id: `proposta-${Date.now()}-${porConta.get(conta).length}`,
-          servico: l.servico || "",
+          servico: l.servico || l.produto || "",
           blocos: null, inicio, fim,
           duracao: `${l.duracaoMeses} meses`, tipo: null, multa: null,
           descricao: "", codigo: "",
@@ -9000,14 +9010,15 @@ function ClientesView() {
         const atuais = (novoMapa.get(conta) || { contratos: [] }).contratos || [];
         await gravarContratosConta(nif, conta, [...atuais, ...novos]);
       }
-      await fecharProposta(nif, indice, dataFecho);
+      await fecharProposta(nif, indice, dataFecho, { fechadasLinhas: linhasFechaveis.length });
+      setFechoAberto(null);
       setPropostas((await obterPropostas(nif)) || []);
     } catch (e) {
       window.alert(`Não foi possível fechar a proposta: ${e.message}`);
     }
   };
 
-  const selecionarCliente = (nif) => { setNomeEmEdicao(null); setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif); if (nif) carregarExtras(nif); else setExtras({}); irParaTopo(); };
+  const selecionarCliente = (nif) => { setFechoAberto(null); setNomeEmEdicao(null); setEhNovo(false); setAvisoSucesso(""); setNifSelecionado(nif); if (nif) carregarExtras(nif); else setExtras({}); irParaTopo(); };
   const abrirNovo = () => { setEhNovo(true); setNifSelecionado(""); setAvisoSucesso(""); setErroNif(""); setNovoBase({ e: "", n: "", t: "Convergente Móvel + Fixo" }); setExtras({}); setExtrasOriginais({}); irParaTopo(); };
   const limpar = () => { setEhNovo(false); setNifSelecionado(""); setExtras({}); setExtrasOriginais({}); };
   const mudarExtra = (key, value) => setExtras((prev) => ({ ...prev, [key]: value }));
@@ -9298,15 +9309,46 @@ function ClientesView() {
                     {p.fechada ? (
                       <div className="text-[11px] text-neutral-400">Contratos gerados a partir desta proposta — vê-os em cima, em "Contratos de permanência".</div>
                     ) : (
+                      <div className="space-y-2">
                       <div className="flex items-center gap-2 text-xs">
                         <label className="text-neutral-500">Fechada em:</label>
                         <input type="date" value={p._dataFecho || ""} onChange={(e) => setPropostas((prev) => prev.map((x, j) => j === i ? { ...x, _dataFecho: e.target.value } : x))}
                           className="px-2 py-1 rounded border border-neutral-300 text-xs" />
-                        <button onClick={() => fecharPropostaEntregue(i, (propostas[i] || {})._dataFecho)}
+                        <button onClick={() => abrirFecho(i)}
                           disabled={!(propostas[i] || {})._dataFecho}
                           className="text-xs px-2.5 py-1 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40">
                           Proposta Fechada
                         </button>
+                      </div>
+                      {fechoAberto && fechoAberto.indice === i && (
+                        <div className="border border-neutral-200 rounded-md p-2 space-y-1.5 bg-neutral-50">
+                          <div className="text-xs text-neutral-600">Assinala os serviços que fecharam em {formatarDataIsoPT(p._dataFecho)}. Só esses passam a contratos de permanência.</div>
+                          {fechoAberto.linhas.length === 0 && <div className="text-xs text-neutral-500">Esta proposta não tem linhas guardadas.</div>}
+                          {fechoAberto.linhas.map((l, k) => (
+                            <div key={k} className="flex items-center gap-2 text-xs">
+                              <input type="checkbox" checked={!!l.sel} disabled={!l.duracaoMeses} title={l.duracaoMeses ? "" : "Escolhe primeiro a duração"}
+                                aria-label={`Fechou: ${l.produto || l.servico || "serviço"}`}
+                                onChange={(e) => setFechoAberto((f) => ({ ...f, linhas: f.linhas.map((x, j) => j === k ? { ...x, sel: e.target.checked } : x) }))} />
+                              <span className="flex-1 min-w-0 truncate" title={[l.servico, l.produto].filter(Boolean).join(" · ")}>{[l.servico, l.produto].filter(Boolean).join(" · ") || "—"}</span>
+                              <span className="text-neutral-500 whitespace-nowrap">{formatEuro(l.valorMensal || 0)}</span>
+                              <select value={l.duracaoMeses || ""} aria-label="Duração do contrato"
+                                onChange={(e) => { const d = e.target.value ? Number(e.target.value) : null; setFechoAberto((f) => ({ ...f, linhas: f.linhas.map((x, j) => j === k ? { ...x, duracaoMeses: d, sel: !!d } : x) })); }}
+                                className="px-1.5 py-1 rounded border border-neutral-300 text-xs">
+                                <option value="">Duração…</option>
+                                {[...new Set([...DURACOES_PROPOSTA, l.duracaoMeses].filter(Boolean))].sort((a, b) => a - b).map((d) => <option key={d} value={d}>{d} meses</option>)}
+                              </select>
+                            </div>
+                          ))}
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => fecharPropostaEntregue(i, p._dataFecho, fechoAberto.linhas.filter((l) => l.sel))}
+                              disabled={!fechoAberto.linhas.some((l) => l.sel)}
+                              className="text-xs px-2.5 py-1 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40">
+                              Confirmar fecho ({fechoAberto.linhas.filter((l) => l.sel).length})
+                            </button>
+                            <button onClick={() => setFechoAberto(null)} className="text-xs px-2.5 py-1 rounded-md border border-neutral-300 text-neutral-700">Cancelar</button>
+                          </div>
+                        </div>
+                      )}
                       </div>
                     )}
                   </div>
