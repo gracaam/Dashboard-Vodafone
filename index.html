@@ -8332,46 +8332,115 @@ function RelatoriosView() {
   );
 }
 
-// Fechar o dia (2026-10-22): resume o que mudou desde o último fecho e envia-o por email através
-// de um Google Apps Script do próprio Augusto (URL + senha em meta/resumo_config, nunca no código).
-// Só usa dados já guardados (contactos, propostas, contratos); emails importados = só assunto.
-function resumoDesdeFecho(clientes, mapaContratos, desde, comNomes) {
+// Fechar o dia (2026-10-22): relatório do que mudou desde o último fecho, no ecrã e por email
+// (HTML) através de um Google Apps Script do próprio Augusto (URL + senha em meta/resumo_config,
+// nunca no código). Só usa dados já guardados; emails importados = só assunto, data e sentido.
+const DIAS_EMAIL_SEM_RESPOSTA = 60;
+function relatorioDesdeFecho(clientes, mapaContratos, desde, hoje = new Date()) {
   const ini = desde || "0000";
-  const nome = (c, i) => (comNomes ? c.e || `Cliente ${i + 1}` : `Cliente ${i + 1}`);
-  const linhas = [], cont = { contactos: 0, emails: 0, entregues: 0, fechadas: 0, contratos: 0 };
-  clientes.forEach((c, i) => {
-    const ct = (Array.isArray(c.contactos) ? c.contactos : []).filter((x) => x && x.em && x.em > ini && !x.resolveu);
-    ct.forEach((x) => { x.tipo === "Email" ? cont.emails++ : cont.contactos++; if (comNomes) linhas.push(`${nome(c, i)} — ${x.tipo || "Contacto"}${x.nota ? ": " + x.nota : ""}`); });
-    (Array.isArray(c.propostas) ? c.propostas : []).forEach((p) => {
-      if (p.entregueEm && p.entregueEm > ini) { cont.entregues++; if (comNomes) linhas.push(`${nome(c, i)} — proposta entregue (${formatEuro(p.total || 0)}/mês)`); }
-      if (p.fechada && p.fechadaEm && p.fechadaEm.slice(0, 10) >= ini.slice(0, 10)) { cont.fechadas++; if (comNomes) linhas.push(`${nome(c, i)} — proposta FECHADA (${p.fechadasLinhas || 0} serviço(s))`); }
+  const d10 = (x) => String(x || "").slice(0, 10);
+  const data = (x) => (x ? new Date(x).toLocaleDateString("pt-PT") : "—");
+  const lista = calcularListaHoje(clientes, mapaContratos, hoje);
+  const r = { propostas: [], emails: [], contactos: [], contratos: [], atencao: [] };
+  clientes.forEach((c) => {
+    const nome = c.e || "Cliente";
+    (Array.isArray(c.contactos) ? c.contactos : []).filter((x) => x && x.em && x.em > ini && !x.resolveu).forEach((x) => {
+      const linha = { nome, em: x.em, tipo: x.tipo || "Contacto", nota: x.nota || "" };
+      (x.tipo === "Email" ? r.emails : r.contactos).push(linha);
     });
-    const d = mapaContratos && mapaContratos.get(String(c.n));
-    Object.values((d && d.contas) || {}).forEach((ac) => { if (ac && ac.atualizadoEm && ac.atualizadoEm > ini) cont.contratos++; });
+    (Array.isArray(c.propostas) ? c.propostas : []).forEach((p) => {
+      if (p.entregueEm && p.entregueEm > ini) r.propostas.push({ nome, em: p.entregueEm, estado: "Entregue", total: p.total || 0, n: (p.linhas || []).length });
+      if (p.fechada && p.fechadaEm && d10(p.fechadaEm) >= d10(ini)) {
+        r.propostas.push({ nome, em: p.fechadaEm, estado: "FECHADA", total: p.total || 0, n: p.fechadasLinhas || 0 });
+        const contas = new Set((p.linhas || []).filter((l) => l.duracaoMeses).map((l) => String(l.conta)));
+        const f = calcularFimMaisProximo(mapaContratos && mapaContratos.get(String(c.n)), hoje);
+        if (f && !f.terminado && f.dias <= 183 && contas.has(String(f.conta))) r.atencao.push({ nivel: "alto", nome, texto: `Fechaste uma proposta e a conta ${rotuloConta(f.conta)} ainda tem permanência a terminar a ${data(f.fim)}. Substitui esse contrato?` });
+      }
+    });
+    const dc = mapaContratos && mapaContratos.get(String(c.n));
+    Object.entries((dc && dc.contas) || {}).forEach(([conta, ac]) => {
+      if (ac && ac.atualizadoEm && ac.atualizadoEm > ini) r.contratos.push({ nome, conta: rotuloConta(conta), em: ac.atualizadoEm, n: (ac.contratos || []).length });
+    });
+    const ult = contactosOrdenados(c).find((x) => !x.resolveu);
+    if (ult && ult.tipo === "Email" && /^Recebido/.test(ult.nota || "")) {
+      const dias = diasEntreDatasIso(d10(ult.em), d10(hoje.toISOString()));
+      if (dias <= DIAS_EMAIL_SEM_RESPOSTA) r.atencao.push({ nivel: dias > 3 ? "alto" : "medio", nome, texto: `Escreveu-te há ${dias} dia(s) e não há resposta tua no histórico: ${ult.nota}` });
+    }
   });
-  const texto = [
-    `Resumo desde ${desde ? new Date(desde).toLocaleString("pt-PT") : "o início"}`,
-    `Contactos registados: ${cont.contactos} · Emails importados: ${cont.emails}`,
-    `Propostas entregues: ${cont.entregues} · Propostas fechadas: ${cont.fechadas} · Contas com contratos alterados: ${cont.contratos}`,
-    ...(comNomes && linhas.length ? ["", ...linhas] : []),
-  ].join("\n");
-  return { cont, linhas, texto };
+  lista.propostas.forEach((x) => r.atencao.push({ nivel: x.dias > 14 ? "alto" : "medio", nome: x.c.e || "Cliente", texto: `Proposta entregue há ${x.dias} dias sem resposta (${formatEuro(x.total || 0)}/mês).` }));
+  lista.renovacoes.filter((x) => x.dias <= 30).forEach((x) => r.atencao.push({ nivel: "alto", nome: x.c.e || "Cliente", texto: `Permanência termina a ${data(x.fim)} (daqui a ${x.dias} dias), conta ${rotuloConta(x.conta)}.` }));
+  lista.passos.forEach((x) => r.atencao.push({ nivel: "medio", nome: x.c.e || "Cliente", texto: `Passo atrasado ${x.atraso} dia(s): ${x.ultimo.proximoPasso || "sem descrição"}.` }));
+  r.atencao.sort((a, b) => (a.nivel === b.nivel ? 0 : a.nivel === "alto" ? -1 : 1));
+  const ord = (a, b) => b.em.localeCompare(a.em);
+  ["propostas", "emails", "contactos", "contratos"].forEach((k) => r[k].sort(ord));
+  r.kpis = [
+    ["Propostas entregues", r.propostas.filter((x) => x.estado === "Entregue").length, "#0891b2"],
+    ["Propostas fechadas", r.propostas.filter((x) => x.estado === "FECHADA").length, "#059669"],
+    ["Emails recebidos", r.emails.filter((x) => /^Recebido/.test(x.nota)).length, "#7c3aed"],
+    ["Emails enviados", r.emails.filter((x) => /^Enviado/.test(x.nota)).length, "#2563eb"],
+    ["Contactos", r.contactos.length, "#d97706"],
+    ["Contas com contratos alterados", r.contratos.length, "#475569"],
+  ];
+  r.desde = desde; r.fmtData = data;
+  return r;
+}
+// Secções do relatório: [título, colunas, linhas]; ecrã e email partilham a mesma definição.
+function seccoesRelatorio(r) {
+  const dt = (x) => new Date(x).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" });
+  return [
+    ["Propostas", ["Cliente", "Data", "Estado", "Serviços", "Total/mês"], r.propostas.map((x) => [x.nome, dt(x.em), x.estado, x.n, formatEuro(x.total)])],
+    ["Emails importados", ["Cliente", "Data", "Assunto"], r.emails.map((x) => [x.nome, dt(x.em), x.nota])],
+    ["Contactos", ["Cliente", "Data", "Tipo", "Nota"], r.contactos.map((x) => [x.nome, dt(x.em), x.tipo, x.nota || "—"])],
+    ["Contratos alterados", ["Cliente", "Conta", "Data", "Contratos"], r.contratos.map((x) => [x.nome, x.conta, dt(x.em), x.n])],
+  ];
+}
+function relatorioHtml(r) {
+  const e = escaparHtml, st = "font-family:Arial,sans-serif";
+  const cor = { alto: "#e60000", medio: "#d97706" };
+  const kpis = r.kpis.map(([t, n, c]) => `<td style="padding:10px 14px;border:1px solid #e5e5e5;border-top:4px solid ${c};text-align:center"><div style="font-size:22px;font-weight:bold">${n}</div><div style="font-size:11px;color:#555">${e(t)}</div></td>`).join("");
+  const atencao = r.atencao.length
+    ? r.atencao.map((a) => `<tr><td style="padding:6px 10px;border-left:4px solid ${cor[a.nivel]};background:#fafafa"><b>${e(a.nome)}</b> — ${e(a.texto)}</td></tr>`).join("")
+    : `<tr><td style="padding:6px 10px;color:#555">Nada a precisar de atenção.</td></tr>`;
+  const tabelas = seccoesRelatorio(r).filter(([, , l]) => l.length).map(([t, cols, linhas]) =>
+    `<h3 style="margin:18px 0 6px">${e(t)} (${linhas.length})</h3><table cellspacing="0" style="border-collapse:collapse;width:100%;font-size:12px"><tr>${cols.map((c) => `<th style="text-align:left;padding:5px 8px;background:#222;color:#fff">${e(c)}</th>`).join("")}</tr>${linhas.map((l, i) => `<tr style="background:${i % 2 ? "#f6f6f6" : "#fff"}">${l.map((v) => `<td style="padding:5px 8px;border-bottom:1px solid #e5e5e5">${e(String(v))}</td>`).join("")}</tr>`).join("")}</table>`).join("");
+  return `<div style="${st};max-width:760px"><h2 style="margin:0 0 4px">Resumo do dashboard</h2><div style="color:#555;font-size:12px;margin-bottom:12px">Desde ${r.desde ? new Date(r.desde).toLocaleString("pt-PT") : "o início"}</div><table cellspacing="6" style="width:100%"><tr>${kpis}</tr></table><h3 style="margin:18px 0 6px;color:#e60000">Precisa da tua atenção (${r.atencao.length})</h3><table cellspacing="4" style="width:100%;font-size:13px">${atencao}</table>${tabelas}</div>`;
+}
+function RelatorioFecho({ r }) {
+  const cor = { alto: "border-red-500 bg-red-50", medio: "border-amber-500 bg-amber-50" };
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+        {r.kpis.map(([t, n, c]) => <div key={t} className="rounded-lg border border-neutral-200 bg-white p-2 text-center" style={{ borderTop: `4px solid ${c}` }}><div className="text-xl font-bold">{n}</div><div className="text-[11px] text-neutral-500">{t}</div></div>)}
+      </div>
+      <div>
+        <div className="text-sm font-semibold text-red-700 mb-1">Precisa da tua atenção ({r.atencao.length})</div>
+        {r.atencao.length === 0 ? <div className="text-xs text-neutral-500">Nada a precisar de atenção.</div> : r.atencao.map((a, i) => <div key={i} className={`text-xs border-l-4 px-2 py-1 mb-1 ${cor[a.nivel]}`}><b>{a.nome}</b> — {a.texto}</div>)}
+      </div>
+      {seccoesRelatorio(r).filter(([, , l]) => l.length).map(([t, cols, linhas]) => (
+        <div key={t}>
+          <div className="text-sm font-semibold mb-1">{t} ({linhas.length})</div>
+          <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr>{cols.map((c) => <th key={c} className="text-left px-2 py-1 bg-neutral-800 text-white">{c}</th>)}</tr></thead>
+            <tbody>{linhas.map((l, i) => <tr key={i} className={i % 2 ? "bg-neutral-50" : ""}>{l.map((v, j) => <td key={j} className="px-2 py-1 border-b border-neutral-100">{v}</td>)}</tr>)}</tbody></table></div>
+        </div>
+      ))}
+    </div>
+  );
 }
 function FecharDia({ clientes, mapaContratos }) {
   const REF = () => firebaseDb.collection("meta").doc("resumo_config");
-  const [cfg, setCfg] = useState({ url: "", segredo: "", comNomes: false, ultimoFecho: "" });
+  const [cfg, setCfg] = useState({ url: "", segredo: "", ultimoFecho: "" });
   const [aberto, setAberto] = useState(false);
   const [estado, setEstado] = useState("");
-  const [resumo, setResumo] = useState(null);
+  const [rel, setRel] = useState(null);
   useEffect(() => { REF().get().then((d) => { if (d.exists) setCfg((c) => ({ ...c, ...d.data() })); }).catch(() => {}); }, []);
   const guardar = async (novo) => { setCfg(novo); await REF().set(novo); };
   const fechar = async () => {
-    const r = resumoDesdeFecho(clientes, mapaContratos, cfg.ultimoFecho, cfg.comNomes);
-    setResumo(r);
-    if (!cfg.url || !cfg.segredo) { setEstado("Resumo mostrado. Para receber por email, preenche o URL e a senha em Definições."); return; }
+    const r = relatorioDesdeFecho(clientes, mapaContratos, cfg.ultimoFecho);
+    setRel(r);
+    if (!cfg.url || !cfg.segredo) { setEstado("Relatório mostrado. Para receber por email, preenche o URL e a senha em Definições."); return; }
     setEstado("A enviar…");
     try {
-      await fetch(cfg.url, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ segredo: cfg.segredo, assunto: `Resumo do dashboard — ${new Date().toLocaleDateString("pt-PT")}`, corpo: r.texto }) });
+      await fetch(cfg.url, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ segredo: cfg.segredo, assunto: `Resumo do dashboard — ${new Date().toLocaleDateString("pt-PT")}`, html: relatorioHtml(r) }) });
       await guardar({ ...cfg, ultimoFecho: new Date().toISOString() });
       setEstado("Pedido de envio feito. Confirma no Gmail que o email chegou (o browser não consegue ver a resposta).");
     } catch (e) { setEstado(`Não foi possível enviar: ${e.message}. O último fecho NÃO foi atualizado.`); }
@@ -8379,16 +8448,15 @@ function FecharDia({ clientes, mapaContratos }) {
   return (
     <details className="bg-white border border-neutral-200 rounded-xl" open>
       <summary className="px-3 py-2 text-sm font-semibold text-neutral-700 cursor-pointer">Fechar o dia {cfg.ultimoFecho ? `· último fecho ${new Date(cfg.ultimoFecho).toLocaleString("pt-PT")}` : ""}</summary>
-      <div className="px-3 pb-3 space-y-2 text-sm">
-        <button onClick={fechar} className="px-3 py-1.5 rounded-lg bg-red-600 text-white font-semibold">Fechar o dia</button>
-        <button onClick={() => setAberto(!aberto)} className="ml-2 text-xs underline text-neutral-500">Definições</button>
+      <div className="px-3 pb-3 space-y-3 text-sm">
+        <div><button onClick={fechar} className="px-3 py-1.5 rounded-lg bg-red-600 text-white font-semibold">Fechar o dia</button>
+          <button onClick={() => setAberto(!aberto)} className="ml-2 text-xs underline text-neutral-500">Definições</button></div>
         {estado && <div className="text-xs text-neutral-600">{estado}</div>}
-        {resumo && <pre className="text-xs bg-neutral-50 border border-neutral-200 rounded-lg p-2 whitespace-pre-wrap">{resumo.texto}</pre>}
+        {rel && <RelatorioFecho r={rel} />}
         {aberto && (
           <div className="space-y-2 border-t border-neutral-100 pt-2">
             <input className="w-full border border-neutral-300 rounded px-2 py-1 text-xs" placeholder="URL da aplicação Web (acaba em /exec)" value={cfg.url} onChange={(e) => setCfg({ ...cfg, url: e.target.value.trim() })} />
             <input type="password" className="w-full border border-neutral-300 rounded px-2 py-1 text-xs" placeholder="Senha (a frase do script)" value={cfg.segredo} onChange={(e) => setCfg({ ...cfg, segredo: e.target.value.trim() })} />
-            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={!!cfg.comNomes} onChange={(e) => setCfg({ ...cfg, comNomes: e.target.checked })} /> Incluir nomes dos clientes e assuntos no email (por omissão só contagens)</label>
             <button onClick={() => guardar(cfg).then(() => setEstado("Definições guardadas.")).catch((e) => setEstado(`Não foi possível guardar: ${e.message}`))} className="px-2 py-1 rounded border border-neutral-300 text-xs">Guardar definições</button>
           </div>
         )}
