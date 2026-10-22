@@ -8332,6 +8332,71 @@ function RelatoriosView() {
   );
 }
 
+// Fechar o dia (2026-10-22): resume o que mudou desde o último fecho e envia-o por email através
+// de um Google Apps Script do próprio Augusto (URL + senha em meta/resumo_config, nunca no código).
+// Só usa dados já guardados (contactos, propostas, contratos); emails importados = só assunto.
+function resumoDesdeFecho(clientes, mapaContratos, desde, comNomes) {
+  const ini = desde || "0000";
+  const nome = (c, i) => (comNomes ? c.e || `Cliente ${i + 1}` : `Cliente ${i + 1}`);
+  const linhas = [], cont = { contactos: 0, emails: 0, entregues: 0, fechadas: 0, contratos: 0 };
+  clientes.forEach((c, i) => {
+    const ct = (Array.isArray(c.contactos) ? c.contactos : []).filter((x) => x && x.em && x.em > ini && !x.resolveu);
+    ct.forEach((x) => { x.tipo === "Email" ? cont.emails++ : cont.contactos++; if (comNomes) linhas.push(`${nome(c, i)} — ${x.tipo || "Contacto"}${x.nota ? ": " + x.nota : ""}`); });
+    (Array.isArray(c.propostas) ? c.propostas : []).forEach((p) => {
+      if (p.entregueEm && p.entregueEm > ini) { cont.entregues++; if (comNomes) linhas.push(`${nome(c, i)} — proposta entregue (${formatEuro(p.total || 0)}/mês)`); }
+      if (p.fechada && p.fechadaEm && p.fechadaEm.slice(0, 10) >= ini.slice(0, 10)) { cont.fechadas++; if (comNomes) linhas.push(`${nome(c, i)} — proposta FECHADA (${p.fechadasLinhas || 0} serviço(s))`); }
+    });
+    const d = mapaContratos && mapaContratos.get(String(c.n));
+    Object.values((d && d.contas) || {}).forEach((ac) => { if (ac && ac.atualizadoEm && ac.atualizadoEm > ini) cont.contratos++; });
+  });
+  const texto = [
+    `Resumo desde ${desde ? new Date(desde).toLocaleString("pt-PT") : "o início"}`,
+    `Contactos registados: ${cont.contactos} · Emails importados: ${cont.emails}`,
+    `Propostas entregues: ${cont.entregues} · Propostas fechadas: ${cont.fechadas} · Contas com contratos alterados: ${cont.contratos}`,
+    ...(comNomes && linhas.length ? ["", ...linhas] : []),
+  ].join("\n");
+  return { cont, linhas, texto };
+}
+function FecharDia({ clientes, mapaContratos }) {
+  const REF = () => firebaseDb.collection("meta").doc("resumo_config");
+  const [cfg, setCfg] = useState({ url: "", segredo: "", comNomes: false, ultimoFecho: "" });
+  const [aberto, setAberto] = useState(false);
+  const [estado, setEstado] = useState("");
+  const [resumo, setResumo] = useState(null);
+  useEffect(() => { REF().get().then((d) => { if (d.exists) setCfg((c) => ({ ...c, ...d.data() })); }).catch(() => {}); }, []);
+  const guardar = async (novo) => { setCfg(novo); await REF().set(novo); };
+  const fechar = async () => {
+    const r = resumoDesdeFecho(clientes, mapaContratos, cfg.ultimoFecho, cfg.comNomes);
+    setResumo(r);
+    if (!cfg.url || !cfg.segredo) { setEstado("Resumo mostrado. Para receber por email, preenche o URL e a senha em Definições."); return; }
+    setEstado("A enviar…");
+    try {
+      await fetch(cfg.url, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ segredo: cfg.segredo, assunto: `Resumo do dashboard — ${new Date().toLocaleDateString("pt-PT")}`, corpo: r.texto }) });
+      await guardar({ ...cfg, ultimoFecho: new Date().toISOString() });
+      setEstado("Pedido de envio feito. Confirma no Gmail que o email chegou (o browser não consegue ver a resposta).");
+    } catch (e) { setEstado(`Não foi possível enviar: ${e.message}. O último fecho NÃO foi atualizado.`); }
+  };
+  return (
+    <details className="bg-white border border-neutral-200 rounded-xl" open>
+      <summary className="px-3 py-2 text-sm font-semibold text-neutral-700 cursor-pointer">Fechar o dia {cfg.ultimoFecho ? `· último fecho ${new Date(cfg.ultimoFecho).toLocaleString("pt-PT")}` : ""}</summary>
+      <div className="px-3 pb-3 space-y-2 text-sm">
+        <button onClick={fechar} className="px-3 py-1.5 rounded-lg bg-red-600 text-white font-semibold">Fechar o dia</button>
+        <button onClick={() => setAberto(!aberto)} className="ml-2 text-xs underline text-neutral-500">Definições</button>
+        {estado && <div className="text-xs text-neutral-600">{estado}</div>}
+        {resumo && <pre className="text-xs bg-neutral-50 border border-neutral-200 rounded-lg p-2 whitespace-pre-wrap">{resumo.texto}</pre>}
+        {aberto && (
+          <div className="space-y-2 border-t border-neutral-100 pt-2">
+            <input className="w-full border border-neutral-300 rounded px-2 py-1 text-xs" placeholder="URL da aplicação Web (acaba em /exec)" value={cfg.url} onChange={(e) => setCfg({ ...cfg, url: e.target.value.trim() })} />
+            <input type="password" className="w-full border border-neutral-300 rounded px-2 py-1 text-xs" placeholder="Senha (a frase do script)" value={cfg.segredo} onChange={(e) => setCfg({ ...cfg, segredo: e.target.value.trim() })} />
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={!!cfg.comNomes} onChange={(e) => setCfg({ ...cfg, comNomes: e.target.checked })} /> Incluir nomes dos clientes e assuntos no email (por omissão só contagens)</label>
+            <button onClick={() => guardar(cfg).then(() => setEstado("Definições guardadas.")).catch((e) => setEstado(`Não foi possível guardar: ${e.message}`))} className="px-2 py-1 rounded border border-neutral-300 text-xs">Guardar definições</button>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function HojeView() {
   const firebaseUser = useFirebaseAuthUser();
   const { todosClientes, obterExtras, obterTodosExtras, definirExtras } = useClientesNovos();
@@ -8352,6 +8417,7 @@ function HojeView() {
     <div className="space-y-5">
       {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
       {firebaseUser && <ResumoSemanal clientes={todosClientes} />}
+      {firebaseUser && <FecharDia clientes={todosClientes} mapaContratos={mapaContratos} />}
       {firebaseUser && <ImportarEmailsOutlook clientes={todosClientes} obterExtras={obterExtras} definirExtras={definirExtras} />}
       {campanhas.length > 0 && (
         <GrupoHoje titulo="Campanhas novas ou a terminar" cor="amber" itens={campanhas} vazio=""
