@@ -8354,7 +8354,8 @@ function relatorioDesdeFecho(clientes, mapaContratos, desde, hoje = new Date()) 
         r.propostas.push({ nome, em: p.fechadaEm, estado: "FECHADA", total: p.total || 0, n: p.fechadasLinhas || 0 });
         const contas = new Set((p.linhas || []).filter((l) => l.duracaoMeses).map((l) => String(l.conta)));
         const f = calcularFimMaisProximo(mapaContratos && mapaContratos.get(String(c.n)), hoje);
-        if (f && !f.terminado && f.dias <= 183 && contas.has(String(f.conta))) r.atencao.push({ nivel: "alto", nome, texto: `Fechaste uma proposta e a conta ${rotuloConta(f.conta)} ainda tem permanência a terminar a ${data(f.fim)}. Substitui esse contrato?` });
+        const chave = f && `renovacao:${f.conta}:${f.fim}`, res = chavesResolvidas(c);
+        if (f && !f.terminado && f.dias <= 183 && contas.has(String(f.conta)) && !res.has(chave) && !res.has(`ignorar:${chave}`)) r.atencao.push({ nivel: "alto", nome, texto: `Fechaste uma proposta e a conta ${rotuloConta(f.conta)} ainda tem permanência a terminar a ${data(f.fim)}. Substitui esse contrato?`, acao: { nif: c.n, chave, fim: data(f.fim) } });
       }
     });
     const dc = mapaContratos && mapaContratos.get(String(c.n));
@@ -8407,6 +8408,17 @@ function relatorioHtml(r) {
 }
 function RelatorioFecho({ r }) {
   const cor = { alto: "border-red-500 bg-red-50", medio: "border-amber-500 bg-amber-50" };
+  const [feitos, setFeitos] = useState({});
+  // "Substituído" usa o mesmo mecanismo do "Resolvido": tira a permanência da lista de renovações sem apagar o contrato.
+  const decidir = async (a, i, substituido) => {
+    setFeitos((f) => ({ ...f, [i]: "…" }));
+    try {
+      await registarContacto(a.acao.nif, substituido
+        ? { tipo: "Resolvido", nota: `Permanência a terminar a ${a.acao.fim} substituída pela proposta fechada`, proximoPasso: "", proximoEm: null, resolveu: a.acao.chave }
+        : { tipo: "Resolvido", nota: `Permanência de ${a.acao.fim} mantida (não substituída)`, proximoPasso: "", proximoEm: null, resolveu: `ignorar:${a.acao.chave}` });
+      setFeitos((f) => ({ ...f, [i]: substituido ? "Marcado como substituído." : "Mantido, não volta a perguntar." }));
+    } catch (e) { setFeitos((f) => ({ ...f, [i]: `Erro: ${e.message}` })); }
+  };
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
@@ -8414,7 +8426,7 @@ function RelatorioFecho({ r }) {
       </div>
       <div>
         <div className="text-sm font-semibold text-red-700 mb-1">Precisa da tua atenção ({r.atencao.length})</div>
-        {r.atencao.length === 0 ? <div className="text-xs text-neutral-500">Nada a precisar de atenção.</div> : r.atencao.map((a, i) => <div key={i} className={`text-xs border-l-4 px-2 py-1 mb-1 ${cor[a.nivel]}`}><b>{a.nome}</b> — {a.texto}</div>)}
+        {r.atencao.length === 0 ? <div className="text-xs text-neutral-500">Nada a precisar de atenção.</div> : r.atencao.map((a, i) => <div key={i} className={`text-xs border-l-4 px-2 py-1 mb-1 ${cor[a.nivel]}`}><b>{a.nome}</b> — {a.texto}{a.acao && (feitos[i] && feitos[i] !== "…" ? <span className="ml-2 font-semibold text-emerald-700">{feitos[i]}</span> : <span className="ml-2"><button disabled={!!feitos[i]} onClick={() => decidir(a, i, true)} className="px-2 py-0.5 rounded bg-red-600 text-white mr-1">Sim, substituído</button><button disabled={!!feitos[i]} onClick={() => decidir(a, i, false)} className="px-2 py-0.5 rounded border border-neutral-400">Não, manter</button></span>)}</div>)}
       </div>
       {seccoesRelatorio(r).filter(([, , l]) => l.length).map(([t, cols, linhas]) => (
         <div key={t}>
