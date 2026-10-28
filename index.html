@@ -12439,7 +12439,7 @@ const RLMC_CARTOES = [
   { numero: 5, categoria: "NRECEITASS", label: "Nova Receita Smart Solutions" },
 ];
 
-function CartaoRLMC({ numero, label, valor, emImplementacao = 0 }) {
+function CartaoRLMC({ numero, label, valor, emImplementacao = 0, aguardaAprovacao = 0 }) {
   return (
     <div className="rounded-lg overflow-hidden border border-neutral-200">
       <div className="bg-neutral-800 text-white text-center py-2 px-2">
@@ -12449,6 +12449,7 @@ function CartaoRLMC({ numero, label, valor, emImplementacao = 0 }) {
       <div className="bg-neutral-100 text-center py-3">
         <span className="text-base font-semibold">{formatEuroArredondado(valor)}</span>
         <div className="text-[11px] text-purple-700 mt-0.5">{emImplementacao > 0 ? `+ ${formatEuroArredondado(emImplementacao)} em implementação` : "nada em implementação"}</div>
+        <div className="text-[11px] text-red-600 mt-0.5">{aguardaAprovacao > 0 ? `+ ${formatEuroArredondado(aguardaAprovacao)} aguarda aprovação` : "nada a aguardar aprovação"}</div>
       </div>
     </div>
   );
@@ -12567,8 +12568,8 @@ function useNegociosFiltrados(negocios, { modoVista, dataRef, filtroEstado, filt
   const totaisRLMC = useMemo(() => {
     const doTri = negocios.filter((n) => trimestreChaveDeDataInicio(n.dataInicio) === trimestreChaveAtual);
     const soma = (estado, cat) => doTri.filter((n) => n.estado === estado && n.categoria === cat).reduce((s, n) => s + (calcularRlmcAjustadaAtingimento(n) || 0), 0);
-    // "Em implementação" = só o estado EM IMPLEMENTAÇÃO, mesma RLMC ajustada; não entra no valor principal.
-    return RLMC_CARTOES.map((c) => ({ ...c, valor: soma("IMPLEMENTADO", c.categoria), emImplementacao: soma("EM IMPLEMENTAÇÃO", c.categoria) }));
+    // "Em implementação" = EM IMPLEMENTAÇÃO; "Aguarda aprovação" = AGUARDA GRE/DATA. Mesma RLMC ajustada; nenhum entra no valor principal.
+    return RLMC_CARTOES.map((c) => ({ ...c, valor: soma("IMPLEMENTADO", c.categoria), emImplementacao: soma("EM IMPLEMENTAÇÃO", c.categoria), aguardaAprovacao: soma("AGUARDA GRE/DATA", c.categoria) }));
   }, [negocios, trimestreChaveAtual]);
 
   return { mesChaveAtual, trimestreChaveAtual, negociosSemFiltroEstado, negociosFiltrados, totais, contagensPorEstado, totaisRLMC };
@@ -13124,7 +13125,7 @@ function NegociosView() {
           RLMC — acumulado do trimestre ({labelTrimestre(trimestreChaveAtual)})
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-          {totaisRLMC.map((c) => <CartaoRLMC key={c.numero} numero={c.numero} label={c.label} valor={c.valor} emImplementacao={c.emImplementacao} />)}
+          {totaisRLMC.map((c) => <CartaoRLMC key={c.numero} numero={c.numero} label={c.label} valor={c.valor} emImplementacao={c.emImplementacao} aguardaAprovacao={c.aguardaAprovacao} />)}
         </div>
       </div>
 
