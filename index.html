@@ -4657,7 +4657,10 @@ function calcularRlmcAjustadaAtingimento(negocio) {
   const ajusteDuracao = ajusteDuracaoUpfront(negocio.meses);
   const multiplicadorOferta = MULTIPLICADOR_UPFRONT_OFERTA[negocio.tipoOferta];
   if (ajusteDuracao === null || multiplicadorOferta === undefined) return null;
-  let rlmcAjustada = (Number(negocio.rlmc) || 0) * ajusteDuracao * multiplicadorOferta;
+  // 🐛 Qt em falta (2026-10-28, caso real: RLMC 12,29 × Qt 15 pesava 13,83 em vez de
+  // 207,39): `rlmc` é por unidade (a Comissão Upfront e o motor Pipe já multiplicam por Qt),
+  // por isso o atingimento tem de contar todas as unidades. Qt vazio/0 conta como 1.
+  let rlmcAjustada = (Number(negocio.rlmc) || 0) * (Number(negocio.qt) || 1) * ajusteDuracao * multiplicadorOferta;
   if (negocio.tipoCliente === "PARTICULAR") rlmcAjustada *= 0.5;
   if (negocio.categoriaObjetivo === "MÓVEL" && negocio.atividade === "NÃO INCENTIVADA") rlmcAjustada *= 0.5;
   return Number(rlmcAjustada.toFixed(2));
@@ -5078,7 +5081,8 @@ function calcularPremioTrimestralProposta(negocio, nivel, porCategoria) {
   const ajustePercent = calcularAjustePercentualProposta(atingimentoCategoria, porCategoria);
   if (ajustePercent === null) return null; // Figura 4 "n.a." — sem valor definido
   if (ajustePercent === 0) return 0;
-  const valorApurado = negocio.rlmc * multiplicador * ajusteDuracao;
+  // Qt (2026-10-28): rlmc é por unidade, o valor apurado conta todas as unidades (igual ao motor Pipe).
+  const valorApurado = negocio.rlmc * (Number(negocio.qt) || 1) * multiplicador * ajusteDuracao;
   return Number((valorApurado * (ajustePercent / 100)).toFixed(2));
 }
 
