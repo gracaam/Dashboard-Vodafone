@@ -12439,7 +12439,7 @@ const RLMC_CARTOES = [
   { numero: 5, categoria: "NRECEITASS", label: "Nova Receita Smart Solutions" },
 ];
 
-function CartaoRLMC({ numero, label, valor }) {
+function CartaoRLMC({ numero, label, valor, emImplementacao = 0 }) {
   return (
     <div className="rounded-lg overflow-hidden border border-neutral-200">
       <div className="bg-neutral-800 text-white text-center py-2 px-2">
@@ -12448,6 +12448,7 @@ function CartaoRLMC({ numero, label, valor }) {
       </div>
       <div className="bg-neutral-100 text-center py-3">
         <span className="text-base font-semibold">{formatEuroArredondado(valor)}</span>
+        <div className="text-[11px] text-purple-700 mt-0.5">{emImplementacao > 0 ? `+ ${formatEuroArredondado(emImplementacao)} em implementação` : "nada em implementação"}</div>
       </div>
     </div>
   );
@@ -12561,13 +12562,14 @@ function useNegociosFiltrados(negocios, { modoVista, dataRef, filtroEstado, filt
   // em ComissoesView/calcularNivelTrimestralProposta — reaproveitado aqui, nunca
   // duplicado). A RLMC bruta continua disponível na coluna "RLMC" da tabela de
   // negócios e no cartão "RLMC" do resumo — só estes 5 cartões mudam.
+  // Sempre o acumulado do TRIMESTRE (2026-10-28, pedido do utilizador), mesmo na vista mensal,
+  // para bater com o atingimento das Comissões; a RLMC ajustada já conta a quantidade (Qt).
   const totaisRLMC = useMemo(() => {
-    const implementados = negociosDoPeriodo.filter((n) => n.estado === "IMPLEMENTADO");
-    return RLMC_CARTOES.map((c) => ({
-      ...c,
-      valor: implementados.filter((n) => n.categoria === c.categoria).reduce((s, n) => s + (calcularRlmcAjustadaAtingimento(n) || 0), 0),
-    }));
-  }, [negociosDoPeriodo]);
+    const doTri = negocios.filter((n) => trimestreChaveDeDataInicio(n.dataInicio) === trimestreChaveAtual);
+    const soma = (estado, cat) => doTri.filter((n) => n.estado === estado && n.categoria === cat).reduce((s, n) => s + (calcularRlmcAjustadaAtingimento(n) || 0), 0);
+    // "Em implementação" = só o estado EM IMPLEMENTAÇÃO, mesma RLMC ajustada; não entra no valor principal.
+    return RLMC_CARTOES.map((c) => ({ ...c, valor: soma("IMPLEMENTADO", c.categoria), emImplementacao: soma("EM IMPLEMENTAÇÃO", c.categoria) }));
+  }, [negocios, trimestreChaveAtual]);
 
   return { mesChaveAtual, trimestreChaveAtual, negociosSemFiltroEstado, negociosFiltrados, totais, contagensPorEstado, totaisRLMC };
 }
@@ -13119,10 +13121,10 @@ function NegociosView() {
 
       <div>
         <div className="text-xs font-medium text-neutral-400 mb-2">
-          RLMC — {modoVista === "mes" ? labelMes(mesChaveAtual) : labelTrimestre(trimestreChaveAtual)}
+          RLMC — acumulado do trimestre ({labelTrimestre(trimestreChaveAtual)})
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-          {totaisRLMC.map((c) => <CartaoRLMC key={c.numero} numero={c.numero} label={c.label} valor={c.valor} />)}
+          {totaisRLMC.map((c) => <CartaoRLMC key={c.numero} numero={c.numero} label={c.label} valor={c.valor} emImplementacao={c.emImplementacao} />)}
         </div>
       </div>
 
