@@ -12924,7 +12924,7 @@ function NegociosView({ janela }) {
   // "dataRef" é só um ponteiro de navegação (não representa nenhum negócio) — o mês
   // ou trimestre efetivamente selecionado deriva dele consoante modoVista.
   const [modoVista, setModoVista] = useState("mes"); // "mes" | "trimestre"
-  const [dataRef, setDataRef] = useState(() => new Date(2026, 9, 1));
+  const [dataRef, setDataRef] = useState(() => { const h = new Date(); return new Date(h.getFullYear(), h.getMonth(), 1); });
   const avancarPeriodo = (delta) => setDataRef((d) => {
     const nd = new Date(d);
     nd.setMonth(nd.getMonth() + delta * (modoVista === "mes" ? 1 : 3));
@@ -13992,7 +13992,7 @@ function ComissoesView() {
 
   // Um único navegador de período (mês) — o trimestre correspondente deriva-se sempre
   // do mesmo mês selecionado, para nunca ter 2 seletores de período dessincronizados.
-  const [dataRef, setDataRef] = useState(() => new Date(2026, 9, 1));
+  const [dataRef, setDataRef] = useState(() => { const h = new Date(); return new Date(h.getFullYear(), h.getMonth(), 1); });
   const avancarMes = (delta) => setDataRef((d) => { const nd = new Date(d); nd.setMonth(nd.getMonth() + delta); return nd; });
   const mesChaveAtual = useMemo(() => mesChaveDeData(dataRef), [dataRef]);
   const trimestreChaveAtual = useMemo(() => trimestreChaveDeData(dataRef), [dataRef]);
