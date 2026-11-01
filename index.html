@@ -6505,6 +6505,27 @@ function useFidelizacaoTrimestre() {
   };
 }
 
+// Pop-up da ficha de Cliente/Prospeto. Fecha só com o ✕ ou Esc (não ao clicar fora,
+// para não perder dados por engano) — a ficha chama sempre `limpar` ao guardar.
+function FichaModal({ titulo, onFechar, children }) {
+  useEffect(() => {
+    const h = (e) => { if (e.key === "Escape") onFechar(); };
+    document.addEventListener("keydown", h);
+    return () => document.removeEventListener("keydown", h);
+  }, [onFechar]);
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-4 overflow-y-auto">
+      <div role="dialog" aria-modal="true" aria-label={titulo} className="my-6 w-full max-w-4xl rounded-xl shadow-xl p-5 space-y-4" style={{ background: "var(--vf-bg)", color: "var(--vf-ink)" }}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="font-display font-bold text-xl truncate">{titulo}</div>
+          <button onClick={onFechar} aria-label="Fechar" className="text-sm text-neutral-500 hover:text-neutral-900 px-2 py-1">✕ Fechar</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function ClientePicker({ todosClientes, nifSelecionado, ehNovo, onSelecionar, onNovo, labelNovo, labelPicker = "cliente" }) {
   return (
     <div className="flex gap-2">
@@ -9335,8 +9356,8 @@ function ClientesView() {
       )}
 
       {mostraFicha && (
+        <FichaModal titulo={ehNovo ? "Novo cliente" : (clienteAtual?.e || "Ficha de cliente")} onFechar={limpar}>
         <>
-          <button onClick={limpar} className="text-xs text-neutral-500 hover:text-neutral-800">✕ Limpar seleção</button>
 
           <div className="border border-neutral-200 rounded-lg bg-white p-4">
             {ehNovo ? (
@@ -9558,6 +9579,7 @@ function ClientesView() {
             <button onClick={guardar} className="text-sm bg-red-600 px-3.5 py-2 rounded-md hover:bg-red-700">Guardar ficha</button>
           </div>
         </>
+        </FichaModal>
       )}
 
       {/* Listagem para campanhas: depois da ficha */}
@@ -12228,8 +12250,8 @@ function ProspetosView() {
       )}
 
       {mostraFicha && (
+        <FichaModal titulo={ehNovo ? "Novo prospeto" : (prospetoAtual?.e || "Ficha de prospeto")} onFechar={limpar}>
         <>
-          <button onClick={limpar} className="text-xs text-neutral-500 hover:text-neutral-800">✕ Limpar seleção</button>
 
           <div className="border border-neutral-200 rounded-lg bg-white p-4">
             {ehNovo ? (
@@ -12351,6 +12373,7 @@ function ProspetosView() {
             </button>
           </div>
         </>
+        </FichaModal>
       )}
 
       {/* Listagem para campanhas: depois da ficha */}
