@@ -13237,11 +13237,8 @@ function NegociosView() {
       )}
 
       {form && (
-        <div className="border border-neutral-900 rounded-lg bg-white p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="text-xs font-medium text-neutral-400">{form.linhaExcel ? "EDITAR NEGÓCIO" : "NOVO NEGÓCIO"}</div>
-            <button onClick={fecharEdicao} className="text-xs text-neutral-500 hover:text-neutral-800">✕ Cancelar</button>
-          </div>
+        <FichaModal titulo={form.linhaExcel ? `Editar negócio${form.empresa ? " — " + form.empresa : ""}` : "Novo negócio"} onFechar={fecharEdicao}>
+        <div className="border border-neutral-200 rounded-lg bg-white p-4 space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="text-xs text-neutral-500 mb-1 block">Empresa</label>
@@ -13461,6 +13458,7 @@ function NegociosView() {
             </div>
           </div>
         </div>
+        </FichaModal>
       )}
 
 
