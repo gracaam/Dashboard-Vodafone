@@ -136,8 +136,8 @@
   html[data-tema="escuro"] main button.rounded-full.bg-neutral-900 { background: var(--vf-ink); color: #161214; }
   html[data-tema="escuro"] svg text { fill: var(--vf-muted); }
   html[data-tema="escuro"] svg line[stroke="#e5e5e5"] { stroke: var(--vf-border); }
-  .ficha-modal { background: color-mix(in srgb, var(--vf-bg) 50%, transparent); backdrop-filter: none; }
-  .ficha-modal .bg-white { background-color: color-mix(in srgb, var(--vf-card) 50%, transparent) !important; }
+  .ficha-modal { background: color-mix(in srgb, var(--vf-bg) 90%, transparent); backdrop-filter: none; }
+  .ficha-modal .bg-white { background-color: color-mix(in srgb, var(--vf-card) 90%, transparent) !important; }
   html[data-tema="escuro"] svg circle[fill="#fff"] { fill: var(--vf-card); }
 
   /* Efeitos estilo Magic UI (2026-10-11), só CSS, sem dependências. */
@@ -6511,7 +6511,7 @@ function useFidelizacaoTrimestre() {
 // por isso ficam abertas ao mudar de separador. Cada janela é uma instância própria
 // da vista (prop `janela`), com o seu estado — a vista de fundo fica escondida e só a
 // ficha aparece (via portal). Arrastam-se pelo cabeçalho; fecham com ✕ ou Esc (nunca
-// ao clicar fora). Fundo a 50% de transparência (classe .ficha-modal, ver <style>).
+// ao clicar fora). Fundo a 10% de transparência (classe .ficha-modal, ver <style>).
 const MAX_JANELAS = 5;
 const JanelasCtx = React.createContext({ abrir: () => {} });
 function FichaModal({ titulo, onFechar, janela, children }) {
