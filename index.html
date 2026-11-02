@@ -9866,7 +9866,60 @@ function PlafondPartilhado({ contas }) {
   );
 }
 
-function LinhasARever({ contas }) {
+// Exportar "Linhas a rever" para PDF (2026-11-02): mesmo método dos relatórios — HTML próprio
+// → iframe → imprimir ("Guardar como PDF"). Só as linhas assinaladas; o parecer do Jev
+// aparece nas que já o têm (não se pede nada ao Jev ao exportar).
+function gerarHtmlLinhasARever(nomeCliente, alvos, jev) {
+  const e = escaparHtml;
+  const ROT = { gasto: "Gasto invulgar", roaming: "Roaming / internacional", semconsumo: "Sem consumo", pico: "Pico de gasto" };
+  const COR = { gasto: "#d61f2f", roaming: "#0057b8", semconsumo: "#69707a", pico: "#b97700" };
+  const comParecer = alvos.filter((l) => jev[l.numero]);
+  const aMudar = comParecer.filter((l) => jev[l.numero].ajuste !== "adequado").length;
+  const cartoes = alvos.map((l) => {
+    const v = jev[l.numero];
+    const pills = l.sinais.map((s) => `<span class="pill" style="--c:${COR[s.k] || "#69707a"}">${e(ROT[s.k] || s.k)}</span>`).join("");
+    const motivos = l.sinais.map((s) => `<li>${e(s.t)}</li>`).join("");
+    const parecer = v
+      ? `<div class="jev ${v.ajuste === "adequado" ? "ok" : "warn"}"><b>Parecer do Jev: ${e(v.ajuste)}</b>${v.oportunidade != null ? ` · oportunidade ${v.oportunidade}/4` : ""}<div>${e(VEREDITOS_TARIFARIO[v.ajuste] || "")}</div></div>`
+      : `<div class="jev nd">Parecer do Jev não pedido para esta linha.</div>`;
+    return `<section class="card">
+      <div class="top"><div><div class="num">${e(l.numero)}</div><div class="tar">${e(nomeTarifarioCurto(l.tarifario) || l.tarifario)}</div></div><div class="pills">${pills}</div></div>
+      <div class="m"><div><span>Mensalidade</span><b>${e(formatEuro(l.mensalidade))}</b></div><div><span>Total médio/mês</span><b>${e(formatEuro(l.totalMedio))}</b></div><div><span>Utilização média</span><b>${l.usoMedioPct != null ? l.usoMedioPct + "%" : "—"}</b></div><div><span>Meses analisados</span><b>${l.meses}</b></div></div>
+      <ul>${motivos}</ul>${parecer}</section>`;
+  }).join("");
+  return `<!doctype html><html lang="pt"><head><meta charset="utf-8"><title>Linhas a rever — ${e(nomeCliente)}</title><style>
+  @page{size:A4;margin:12mm}
+  *{box-sizing:border-box}
+  body{margin:0;font:12.5px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;color:#101317;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  header{background:linear-gradient(135deg,#14161b,#23272f);color:#fff;padding:20px 24px;border-radius:12px;position:relative;overflow:hidden;border-bottom:4px solid #e60000}
+  header .b{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#e60000;font-weight:700}
+  header h1{margin:4px 0 2px;font-size:21px;letter-spacing:-.3px}
+  header .s{color:#b6bcc6;font-size:12px}
+  .res{display:flex;gap:10px;margin:14px 0}
+  .res div{flex:1;border:1px solid #e8eaee;border-radius:10px;padding:10px 12px;background:#f8f9fb}
+  .res b{display:block;font-size:22px;letter-spacing:-.5px}.res span{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:#69707a;font-weight:700}
+  .card{border:1px solid #e8eaee;border-left:4px solid #e60000;border-radius:10px;padding:12px 14px;margin:0 0 10px;break-inside:avoid;page-break-inside:avoid}
+  .top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+  .num{font-size:15px;font-weight:800}.tar{color:#69707a;font-size:12px}
+  .pills{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+  .pill{font-size:10.5px;font-weight:700;color:var(--c);border:1px solid var(--c);border-radius:999px;padding:2px 9px;white-space:nowrap}
+  .m{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:10px 0 4px}
+  .m div{background:#f4f5f7;border-radius:8px;padding:6px 9px}.m span{display:block;font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;color:#69707a;font-weight:700}.m b{font-size:13.5px}
+  ul{margin:8px 0;padding-left:18px;color:#2a2f36}li{margin:2px 0}
+  .jev{border-radius:8px;padding:8px 11px;font-size:12px}.jev div{color:#2a2f36;margin-top:2px}
+  .jev.ok{background:#e6f4ec;border:1px solid #bfe3cf;color:#0d6a3e}
+  .jev.warn{background:#fdf4e3;border:1px solid #f0dcae;color:#8a5a00}
+  .jev.nd{background:#f4f5f7;color:#69707a;border:1px dashed #d6dae0}
+  footer{margin-top:12px;font-size:10.5px;color:#69707a;border-top:1px solid #e8eaee;padding-top:8px}
+  </style></head><body>
+  <header><div class="b">Vodafone Business · Análise de faturas</div><h1>Linhas a rever — ${e(nomeCliente)}</h1><div class="s">Emitido em ${new Date().toLocaleDateString("pt-PT")} · ${alvos.length} linha(s) assinalada(s)</div></header>
+  <div class="res"><div><b>${alvos.length}</b><span>Linhas assinaladas</span></div><div><b>${comParecer.length}</b><span>Com parecer do Jev</span></div><div><b>${aMudar}</b><span>Tarifário a rever (Jev)</span></div></div>
+  ${cartoes}
+  <footer>Sinais calculados a partir das faturas analisadas. O parecer do Jev (TypeSafe) é indicativo e incide só sobre a adequação do tarifário à utilização; a decisão final é do consultor.</footer>
+  </body></html>`;
+}
+
+function LinhasARever({ contas, nomeCliente }) {
   const linhas = useMemo(() => calcularSinaisLinhas(contas), [contas]);
   const [aberto, setAberto] = useState(false);
   const [jev, setJev] = useState({});
@@ -9892,6 +9945,12 @@ function LinhasARever({ contas }) {
           <button onClick={() => pedir(assinaladas.filter((l) => !jev[l.numero]))} disabled={aPedir > 0}
             className="text-xs px-2.5 py-1 rounded-md bg-neutral-900 text-white disabled:opacity-40">
             {aPedir > 0 ? `Jev a analisar… (${aPedir})` : "Pedir parecer do Jev às assinaladas"}
+          </button>
+        )}
+        {aberto && assinaladas.length > 0 && (
+          <button onClick={() => imprimirHtmlRelatorio(gerarHtmlLinhasARever(nomeCliente || "Cliente", assinaladas, jev))} disabled={aPedir > 0}
+            className="text-xs px-2.5 py-1 rounded-md border border-neutral-300 text-neutral-800 hover:bg-neutral-50 disabled:opacity-40">
+            Exportar PDF
           </button>
         )}
       </div>
@@ -10420,7 +10479,7 @@ function AnaliseFaturasView() {
                   )}
                 </div>
               )}
-              <LinhasARever contas={resumo.contas} />
+              <LinhasARever contas={resumo.contas} nomeCliente={clienteAtual.e} />
               {/* Mesma função geradora do ficheiro exportado (gerarHtmlAnaliseFaturas) — nunca
                   duas versões da lógica de apresentação. O srcDoc é recriado sempre que o
                   resumo muda; a altura ajusta-se ao conteúdo real via onLoad. */}
