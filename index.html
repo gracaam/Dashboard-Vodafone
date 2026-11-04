@@ -11267,6 +11267,10 @@ function PropostasView() {
   const mapaContratos = useContratosPermanencia(firebaseUser);
 
   const [alvo, setAlvo] = useState("cliente");
+  // Cliente existente com SERVIÇOS NOVOS (2026-11-04, pedido do Augusto): mesmo quadro, Excel e PDF
+  // do Prospeto (por área, quantidade, valor final), mas a proposta fica na ficha do cliente.
+  // shortcut: ou rever contas existentes, ou novos serviços — não misturar na mesma proposta.
+  const [modoNovos, setModoNovos] = useState(false);
   const [nifInput, setNifInput] = useState("");
   const [nomeManual, setNomeManual] = useState("");
   const [contasSel, setContasSel] = useState([]);
@@ -11348,8 +11352,8 @@ function PropostasView() {
   useEffect(() => {
     setLinhas([]);
     setAviso("");
-    setContasSel(alvo === "prospeto" ? ["(prospeto)"] : []);
-  }, [alvo, nifAlvo]);
+    setContasSel(alvo === "prospeto" || modoNovos ? ["(prospeto)"] : []);
+  }, [alvo, nifAlvo, modoNovos]);
 
   // Proposta em curso (2026-10-03, pedido do Augusto): "Gravar" guarda as linhas e as
   // contas escolhidas em propostas_rascunho/{alvo}_{nif}; ao voltar a este cliente a
@@ -11358,7 +11362,7 @@ function PropostasView() {
   // limpa a proposta, para repor as linhas por cima (o efeito seguinte, que reconstrói a
   // partir dos contratos, mantém as linhas existentes pela key).
   const DIAS_RASCUNHO_PROPOSTA = 30;
-  const idRascunho = nifAlvo ? `${alvo}_${nifAlvo}` : null;
+  const idRascunho = nifAlvo ? `${alvo}${modoNovos ? "novos" : ""}_${nifAlvo}` : null;
   const [rascunho, setRascunho] = useState(null);
   const [confirmarCancelar, setConfirmarCancelar] = useState(false);
   useEffect(() => {
@@ -11389,7 +11393,7 @@ function PropostasView() {
   const apagarRascunho = () => (idRascunho ? firebaseDb.collection("propostas_rascunho").doc(idRascunho).delete() : Promise.resolve());
   const cancelarProposta = async () => {
     try { await apagarRascunho(); } catch (e) { setAviso(`Não foi possível apagar: ${e.message}`); return; }
-    setLinhas([]); setContasSel(alvo === "prospeto" ? ["(prospeto)"] : []);
+    setLinhas([]); setContasSel(alvo === "prospeto" || modoNovos ? ["(prospeto)"] : []);
     setRascunho(null); setConfirmarCancelar(false);
   };
 
@@ -11445,7 +11449,7 @@ function PropostasView() {
   const adicionarManual = (conta, tipo) => setLinhas((prev) => [...prev, { key: `manual::${conta}::${Date.now()}`, conta, manual: true, ...(tipo ? { tipo } : {}), servico: "", fim: "", produtoAtual: "", valorMensal: "", desconto: "", duracao: "", quantidade: 1, acao: "Novo", novoTarifario: "", novoValor: "" }]);
   const removerLinha = (key) => setLinhas((prev) => prev.filter((l) => l.key !== key));
 
-  const ehProspeto = alvo === "prospeto";
+  const ehProspeto = alvo === "prospeto" || modoNovos; // "formato prospeto" (tabela, Excel e PDF)
   const tarifariosSemDescritivo = [...new Map(linhasPropostaPdf(linhas, ehProspeto)
     .map((l) => nomeTarifarioCurto(ehProspeto ? l.produtoAtual : novoTarifarioLinhaProposta(l) || l.produtoAtual))
     .filter((n) => n && !descritivoTarifario(n)).map((n) => [n.toLowerCase(), n])).values()];
@@ -11467,7 +11471,7 @@ function PropostasView() {
     try {
       const r = lerPropostaExcel(await f.arrayBuffer());
       if (r.erro) { setAviso(r.erro); return; }
-      if (r.modo !== alvo) { setAviso(`Este Excel é de ${r.modo === "cliente" ? "Cliente" : "Prospeto"} — muda "Proposta para" para ${r.modo === "cliente" ? "Cliente" : "Prospeto"} e escolhe o mesmo nome.`); return; }
+      if (r.modo !== (ehProspeto ? "prospeto" : "cliente")) { setAviso(r.modo === "cliente" ? `Este Excel é de revisão de contas de um Cliente — escolhe Cliente › Rever contas existentes e o mesmo nome.` : `Este Excel é de serviços novos (formato Prospeto) — escolhe Prospeto, ou Cliente › Novos serviços, e o mesmo nome.`); return; }
       if (!r.linhas.length) { setAviso("O Excel não tem linhas de serviços."); return; }
       if (ehProspeto) {
         setLinhas(r.linhas.map((l, n) => ({ ...l, key: `manual::(prospeto)::${Date.now()}_${n}`, conta: "(prospeto)", manual: true, fim: "", desconto: "", acao: "", novoTarifario: "", novoValor: "" })));
@@ -11500,14 +11504,14 @@ function PropostasView() {
     const retrato = usadas.map((l) => {
       const dur = numProposta(String(l.duracao || "").replace(/\D/g, ""));
       return {
-        conta: l.conta || "", servico: l.servico || "", produto: novoTarifarioLinhaProposta(l) || l.produtoAtual || "",
+        conta: modoNovos ? "" : (l.conta || ""), servico: l.servico || "", produto: novoTarifarioLinhaProposta(l) || l.produtoAtual || "",
         valorMensal: ehProspeto ? valorLinhaProspeto(l) : (numProposta(l.novoValor) != null ? numProposta(l.novoValor) : numProposta(l.valorMensal)),
         duracaoMeses: dur, acao: l.acao || "",
       };
     });
     const proposta = { entregueEm: new Date().toISOString(), linhas: retrato, total: totalProposta(linhas, ehProspeto), fechada: false, fechadaEm: null, contratosGerados: false };
     try {
-      if (ehProspeto) {
+      if (alvo === "prospeto") {
         // Prospeto continua prospeto: a proposta fica nos extras do prospeto e só passa para
         // o cliente quando o negócio é fechado. Prospeto novo (sem ficha) é criado em Prospetos, nunca em Clientes.
         if (!registo) await adicionarProspeto({ n: nifAlvo, e: nomeAlvo, seg: "", cae: "", caeDesc: "", cls: "Prospect", cidade: "", distrito: "", colab: 0, tel: "", email: "", contacto: "Sem contactos", estado: "", manual: true });
@@ -11516,7 +11520,7 @@ function PropostasView() {
         await definirExtrasProspeto(nifAlvo, { propostas: [...(Array.isArray(ex.propostas) ? ex.propostas : []), proposta] });
       } else await adicionarProposta(nifAlvo, proposta);
       apagarRascunho().then(() => setRascunho(null)).catch(() => {});
-      setAviso(`Proposta registada como entregue para ${nomeAlvo} (${new Date().toLocaleDateString("pt-PT")}). ${ehProspeto ? "Fica no prospeto até fechares o negócio." : "Vê a ficha do cliente."}`);
+      setAviso(`Proposta registada como entregue para ${nomeAlvo} (${new Date().toLocaleDateString("pt-PT")}). ${alvo === "prospeto" ? "Fica no prospeto até fechares o negócio." : "Vê a ficha do cliente."}`);
       setTimeout(() => setAviso(""), 10000);
     } catch (e) {
       setEntregueSig("");
@@ -11546,6 +11550,15 @@ function PropostasView() {
           </button>
         </div>
 
+        {alvo === "cliente" && (
+          <div className="flex items-center gap-2">
+            {[[false, "Rever contas existentes"], [true, "Novos serviços"]].map(([v, t]) => (
+              <button key={t} onClick={() => setModoNovos(v)}
+                className={`text-xs px-3 py-1 rounded-full border ${modoNovos === v ? "bg-red-600 text-white border-red-600" : "border-neutral-300 text-neutral-600 hover:bg-neutral-50"}`}>{t}</button>
+            ))}
+          </div>
+        )}
+
         <div className="relative max-w-md">
           <label className="text-xs text-neutral-500">NIF do {alvo}</label>
           <input value={nifInput} onChange={(e) => setNifInput(e.target.value)}
@@ -11572,19 +11585,19 @@ function PropostasView() {
           </div>
         )}
 
-        {alvo === "cliente" && registo && !firebaseUser && (
+        {alvo === "cliente" && !modoNovos && registo && !firebaseUser && (
           <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
             Inicia sessão (Firebase) para ler os contratos guardados.
           </div>
         )}
 
-        {alvo === "cliente" && registo && firebaseUser && contas.length === 0 && (
+        {alvo === "cliente" && !modoNovos && registo && firebaseUser && contas.length === 0 && (
           <div className="text-xs text-neutral-500 border border-dashed border-neutral-300 rounded-md px-3 py-4 text-center">
             Não há contratos guardados para este cliente. Importa-os na ficha do cliente, no separador Clientes.
           </div>
         )}
 
-        {alvo === "cliente" && registo && contas.length > 0 && (
+        {alvo === "cliente" && !modoNovos && registo && contas.length > 0 && (
           <div className="space-y-2">
             <div className="text-xs font-medium text-neutral-500">Contas (podes escolher várias)</div>
             <div className="flex flex-wrap gap-2">
