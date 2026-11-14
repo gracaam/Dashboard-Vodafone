@@ -402,6 +402,168 @@ function useColecaoFirestore(nomeColecao, ativo) {
   return { itens, aCarregar, definir, remover };
 }
 
+// Agente de Email — leitura em tempo real das entradas ainda abertas (nunca as
+// resolvidas, que não interessam a "Para começar o dia"). A escrita é sempre feita
+// pelas funções do agente (ver window.agenteEmail), nunca por este hook.
+function useEmailsAgente() {
+  const [itens, setItens] = useState([]);
+  useEffect(() => {
+    return firebaseDb.collection(COLECAO_EMAILS_AGENTE).where("estado", "!=", "resolvido").onSnapshot(
+      (snap) => setItens(snap.docs.map((d) => d.data())),
+      (e) => console.warn("Não foi possível ler emails_agente:", e.message)
+    );
+  }, []);
+  return itens;
+}
+
+// Estado do agente (meta/agente_email_estado) — contrato em
+// specs/001-agente-email/contracts/window.agenteEmail.md.
+function dadosEstadoAgenteEmail(doc) {
+  const d = doc.exists ? doc.data() : {};
+  return { ativo: !!d.ativo, dataInicio: d.dataInicio || null, ultimaVerificacao: d.ultimaVerificacao || null, maquina: d.maquina || null };
+}
+async function estadoAgenteEmail() {
+  return dadosEstadoAgenteEmail(await refEstadoAgenteEmail().get());
+}
+function useEstadoAgenteEmail() {
+  const [estado, setEstado] = useState({ ativo: false, dataInicio: null, ultimaVerificacao: null, maquina: null });
+  useEffect(() => {
+    return refEstadoAgenteEmail().onSnapshot(
+      (d) => setEstado(dadosEstadoAgenteEmail(d)),
+      (e) => console.warn("Não foi possível ler o estado do agente de email:", e.message)
+    );
+  }, []);
+  return estado;
+}
+
+// Botão "Ativar agente de email" (FR-006) — dataInicio só é gravada na 1ª ativação
+// de sempre (nunca sobrescrita depois).
+async function ativarAgenteEmail() {
+  const atual = dadosEstadoAgenteEmail(await refEstadoAgenteEmail().get());
+  const agora = new Date().toISOString();
+  await refEstadoAgenteEmail().set({ ativo: true, dataAtivacao: agora, dataInicio: atual.dataInicio || agora }, { merge: true });
+}
+
+// Botão "Resolvido" de cada LinhaEmailAgente (FR-014) — nunca apaga o documento, só
+// marca o estado (Exceção à Regra V da Constituição). No-op idempotente se a chave
+// não existir ou já estiver resolvida.
+async function marcarResolvidaManual(chave) {
+  const ref = firebaseDb.collection(COLECAO_EMAILS_AGENTE).doc(chave);
+  const doc = await ref.get();
+  if (!doc.exists || doc.data().estado === "resolvido") return { ok: false };
+  await ref.set({ estado: "resolvido", motivoResolucao: "manual", dataResolucao: new Date().toISOString() }, { merge: true });
+  return { ok: true };
+}
+
+// Impede 2 Macs de sincronizarem ao mesmo tempo (FR-016/FR-017). Transação (não
+// get()+set() separados) — sem isso há uma janela real de corrida entre os 2 Macs
+// a reclamar no mesmo minuto (ex. ambos ativados ao mesmo tempo de manhã).
+const MINUTOS_SINAL_VIDA_AGENTE = 90;
+async function reclamarAgenteEmail(nomeMaquina) {
+  return firebaseDb.runTransaction(async (tx) => {
+    const ref = refEstadoAgenteEmail();
+    const atual = dadosEstadoAgenteEmail(await tx.get(ref));
+    const minutosParado = atual.ultimaVerificacao ? (Date.now() - new Date(atual.ultimaVerificacao).getTime()) / 60000 : Infinity;
+    if (!atual.maquina || atual.maquina === nomeMaquina || minutosParado > MINUTOS_SINAL_VIDA_AGENTE) {
+      tx.set(ref, { maquina: nomeMaquina }, { merge: true });
+      return { ok: true };
+    }
+    return { ok: false, maquina: atual.maquina, ultimaVerificacao: atual.ultimaVerificacao };
+  });
+}
+
+// Sincronização principal (FR-010 a FR-013) — algoritmo completo documentado em
+// specs/001-agente-email/research.md (R9) e contracts/window.agenteEmail.md. Lê a
+// coleção inteira (nunca só os abertos) para poder comparar com o estado anterior
+// de CADA chave, mesmo as já resolvidas — é o que torna FR-011a (reabertura) e a
+// idempotência (duas chamadas iguais não escrevem nada na 2ª vez) possíveis sem
+// casos especiais.
+const LIMIAR_MINIMO_BLOQUEIO_SINCRONIZACAO = 5;
+async function sincronizarEmailsAgente(lista) {
+  if (!Array.isArray(lista) || lista.length === 0) {
+    return { criadas: 0, atualizadas: 0, resolvidas: 0, aviso: "Lista vazia — sincronização ignorada (pode ser uma leitura do Outlook falhada, não uma Caixa de Entrada vazia)." };
+  }
+
+  const estadoAgente = dadosEstadoAgenteEmail(await refEstadoAgenteEmail().get());
+  const dataInicio = estadoAgente.dataInicio || "9999-99-99"; // sem dataInicio, nunca cria nada ainda
+
+  const colecao = firebaseDb.collection(COLECAO_EMAILS_AGENTE);
+  const snap = await colecao.get();
+  const todosAntes = new Map();
+  snap.forEach((d) => todosAntes.set(d.id, d.data()));
+  const abertosAntes = [...todosAntes.entries()].filter(([, d]) => d.estado !== "resolvido").map(([chave]) => chave);
+
+  const chavesLista = new Set(lista.filter((item) => item && item.chave).map((item) => item.chave));
+  const chavesQueSairiam = abertosAntes.filter((chave) => !chavesLista.has(chave));
+
+  // Guarda de segurança (FR-011c) — leitura do Outlook suspeita de estar incompleta.
+  if (chavesQueSairiam.length >= LIMIAR_MINIMO_BLOQUEIO_SINCRONIZACAO && chavesQueSairiam.length > abertosAntes.length / 2) {
+    return { criadas: 0, atualizadas: 0, resolvidas: 0, aviso: `Bloqueado: resolveria ${chavesQueSairiam.length} de ${abertosAntes.length} entradas abertas como "saiu da caixa" — leitura do Outlook suspeita de estar incompleta. Nada foi alterado.` };
+  }
+
+  const agora = new Date().toISOString();
+  const batch = firebaseDb.batch();
+  let criadas = 0, atualizadas = 0, resolvidas = 0;
+
+  lista.forEach((item) => {
+    if (!item || !item.chave || !item.recebidoEm || item.recebidoEm < dataInicio) return;
+    const anterior = todosAntes.get(item.chave) || null;
+    const novoDoc = {
+      chave: item.chave,
+      remetenteNome: item.remetenteNome || "",
+      remetenteEmail: item.remetenteEmail || "",
+      assunto: item.assunto || "",
+      recebidoEm: item.recebidoEm,
+      estado: item.respondido ? "resolvido" : item.emProgresso ? "em_progresso" : "pendente",
+      dataResolucao: item.respondido ? agora : null,
+      motivoResolucao: item.respondido ? "respondido" : null,
+    };
+    const mudou = !anterior || anterior.estado !== novoDoc.estado || anterior.remetenteNome !== novoDoc.remetenteNome
+      || anterior.remetenteEmail !== novoDoc.remetenteEmail || anterior.assunto !== novoDoc.assunto || anterior.recebidoEm !== novoDoc.recebidoEm;
+    if (!mudou) return; // idempotência — já estava exatamente assim, não escreve nem conta
+    batch.set(colecao.doc(item.chave), novoDoc);
+    if (novoDoc.estado === "resolvido") resolvidas++;
+    else if (!anterior) criadas++;
+    else atualizadas++; // inclui a reabertura de uma entrada antes resolvida (FR-011a)
+  });
+
+  chavesQueSairiam.forEach((chave) => {
+    batch.set(colecao.doc(chave), { estado: "resolvido", motivoResolucao: "saiu_da_caixa", dataResolucao: agora }, { merge: true });
+    resolvidas++;
+  });
+
+  if (criadas || atualizadas || resolvidas) await batch.commit();
+  return { criadas, atualizadas, resolvidas };
+}
+
+// registarVerificacao() (FR-013) — só o sinal de vida, nada mais.
+async function registarVerificacaoAgenteEmail() {
+  await refEstadoAgenteEmail().set({ ultimaVerificacao: new Date().toISOString() }, { merge: true });
+}
+
+// listar() (FR-010) — leitura direta, sem hook React (usada pela skill via consola).
+async function listarEmailsAgente() {
+  const snap = await firebaseDb.collection(COLECAO_EMAILS_AGENTE).where("estado", "in", ["pendente", "em_progresso"]).get();
+  return snap.docs.map((d) => d.data());
+}
+
+// Interface pública para a skill (via Claude in Chrome) e para a consola do browser —
+// contrato completo em specs/001-agente-email/contracts/window.agenteEmail.md.
+// Nenhuma destas funções toca em nada fora de emails_agente/meta.agente_email_estado
+// (FR-015) nem no Outlook (isso é sempre do lado da skill, nunca daqui).
+window.agenteEmail = {
+  estado: estadoAgenteEmail,
+  listar: listarEmailsAgente,
+  sincronizar: sincronizarEmailsAgente,
+  registarVerificacao: registarVerificacaoAgenteEmail,
+  marcarResolvidaManual,
+  reclamar: reclamarAgenteEmail,
+  // Exposta também aqui (2026-11-14) para o atalho "Iniciar o dia.command" — faz
+  // exatamente o que o botão "Ativar agente de email" faz, sem abrir o claude-cli
+  // (esse atalho já trata de arrancar o Claude Code à parte).
+  ativar: ativarAgenteEmail,
+};
+
 // Flag de migração — um documento pequeno em meta/{chave} ({ migrado: true }), nunca
 // inferido a partir de "a coleção está vazia" (uma coleção legitimamente vazia depois
 // de migrar não pode voltar a parecer "por migrar"). `migradoAgora` cobre o instante
@@ -3640,6 +3802,12 @@ function mesclarCarteiraFidelizacao(anteriorLista, novaLista, nifsComNegocioImpl
 
 const COLECAO_CONTRATOS = "contratos_permanencia";
 const DIAS_CONTRATOS_DESATUALIZADOS = 30;
+
+// Agente de Email (2026-11-14) — ver specs/001-agente-email/. Coleção de entradas
+// (1 doc por email, id = chave) + documento singleton de estado do agente, mesmo
+// padrão já usado por meta/resumo_config ("Fechar o dia").
+const COLECAO_EMAILS_AGENTE = "emails_agente";
+const refEstadoAgenteEmail = () => firebaseDb.collection("meta").doc("agente_email_estado");
 // Campos comparados entre importações. `duracao` ("Duração e Remanescente") fica de
 // fora de propósito: o remanescente muda todos os meses sozinho, e marcaria todos os
 // contratos como "alterados" em cada importação.
@@ -7756,6 +7924,29 @@ function GrupoHoje({ titulo, cor, itens, vazio, render }) {
   );
 }
 
+// Agente de Email — linha de uma entrada em "Próximos passos para hoje"/"Atrasados".
+// Não reaproveita LinhaHoje de propósito: essa está desenhada em torno de um cliente
+// (c.n/c.e) e de diálogos que gravam no histórico de contactos de um NIF — uma
+// entrada de email não está ligada a nenhum cliente (ver data-model.md).
+function LinhaEmailAgente({ entrada, onResolver }) {
+  const [aResolver, setAResolver] = useState(false);
+  const resolver = async () => {
+    setAResolver(true);
+    try { await onResolver(entrada.chave); } finally { setAResolver(false); }
+  };
+  const hora = entrada.recebidoEm ? new Date(entrada.recebidoEm).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" }) : "—";
+  return (
+    <div className="px-3 py-2 border-b border-neutral-100 last:border-0 text-sm flex items-center gap-3">
+      <Icone nome="email" className="w-4 h-4 text-neutral-400 shrink-0" />
+      <span className="font-medium shrink-0 max-w-[40%] truncate" title={entrada.remetenteEmail}>{entrada.remetenteNome || entrada.remetenteEmail || "(remetente desconhecido)"}</span>
+      <span className="text-xs text-neutral-500 flex-1 min-w-0 truncate">{entrada.assunto || "(sem assunto)"}</span>
+      <span className="text-xs text-neutral-400 whitespace-nowrap shrink-0">{hora}</span>
+      {entrada.estado === "em_progresso" && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0">Em Progresso</span>}
+      <button onClick={resolver} disabled={aResolver} className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0 disabled:opacity-40">{aResolver ? "…" : "Resolvido"}</button>
+    </div>
+  );
+}
+
 /* ================= RESUMO SEMANAL (2026-10-04, Fase 4 ponto 8) =================
    Só lê dados que já existem: histórico de contactos e propostas das fichas, e os
    negócios (Negócios do Trimestre). Valores = RLMC ajustada (o mesmo critério do
@@ -8482,6 +8673,40 @@ function RelatorioFecho({ r }) {
     </div>
   );
 }
+
+// Botão "Ativar agente de email" + indicador de estado (FR-006/FR-008). Reaproveita
+// construirLinkClaudeCode + localStorage["caminhoProjetoAbsoluto"] sem alterações —
+// mesmo mecanismo já usado pelos outros botões claude-cli:// do dashboard.
+function ControloAgenteEmail() {
+  const estado = useEstadoAgenteEmail();
+  const [aAtivar, setAAtivar] = useState(false);
+  const ativar = async () => {
+    setAAtivar(true);
+    try {
+      await ativarAgenteEmail();
+      let pasta = "";
+      try { pasta = localStorage.getItem("caminhoProjetoAbsoluto") || ""; } catch {}
+      window.location.href = construirLinkClaudeCode("/loop 1h /agente-email", pasta).url;
+    } finally { setAAtivar(false); }
+  };
+  const ultimaVerificacaoFmt = estado.ultimaVerificacao
+    ? new Date(estado.ultimaVerificacao).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" })
+    : "nunca";
+  return (
+    <div className="flex items-center gap-3 text-xs flex-wrap">
+      {estado.ativo ? (
+        <span className="text-emerald-700">🟢 Agente de email ligado{estado.maquina ? ` · ${estado.maquina}` : ""} · última verificação: {ultimaVerificacaoFmt}</span>
+      ) : (
+        <>
+          <span className="text-neutral-400">⚪ Agente de email desligado</span>
+          <button onClick={ativar} disabled={aAtivar} className="px-2 py-1 rounded-md border border-neutral-300 text-neutral-600 hover:border-neutral-500 disabled:opacity-40">
+            {aAtivar ? "A ativar…" : "Ativar agente de email"}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
 function FecharDia({ clientes, mapaContratos }) {
   const REF = () => firebaseDb.collection("meta").doc("resumo_config");
   const [cfg, setCfg] = useState({ url: "", segredo: "", ultimoFecho: "" });
@@ -8493,6 +8718,11 @@ function FecharDia({ clientes, mapaContratos }) {
   const fechar = async () => {
     const r = relatorioDesdeFecho(clientes, mapaContratos, cfg.ultimoFecho);
     setRel(r);
+    // Agente de Email (FR-007/FR-018) — desliga-se sempre que "Fechar o dia" é
+    // premido, independentemente do resto desta função (envio do resumo por email
+    // é uma funcionalidade separada, com os seus próprios erros/configuração).
+    refEstadoAgenteEmail().set({ ativo: false, dataFecho: new Date().toISOString(), maquina: null }, { merge: true })
+      .catch((e) => console.warn("Não foi possível desligar o agente de email:", e.message));
     if (!cfg.url || !cfg.segredo) { setEstado("Relatório mostrado. Para receber por email, preenche o URL e a senha em Definições."); return; }
     setEstado("A enviar…");
     try {
@@ -8536,12 +8766,29 @@ function HojeView() {
   const { renovacoes, propostas, passos, semContacto, fechadas } = useMemo(() => calcularListaHoje(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const antigos = useMemo(() => listarTarifariosAntigos(todosClientes, mapaContratos), [todosClientes, mapaContratos]);
   const em = (tipo, x) => ({ email: textoEmailHoje(tipo, x.c, x), obterExtras });
+
+  // Agente de Email (ver specs/001-agente-email/) — "hoje" e "antes de hoje" pela
+  // data de calendário local, mesmo critério já usado no resto do dashboard.
+  const emailsAgente = useEmailsAgente();
+  const hojeIsoAgente = new Date().toISOString().slice(0, 10);
+  const { pendentesHojeAgente, emProgressoAgente, atrasadosAgente } = useMemo(() => {
+    const pendentesHoje = [], emProgresso = [], atrasados = [];
+    emailsAgente.forEach((e) => {
+      const diaRecebido = (e.recebidoEm || "").slice(0, 10);
+      if (e.estado === "em_progresso") emProgresso.push(e);
+      else if (diaRecebido >= hojeIsoAgente) pendentesHoje.push(e);
+      else atrasados.push(e);
+    });
+    const porData = (a, b) => (b.recebidoEm || "").localeCompare(a.recebidoEm || "");
+    return { pendentesHojeAgente: pendentesHoje.sort(porData), emProgressoAgente: emProgresso.sort(porData), atrasadosAgente: atrasados.sort(porData) };
+  }, [emailsAgente, hojeIsoAgente]);
   const renov = (x) => <LinhaHoje key={x.c.n} c={x.c} resolver={{ chave: `renovacao:${x.conta}:${x.fim}`, resumo: `Permanência termina a ${formatarDataIsoPT(x.fim)}` }} {...em("renovacao", x)}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {rotuloConta(x.conta)}</LinhaHoje>;
   return (
     <div className="space-y-5">
       {!firebaseUser && <div className="text-sm text-neutral-500">Inicia sessão para ver a lista.</div>}
       {firebaseUser && <ResumoSemanal clientes={todosClientes} />}
       {firebaseUser && <FecharDia clientes={todosClientes} mapaContratos={mapaContratos} />}
+      {firebaseUser && <ControloAgenteEmail />}
       {firebaseUser && <ImportarEmailsOutlook clientes={todosClientes} obterExtras={obterExtras} definirExtras={definirExtras} />}
       {campanhas.length > 0 && (
         <GrupoHoje titulo="Campanhas novas ou a terminar" cor="amber" itens={campanhas} vazio=""
@@ -8558,6 +8805,10 @@ function HojeView() {
       )}
       <GrupoHoje titulo="Próximos passos para hoje ou atrasados" cor="red" itens={passos} vazio="Nenhum próximo passo para hoje."
         render={(x) => <LinhaHoje key={x.c.n} c={x.c} concluir={x.ultimo.proximoPasso || ""} {...em("passo", x)}>{x.ultimo.proximoPasso || "próximo passo"} · {x.atraso ? `atrasado ${x.atraso} dias` : "hoje"}</LinhaHoje>} />
+      <GrupoHoje titulo="Próximos passos para hoje (emails)" cor="red" itens={[...pendentesHojeAgente, ...emProgressoAgente]} vazio="Nenhum email por tratar hoje."
+        render={(e) => <LinhaEmailAgente key={e.chave} entrada={e} onResolver={marcarResolvidaManual} />} />
+      <GrupoHoje titulo="Atrasados (emails)" cor="red" itens={atrasadosAgente} vazio="Nenhum email atrasado."
+        render={(e) => <LinhaEmailAgente key={e.chave} entrada={e} onResolver={marcarResolvidaManual} />} />
       <GrupoHoje titulo="Permanência termina em menos de 1 mês" cor="red" itens={renovacoes.filter((x) => x.dias <= 30)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 1 a 3 meses" cor="amber" itens={renovacoes.filter((x) => x.dias > 30 && x.dias <= 90)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 3 a 6 meses" itens={renovacoes.filter((x) => x.dias > 90)} vazio="Ninguém neste grupo." render={renov} />
