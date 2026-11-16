@@ -494,7 +494,8 @@ async function sincronizarEmailsAgente(lista, opcoes = {}) {
   const snap = await colecao.get();
   const todosAntes = new Map();
   snap.forEach((d) => todosAntes.set(d.id, d.data()));
-  const abertosAntes = [...todosAntes.entries()].filter(([, d]) => d.estado !== "resolvido").map(([chave]) => chave);
+  // Só as entradas dentro da janela lida (desde dataInicio) podem "sair da caixa"; as mais antigas ficam até o Augusto as resolver.
+  const abertosAntes = [...todosAntes.entries()].filter(([, d]) => d.estado !== "resolvido" && (d.recebidoEm || "") >= dataInicio).map(([chave]) => chave);
 
   const chavesLista = new Set(lista.filter((item) => item && item.chave).map((item) => item.chave));
   const chavesQueSairiam = abertosAntes.filter((chave) => !chavesLista.has(chave));
