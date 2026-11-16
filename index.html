@@ -501,7 +501,7 @@ async function sincronizarEmailsAgente(lista) {
 
   // Guarda de segurança (FR-011c) — leitura do Outlook suspeita de estar incompleta.
   if (chavesQueSairiam.length >= LIMIAR_MINIMO_BLOQUEIO_SINCRONIZACAO && chavesQueSairiam.length > abertosAntes.length / 2) {
-    return { criadas: 0, atualizadas: 0, resolvidas: 0, aviso: `Bloqueado: resolveria ${chavesQueSairiam.length} de ${abertosAntes.length} entradas abertas como "saiu da caixa" — leitura do Outlook suspeita de estar incompleta. Nada foi alterado.` };
+    return { criadas: 0, atualizadas: 0, resolvidas: 0, aviso: `Bloqueado: resolveria ${chavesQueSairiam.length} de ${abertosAntes.length} entradas abertas como "saiu da caixa" — leitura do Outlook suspeita de estar incompleta (recebi ${lista.length} emails; mais antigo ${lista.map((i) => i.recebidoEm).filter(Boolean).sort()[0] || "—"}; mais recente ${lista.map((i) => i.recebidoEm).filter(Boolean).sort().slice(-1)[0] || "—"}). Nada foi alterado.` };
   }
 
   const agora = new Date().toISOString();
