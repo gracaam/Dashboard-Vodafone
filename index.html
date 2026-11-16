@@ -7938,8 +7938,10 @@ function LinhaEmailAgente({ entrada, onResolver }) {
   return (
     <div className="px-3 py-2 border-b border-neutral-100 last:border-0 text-sm flex items-center gap-3">
       <Icone nome="email" className="w-4 h-4 text-neutral-400 shrink-0" />
-      <span className="font-medium shrink-0 max-w-[40%] truncate" title={entrada.remetenteEmail}>{entrada.remetenteNome || entrada.remetenteEmail || "(remetente desconhecido)"}</span>
-      <span className="text-xs text-neutral-500 flex-1 min-w-0 truncate">{entrada.assunto || "(sem assunto)"}</span>
+      <span className="flex-1 min-w-0 truncate" title={`${entrada.remetenteEmail || ""} — ${entrada.assunto || ""}`}>
+        <span className="font-medium">{entrada.remetenteNome || entrada.remetenteEmail || "(remetente desconhecido)"}</span>
+        <span className="text-neutral-700"> — {entrada.assunto || "(sem assunto)"}</span>
+      </span>
       <span className="text-xs text-neutral-400 whitespace-nowrap shrink-0">{hora}</span>
       {entrada.estado === "em_progresso" && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0">Em Progresso</span>}
       <button onClick={resolver} disabled={aResolver} className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0 disabled:opacity-40">{aResolver ? "…" : "Resolvido"}</button>
