@@ -479,7 +479,7 @@ async function reclamarAgenteEmail(nomeMaquina) {
 // idempotência (duas chamadas iguais não escrevem nada na 2ª vez) possíveis sem
 // casos especiais.
 const LIMIAR_MINIMO_BLOQUEIO_SINCRONIZACAO = 5;
-async function sincronizarEmailsAgente(lista) {
+async function sincronizarEmailsAgente(lista, opcoes = {}) {
   if (!Array.isArray(lista) || lista.length === 0) {
     return { criadas: 0, atualizadas: 0, resolvidas: 0, aviso: "Lista vazia — sincronização ignorada (pode ser uma leitura do Outlook falhada, não uma Caixa de Entrada vazia)." };
   }
@@ -500,7 +500,7 @@ async function sincronizarEmailsAgente(lista) {
   const chavesQueSairiam = abertosAntes.filter((chave) => !chavesLista.has(chave));
 
   // Guarda de segurança (FR-011c) — leitura do Outlook suspeita de estar incompleta.
-  if (chavesQueSairiam.length >= LIMIAR_MINIMO_BLOQUEIO_SINCRONIZACAO && chavesQueSairiam.length > abertosAntes.length / 2) {
+  if (!opcoes.leituraCompleta && chavesQueSairiam.length >= LIMIAR_MINIMO_BLOQUEIO_SINCRONIZACAO && chavesQueSairiam.length > abertosAntes.length / 2) {
     return { criadas: 0, atualizadas: 0, resolvidas: 0, aviso: `Bloqueado: resolveria ${chavesQueSairiam.length} de ${abertosAntes.length} entradas abertas como "saiu da caixa" — leitura do Outlook suspeita de estar incompleta (recebi ${lista.length} emails; mais antigo ${lista.map((i) => i.recebidoEm).filter(Boolean).sort()[0] || "—"}; mais recente ${lista.map((i) => i.recebidoEm).filter(Boolean).sort().slice(-1)[0] || "—"}). Nada foi alterado.` };
   }
 
@@ -8769,7 +8769,7 @@ async function importarEmailsDoOutlook() {
   }
   const r = await lerOutlookViaExtensao(est.dataInicio || null);
   if (!r.ok) return { erro: true, mensagem: r.erro || "Não foi possível ler o Outlook." };
-  const res = await sincronizarEmailsAgente(r.lista);
+  const res = await sincronizarEmailsAgente(r.lista, { leituraCompleta: r.completa === true });
   if (res.aviso) return { erro: true, mensagem: res.aviso };
   await registarVerificacaoAgenteEmail();
   const extra = (r.avisos || []).join(" ");
