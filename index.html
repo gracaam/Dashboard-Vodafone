@@ -521,7 +521,7 @@ async function sincronizarEmailsAgente(lista) {
     const mudou = !anterior || anterior.estado !== novoDoc.estado || anterior.remetenteNome !== novoDoc.remetenteNome
       || anterior.remetenteEmail !== novoDoc.remetenteEmail || anterior.assunto !== novoDoc.assunto || anterior.recebidoEm !== novoDoc.recebidoEm;
     if (!mudou) return; // idempotência — já estava exatamente assim, não escreve nem conta
-    batch.set(colecao.doc(item.chave), novoDoc);
+    batch.set(colecao.doc(item.chave), novoDoc, { merge: true }); // merge: não apaga a "importancia" já avaliada pelo Jev
     if (novoDoc.estado === "resolvido") resolvidas++;
     else if (!anterior) criadas++;
     else atualizadas++; // inclui a reabertura de uma entrada antes resolvida (FR-011a)
@@ -7938,11 +7938,16 @@ function LinhaEmailAgente({ entrada, onResolver }) {
   return (
     <div className="px-3 py-2 border-b border-neutral-100 last:border-0 text-sm flex items-center gap-3">
       <Icone nome="email" className="w-4 h-4 text-neutral-400 shrink-0" />
-      <span className="flex-1 min-w-0 truncate" title={`${entrada.remetenteEmail || ""} — ${entrada.assunto || ""}`}>
+      <span className="flex-1 min-w-0 break-words" title={`${entrada.remetenteEmail || ""} — ${entrada.assunto || ""}`}>
         <span className="font-medium">{entrada.remetenteNome || entrada.remetenteEmail || "(remetente desconhecido)"}</span>
         <span className="text-neutral-700"> — {entrada.assunto || "(sem assunto)"}</span>
       </span>
       <span className="text-xs text-neutral-400 whitespace-nowrap shrink-0">{hora}</span>
+      {typeof entrada.importancia === "number" && (entrada.importancia >= 3
+        ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-red-100 text-red-800 whitespace-nowrap shrink-0" title={`Importância ${entrada.importancia}/4 (Jev)`}>{entrada.importancia === 4 ? "Crítica" : "Alta"}</span>
+        : entrada.importancia === 2
+          ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0" title="Importância 2/4 (Jev)">Média</span>
+          : <span className="text-[11px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600 whitespace-nowrap shrink-0" title={`Importância ${entrada.importancia}/4 (Jev)`}>Baixa</span>)}
       {entrada.estado === "em_progresso" && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0">Em Progresso</span>}
       <button onClick={resolver} disabled={aResolver} className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0 disabled:opacity-40">{aResolver ? "…" : "Resolvido"}</button>
     </div>
@@ -8684,6 +8689,46 @@ function RelatorioFecho({ r }) {
 // do Outlook já aberto, e entrega o resultado a sincronizarEmailsAgente(). Só remetente, assunto
 // e data — nunca o corpo. Substitui o botão que abria o Claude Code (o ciclo horário da skill
 // agente-email continua a existir, mas já não é preciso para importar).
+// Importância dos emails (2026-11-16) — o Jev (TypeSafe, via Cloud Function recomendarProdutos) dá uma
+// nota 0-4 a cada email novo. DECISÃO EXPLÍCITA DE AUGUSTO (2026-11-16): para os emails seguem o nome do
+// remetente e o assunto COMPLETO, sem limpar NIFs (exceção à regra "nunca NIF" das campanhas). Nunca o
+// endereço de email do remetente nem o corpo. A nota é gravada no próprio documento (campo importancia),
+// por isso cada email só é avaliado uma vez.
+const NIVEIS_IMPORTANCIA_EMAIL = [
+  "Informativo ou automático, sem ação necessária (newsletters, avisos de sistema, notificações)",
+  "Baixa: pode precisar de ação mas sem prazo nem impacto no negócio",
+  "Média: pedido normal de ação ou resposta, sem urgência clara",
+  "Alta: cliente ou proposta à espera de resposta, ou prazo próximo",
+  "Crítica: proposta aprovada ou recusada, assinatura, reclamação, incidente ou prazo para hoje com impacto no negócio",
+];
+async function avaliarImportanciaEmail(entrada) {
+  const state = { remetente: entrada.remetenteNome || "", assunto: entrada.assunto || "" };
+  const questions = { importancia: { type: "score", criteria: NIVEIS_IMPORTANCIA_EMAIL,
+    instructions: "Com base no remetente (em `remetente`) e no assunto (em `assunto`) deste email, quão importante e urgente é ele para um gestor comercial de contas Vodafone Business?" } };
+  const lerNota = (r) => { const x = r && r.answers && r.answers.importancia; return x && typeof x.score === "number" ? x.score : null; };
+  let nota = lerNota(await chamarRecomendarProdutos(state, questions));
+  if (nota === null) nota = lerNota(await chamarRecomendarProdutos(state, questions));
+  return nota;
+}
+// Avalia (no máximo `maximo` por vez, 3 em simultâneo) os emails abertos que ainda não têm nota.
+async function avaliarImportanciaEmailsNovos(maximo = 30) {
+  const snap = await firebaseDb.collection(COLECAO_EMAILS_AGENTE).where("estado", "!=", "resolvido").get();
+  const porAvaliar = snap.docs.filter((d) => typeof d.data().importancia !== "number").slice(0, maximo);
+  let feitos = 0, falhas = 0, i = 0;
+  const trabalhador = async () => {
+    while (i < porAvaliar.length) {
+      const doc = porAvaliar[i++];
+      try {
+        const nota = await avaliarImportanciaEmail(doc.data());
+        if (nota === null) { falhas++; continue; }
+        await doc.ref.set({ importancia: nota }, { merge: true });
+        feitos++;
+      } catch (e) { falhas++; }
+    }
+  };
+  await Promise.all([trabalhador(), trabalhador(), trabalhador()]);
+  return { feitos, falhas, pendentes: Math.max(0, snap.docs.filter((d) => typeof d.data().importancia !== "number").length - feitos) };
+}
 function extensaoEmailsDisponivel() {
   return new Promise((resolve) => {
     const h = (ev) => {
@@ -8708,7 +8753,7 @@ function lerOutlookViaExtensao(dataInicio) {
 }
 async function importarEmailsDoOutlook() {
   if (!(await extensaoEmailsDisponivel())) {
-    return { mensagem: "Não encontrei a extensão neste Chrome. Instale-a (pasta extensao-emails) e recarregue esta página." };
+    return { erro: true, mensagem: "Não encontrei a extensão neste Chrome. Instale-a (pasta extensao-emails) e recarregue esta página." };
   }
   let est = await estadoAgenteEmail();
   if (!est.ativo) { await ativarAgenteEmail(); est = await estadoAgenteEmail(); }
@@ -8720,23 +8765,39 @@ async function importarEmailsDoOutlook() {
     est = await estadoAgenteEmail();
   }
   const r = await lerOutlookViaExtensao(est.dataInicio || null);
-  if (!r.ok) return { mensagem: r.erro || "Não foi possível ler o Outlook." };
+  if (!r.ok) return { erro: true, mensagem: r.erro || "Não foi possível ler o Outlook." };
   const res = await sincronizarEmailsAgente(r.lista);
-  if (res.aviso) return { mensagem: res.aviso };
+  if (res.aviso) return { erro: true, mensagem: res.aviso };
   await registarVerificacaoAgenteEmail();
   const extra = (r.avisos || []).join(" ");
-  return { mensagem: `Lidos ${r.lista.length} emails: ${res.criadas} novos, ${res.atualizadas} atualizados, ${res.resolvidas} resolvidos. ${extra}`.trim() };
+  let imp = "";
+  try { const a = await avaliarImportanciaEmailsNovos(); if (a.feitos || a.falhas) imp = ` Importância avaliada em ${a.feitos}${a.falhas ? ` (${a.falhas} falharam, repete na próxima importação)` : ""}.`; }
+  catch (e) { imp = ` Não consegui avaliar a importância: ${e.message}.`; }
+  return { mensagem: `Lidos ${r.lista.length} emails: ${res.criadas} novos, ${res.atualizadas} atualizados, ${res.resolvidas} resolvidos.${imp} ${extra}`.trim() };
 }
 function ControloAgenteEmail() {
   const estado = useEstadoAgenteEmail();
   const [aImportar, setAImportar] = useState(false);
   const [msg, setMsg] = useState("");
+  const [erro, setErro] = useState(false);
+  const aCorrer = useRef(false);
   const importar = async () => {
-    setAImportar(true); setMsg("");
-    try { setMsg((await importarEmailsDoOutlook()).mensagem); }
-    catch (e) { setMsg(`Não foi possível importar: ${e.message}`); }
-    finally { setAImportar(false); }
+    if (aCorrer.current) return;
+    aCorrer.current = true; setAImportar(true); setMsg("");
+    const hh = () => new Date().toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" });
+    try { const r = await importarEmailsDoOutlook(); setErro(!!r.erro); setMsg(`${hh()} · ${r.erro ? "⚠️ " : ""}${r.mensagem}`); }
+    catch (e) { setErro(true); setMsg(`${hh()} · ⚠️ Não foi possível importar: ${e.message}`); }
+    finally { aCorrer.current = false; setAImportar(false); }
   };
+  // Importação automática de hora em hora (só enquanto o dashboard e o Outlook estão abertos no Chrome).
+  const [auto, setAuto] = useState(() => { try { return localStorage.getItem("dvbImportarAuto") === "1"; } catch { return false; } });
+  const mudarAuto = (v) => { setAuto(v); try { localStorage.setItem("dvbImportarAuto", v ? "1" : "0"); } catch {} };
+  useEffect(() => {
+    if (!auto) return;
+    importar();
+    const id = setInterval(importar, 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [auto]);
   const ultimaVerificacaoFmt = estado.ultimaVerificacao
     ? new Date(estado.ultimaVerificacao).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" })
     : "nunca";
@@ -8750,7 +8811,8 @@ function ControloAgenteEmail() {
       <button onClick={importar} disabled={aImportar} className="px-2 py-1 rounded-md border border-neutral-300 text-neutral-600 hover:border-neutral-500 disabled:opacity-40">
         {aImportar ? "A importar…" : "Importar emails"}
       </button>
-      {msg && <span className="text-neutral-600">{msg}</span>}
+      <label className="flex items-center gap-1 text-neutral-600 cursor-pointer"><input type="checkbox" checked={auto} onChange={(e) => mudarAuto(e.target.checked)} /> Automático (de hora em hora)</label>
+      {msg && <span className={erro ? "text-red-700 font-medium" : "text-neutral-600"}>{msg}</span>}
     </div>
   );
 }
@@ -8826,7 +8888,7 @@ function HojeView() {
       else if (diaRecebido >= hojeIsoAgente) pendentesHoje.push(e);
       else atrasados.push(e);
     });
-    const porData = (a, b) => (b.recebidoEm || "").localeCompare(a.recebidoEm || "");
+    const porData = (a, b) => ((typeof b.importancia === "number" ? b.importancia : -1) - (typeof a.importancia === "number" ? a.importancia : -1)) || (b.recebidoEm || "").localeCompare(a.recebidoEm || "");
     return { pendentesHojeAgente: pendentesHoje.sort(porData), emProgressoAgente: emProgresso.sort(porData), atrasadosAgente: atrasados.sort(porData) };
   }, [emailsAgente, hojeIsoAgente]);
   const renov = (x) => <LinhaHoje key={x.c.n} c={x.c} resolver={{ chave: `renovacao:${x.conta}:${x.fim}`, resumo: `Permanência termina a ${formatarDataIsoPT(x.fim)}` }} {...em("renovacao", x)}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {rotuloConta(x.conta)}</LinhaHoje>;
