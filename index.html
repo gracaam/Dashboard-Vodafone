@@ -484,6 +484,9 @@ async function sincronizarEmailsAgente(lista) {
     return { criadas: 0, atualizadas: 0, resolvidas: 0, aviso: "Lista vazia — sincronização ignorada (pode ser uma leitura do Outlook falhada, não uma Caixa de Entrada vazia)." };
   }
 
+  // O id de conversa do Outlook pode ter "/" (base64), inválido num id de documento do Firestore.
+  lista = lista.map((item) => (item && item.chave ? { ...item, chave: String(item.chave).replace(/\//g, "_") } : item));
+
   const estadoAgente = dadosEstadoAgenteEmail(await refEstadoAgenteEmail().get());
   const dataInicio = estadoAgente.dataInicio || "9999-99-99"; // sem dataInicio, nunca cria nada ainda
 
