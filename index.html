@@ -8677,17 +8677,56 @@ function RelatorioFecho({ r }) {
 // Botão "Ativar agente de email" + indicador de estado (FR-006/FR-008). Reaproveita
 // construirLinkClaudeCode + localStorage["caminhoProjetoAbsoluto"] sem alterações —
 // mesmo mecanismo já usado pelos outros botões claude-cli:// do dashboard.
+// Importar emails (2026-11-16) — o botão do dashboard pede à extensão "Importar emails para o
+// Dashboard" (pasta extensao-emails/) que leia a lista da Caixa de Entrada/Destaques no separador
+// do Outlook já aberto, e entrega o resultado a sincronizarEmailsAgente(). Só remetente, assunto
+// e data — nunca o corpo. Substitui o botão que abria o Claude Code (o ciclo horário da skill
+// agente-email continua a existir, mas já não é preciso para importar).
+function extensaoEmailsDisponivel() {
+  return new Promise((resolve) => {
+    const h = (ev) => {
+      if (ev.source === window && ev.data && ev.data.tipo === "DVB_PONG") { window.removeEventListener("message", h); clearTimeout(t); resolve(true); }
+    };
+    const t = setTimeout(() => { window.removeEventListener("message", h); resolve(false); }, 1500);
+    window.addEventListener("message", h);
+    window.postMessage({ tipo: "DVB_PING" }, window.location.origin);
+  });
+}
+function lerOutlookViaExtensao(dataInicio) {
+  return new Promise((resolve) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const t = setTimeout(() => { window.removeEventListener("message", h); resolve({ ok: false, erro: "A extensão demorou demasiado a responder. Tente outra vez." }); }, 120000);
+    const h = (ev) => {
+      if (ev.source !== window || !ev.data || ev.data.tipo !== "DVB_LER_OUTLOOK_RESPOSTA" || ev.data.id !== id) return;
+      clearTimeout(t); window.removeEventListener("message", h); resolve(ev.data);
+    };
+    window.addEventListener("message", h);
+    window.postMessage({ tipo: "DVB_LER_OUTLOOK", id, dataInicio }, window.location.origin);
+  });
+}
+async function importarEmailsDoOutlook() {
+  if (!(await extensaoEmailsDisponivel())) {
+    return { mensagem: "Não encontrei a extensão neste Chrome. Instale-a (pasta extensao-emails) e recarregue esta página." };
+  }
+  let est = await estadoAgenteEmail();
+  if (!est.ativo) { await ativarAgenteEmail(); est = await estadoAgenteEmail(); }
+  const r = await lerOutlookViaExtensao(est.dataInicio || null);
+  if (!r.ok) return { mensagem: r.erro || "Não foi possível ler o Outlook." };
+  const res = await sincronizarEmailsAgente(r.lista);
+  if (res.aviso) return { mensagem: res.aviso };
+  await registarVerificacaoAgenteEmail();
+  const extra = (r.avisos || []).join(" ");
+  return { mensagem: `Lidos ${r.lista.length} emails: ${res.criadas} novos, ${res.atualizadas} atualizados, ${res.resolvidas} resolvidos. ${extra}`.trim() };
+}
 function ControloAgenteEmail() {
   const estado = useEstadoAgenteEmail();
-  const [aAtivar, setAAtivar] = useState(false);
-  const ativar = async () => {
-    setAAtivar(true);
-    try {
-      await ativarAgenteEmail();
-      let pasta = "";
-      try { pasta = localStorage.getItem("caminhoProjetoAbsoluto") || ""; } catch {}
-      window.location.href = construirLinkClaudeCode("/loop 1h /agente-email", pasta).url;
-    } finally { setAAtivar(false); }
+  const [aImportar, setAImportar] = useState(false);
+  const [msg, setMsg] = useState("");
+  const importar = async () => {
+    setAImportar(true); setMsg("");
+    try { setMsg((await importarEmailsDoOutlook()).mensagem); }
+    catch (e) { setMsg(`Não foi possível importar: ${e.message}`); }
+    finally { setAImportar(false); }
   };
   const ultimaVerificacaoFmt = estado.ultimaVerificacao
     ? new Date(estado.ultimaVerificacao).toLocaleString("pt-PT", { dateStyle: "short", timeStyle: "short" })
@@ -8695,15 +8734,14 @@ function ControloAgenteEmail() {
   return (
     <div className="flex items-center gap-3 text-xs flex-wrap">
       {estado.ativo ? (
-        <span className="text-emerald-700">🟢 Agente de email ligado{estado.maquina ? ` · ${estado.maquina}` : ""} · última verificação: {ultimaVerificacaoFmt}</span>
+        <span className="text-emerald-700">🟢 Emails ligados · última importação: {ultimaVerificacaoFmt}</span>
       ) : (
-        <>
-          <span className="text-neutral-400">⚪ Agente de email desligado</span>
-          <button onClick={ativar} disabled={aAtivar} className="px-2 py-1 rounded-md border border-neutral-300 text-neutral-600 hover:border-neutral-500 disabled:opacity-40">
-            {aAtivar ? "A ativar…" : "Ativar agente de email"}
-          </button>
-        </>
+        <span className="text-neutral-400">⚪ Emails por importar</span>
       )}
+      <button onClick={importar} disabled={aImportar} className="px-2 py-1 rounded-md border border-neutral-300 text-neutral-600 hover:border-neutral-500 disabled:opacity-40">
+        {aImportar ? "A importar…" : "Importar emails"}
+      </button>
+      {msg && <span className="text-neutral-600">{msg}</span>}
     </div>
   );
 }
