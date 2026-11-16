@@ -8881,13 +8881,13 @@ function HojeView() {
   // Agente de Email (ver specs/001-agente-email/) — "hoje" e "antes de hoje" pela
   // data de calendário local, mesmo critério já usado no resto do dashboard.
   const emailsAgente = useEmailsAgente();
-  const hojeIsoAgente = new Date().toISOString().slice(0, 10);
+  const diaLocalAgente = (v) => { const x = new Date(v); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; };
+  const hojeIsoAgente = diaLocalAgente(new Date());
   const { pendentesHojeAgente, emProgressoAgente, atrasadosAgente } = useMemo(() => {
     const pendentesHoje = [], emProgresso = [], atrasados = [];
     emailsAgente.forEach((e) => {
-      const diaRecebido = (e.recebidoEm || "").slice(0, 10);
-      if (e.estado === "em_progresso") emProgresso.push(e);
-      else if (diaRecebido >= hojeIsoAgente) pendentesHoje.push(e);
+      const diaRecebido = e.recebidoEm ? diaLocalAgente(e.recebidoEm) : "";
+      if (diaRecebido >= hojeIsoAgente) pendentesHoje.push(e); // "Em progresso" é só uma etiqueta: o dia decide a secção
       else atrasados.push(e);
     });
     const porData = (a, b) => ((typeof b.importancia === "number" ? b.importancia : -1) - (typeof a.importancia === "number" ? a.importancia : -1)) || (b.recebidoEm || "").localeCompare(a.recebidoEm || "");
