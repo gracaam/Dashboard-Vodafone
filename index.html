@@ -8760,10 +8760,9 @@ async function importarEmailsDoOutlook() {
   }
   let est = await estadoAgenteEmail();
   if (!est.ativo) { await ativarAgenteEmail(); est = await estadoAgenteEmail(); }
-  // Pedido do Augusto: mesmo que ligue às 10h, quer todos os emails do dia desde as 00:01.
-  // Só recua dataInicio (nunca avança), por isso não perde nada já importado.
-  const inicioDoDia = new Date(); inicioDoDia.setHours(0, 1, 0, 0);
-  if (!est.dataInicio || est.dataInicio > inicioDoDia.toISOString()) {
+  // Pedido do Augusto: só emails de hoje e de ontem (desde as 00:01 de ontem), para ver os atrasados.
+  const inicioDoDia = new Date(); inicioDoDia.setDate(inicioDoDia.getDate() - 1); inicioDoDia.setHours(0, 1, 0, 0);
+  if (est.dataInicio !== inicioDoDia.toISOString()) {
     await refEstadoAgenteEmail().set({ dataInicio: inicioDoDia.toISOString() }, { merge: true });
     est = await estadoAgenteEmail();
   }
