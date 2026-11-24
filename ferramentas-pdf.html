@@ -52,6 +52,7 @@ button:focus-visible,select:focus-visible,.drop:focus-visible{outline:3px solid 
     <button role="tab" aria-selected="true" data-t="p2j">PDF → JPG</button>
     <button role="tab" aria-selected="false" data-t="j2p">JPG → PDF</button>
     <button role="tab" aria-selected="false" data-t="merge">Juntar PDFs</button>
+    <button role="tab" aria-selected="false" data-t="bw">Preto e branco</button>
   </div>
 
   <!-- PDF -> JPG -->
@@ -95,6 +96,21 @@ button:focus-visible,select:focus-visible,.drop:focus-visible{outline:3px solid 
     <ul class="list" id="mList"></ul>
     <button class="go" id="mGo" disabled>Juntar num só PDF</button><button class="go sec" id="mClear">Limpar</button>
     <div class="status" id="mStatus"></div>
+  </section>
+
+  <!-- Preto e branco -->
+  <section class="panel" id="bw" hidden>
+    <div class="drop" tabindex="0" data-input="bwIn"><strong>Arrasta um PDF para aqui</strong><span>ou clica para escolher · fica um PDF novo, igual mas a preto e branco</span></div>
+    <input type="file" id="bwIn" accept="application/pdf" multiple hidden>
+    <div class="opts">
+      <label>Modo
+        <select id="bwMode"><option value="gray" selected>Tons de cinzento</option><option value="bw">Preto e branco puro (só preto e branco)</option></select>
+      </label>
+      <label>Qualidade
+        <select id="bwScale"><option value="1.5">Normal (ecrã)</option><option value="2.5" selected>Alta (impressão)</option><option value="4">Máxima</option></select>
+      </label>
+    </div>
+    <div class="status" id="bwStatus"></div>
   </section>
 
   <p class="priv">Os ficheiros são processados no teu browser e não são enviados para nenhum servidor.</p>
@@ -317,6 +333,44 @@ $('j2pGo').addEventListener('click', async () => {
   } catch (err) { st.textContent = 'Erro: ' + err.message; console.error(err); }
   btn.disabled = false;
 });
+
+/* ---------- Preto e branco (PDF -> PDF) ---------- */
+// Cada página é desenhada, passada a cinzento (ou a preto e branco puro, com limiar de Otsu) e volta a entrar num PDF novo do mesmo tamanho.
+// O texto deixa de ser selecionável: as páginas passam a ser imagens (o mesmo que acontece nas outras ferramentas desta página).
+handlers.bwIn = async files => {
+  files = files.filter(f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+  if (!files.length) return;
+  const scale = +$('bwScale').value, pure = $('bwMode').value === 'bw', st = $('bwStatus');
+  for (const f of files) {
+    try {
+      const pdf = await pdfjsLib.getDocument({data: new Uint8Array(await f.arrayBuffer())}).promise;
+      const out = await PDFLib.PDFDocument.create();
+      for (let p = 1; p <= pdf.numPages; p++) {
+        st.textContent = `A converter ${f.name} — página ${p} de ${pdf.numPages}…`;
+        const page = await pdf.getPage(p), vp = page.getViewport({scale}), pt = page.getViewport({scale: 1});
+        const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+        const ctx = c.getContext('2d', {willReadFrequently: true}); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+        await page.render({canvasContext: ctx, viewport: vp}).promise;
+        const im = ctx.getImageData(0, 0, c.width, c.height), d = im.data, n = d.length / 4, g = new Uint8Array(n), hist = new Array(256).fill(0);
+        for (let i = 0; i < n; i++) { const v = (d[4*i]*299 + d[4*i+1]*587 + d[4*i+2]*114 + 500) / 1000 | 0; g[i] = v; hist[v]++; }
+        let thr = 128;
+        if (pure) { // Otsu: escolhe o limiar que melhor separa fundo e texto
+          let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+          let sB = 0, wB = 0, best = -1;
+          for (let t = 0; t < 256; t++) { wB += hist[t]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += t * hist[t]; const mB = sB / wB, mF = (sum - sB) / wF, v = wB * wF * (mB - mF) * (mB - mF); if (v > best) { best = v; thr = t; } }
+        }
+        for (let i = 0; i < n; i++) { const v = pure ? (g[i] > thr ? 255 : 0) : g[i]; d[4*i] = d[4*i+1] = d[4*i+2] = v; }
+        ctx.putImageData(im, 0, 0);
+        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', pure ? 0.92 : 0.88));
+        const img = await out.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+        out.addPage([pt.width, pt.height]).drawImage(img, {x: 0, y: 0, width: pt.width, height: pt.height});
+      }
+      const bytes = await out.save();
+      await download(new Blob([bytes], {type: 'application/pdf'}), `${base(f.name)}_PB.pdf`);
+      st.textContent = `Feito: ${base(f.name)}_PB.pdf — ${pdf.numPages} página(s), ${kb(bytes.length)} (original ${kb(f.size)}).`;
+    } catch (err) { st.textContent = `Não consegui converter ${f.name} (${err.message}).`; console.error(err); return; }
+  }
+};
 
 /* ---------- Merge PDFs ---------- */
 const pdfs = [];
