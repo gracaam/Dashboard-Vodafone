@@ -7954,6 +7954,7 @@ function LinhaEmailAgente({ entrada, onResolver }) {
           ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0" title="Importância 2/4 (Jev)">Média</span>
           : <span className="text-[11px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600 whitespace-nowrap shrink-0" title={`Importância ${entrada.importancia}/4 (Jev)`}>Baixa</span>)}
       {entrada.estado === "em_progresso" && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0">Em Progresso</span>}
+      {entrada.marcaPendente && <span className="text-[11px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 whitespace-nowrap shrink-0">Pendente</span>}
       <button onClick={resolver} disabled={aResolver} className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0 disabled:opacity-40">{aResolver ? "…" : "Resolvido"}</button>
     </div>
   );
