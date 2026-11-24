@@ -7918,13 +7918,13 @@ function ConcluirPassoDialogo({ c, passo, onFechar }) {
   );
 }
 
-function GrupoHoje({ titulo, cor, itens, vazio, render }) {
+function GrupoHoje({ titulo, cor, itens, vazio, render, rolar }) {
   return (
     <section className="vf-blurfade border border-neutral-200 rounded-lg bg-white">
       <h2 className={`px-3 py-2 border-b border-neutral-200 text-sm font-semibold ${cor === "red" ? "text-red-700" : cor === "amber" ? "text-amber-700" : cor === "green" ? "text-emerald-700" : "text-neutral-700"}`}>
         {titulo} <span className="font-normal text-neutral-500">({itens.length})</span>
       </h2>
-      {itens.length ? itens.map(render) : <div className="px-3 py-2 text-xs text-neutral-400">{vazio}</div>}
+      {itens.length ? (rolar ? <div className="overflow-y-auto" style={{ maxHeight: rolar }}>{itens.map(render)}</div> : itens.map(render)) : <div className="px-3 py-2 text-xs text-neutral-400">{vazio}</div>}
     </section>
   );
 }
@@ -7933,7 +7933,7 @@ function GrupoHoje({ titulo, cor, itens, vazio, render }) {
 // Não reaproveita LinhaHoje de propósito: essa está desenhada em torno de um cliente
 // (c.n/c.e) e de diálogos que gravam no histórico de contactos de um NIF — uma
 // entrada de email não está ligada a nenhum cliente (ver data-model.md).
-function LinhaEmailAgente({ entrada, onResolver, onSubir, onDescer }) {
+function LinhaEmailAgente({ entrada, onResolver }) {
   const [aResolver, setAResolver] = useState(false);
   const resolver = async () => {
     setAResolver(true);
@@ -7954,40 +7954,16 @@ function LinhaEmailAgente({ entrada, onResolver, onSubir, onDescer }) {
           ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0" title="Importância 2/4 (Jev)">Média</span>
           : <span className="text-[11px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600 whitespace-nowrap shrink-0" title={`Importância ${entrada.importancia}/4 (Jev)`}>Baixa</span>)}
       {entrada.estado === "em_progresso" && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0">Em Progresso</span>}
-      {onSubir && <span className="flex shrink-0">
-        <button onClick={onSubir} disabled={!onSubir.ok} title="Subir" aria-label="Subir" className="px-1 text-neutral-500 hover:text-neutral-900 disabled:opacity-25">▲</button>
-        <button onClick={onDescer} disabled={!onDescer.ok} title="Descer" aria-label="Descer" className="px-1 text-neutral-500 hover:text-neutral-900 disabled:opacity-25">▼</button>
-      </span>}
       <button onClick={resolver} disabled={aResolver} className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0 disabled:opacity-40">{aResolver ? "…" : "Resolvido"}</button>
     </div>
   );
 }
 
-// Mostra só os 5 emails mais importantes (nota do Jev) de cada grupo. ▲▼ muda a ordem à mão
-// (guardada neste browser); descer o 5.º faz entrar o 6.º. Emails novos de importância Alta/Crítica
-// entram sempre à frente; os restantes novos ficam depois da ordem guardada.
-const MAX_EMAILS_GRUPO = 5;
-function GrupoEmailsAgente({ id, titulo, itens, vazio, onResolver }) {
-  const chaveLS = `dvbOrdemEmails:${id}`;
-  const [ordem, setOrdem] = useState(() => { try { return JSON.parse(localStorage.getItem(chaveLS) || "[]"); } catch { return []; } });
-  const lista = useMemo(() => {
-    const pos = new Map(ordem.map((c, i) => [c, i]));
-    const novos = itens.filter((e) => !pos.has(e.chave));
-    const antigos = itens.filter((e) => pos.has(e.chave)).sort((a, b) => pos.get(a.chave) - pos.get(b.chave));
-    return [...novos.filter((e) => e.importancia >= 3), ...antigos, ...novos.filter((e) => !(e.importancia >= 3))];
-  }, [itens, ordem]);
-  const mover = (i, d) => {
-    const c = lista.map((e) => e.chave); [c[i], c[i + d]] = [c[i + d], c[i]];
-    setOrdem(c); try { localStorage.setItem(chaveLS, JSON.stringify(c)); } catch {}
-  };
-  const visiveis = lista.slice(0, MAX_EMAILS_GRUPO);
+// Todos os emails do grupo, ordenados pelo Jev (importância), numa caixa de ~6 linhas com scroll vertical.
+function GrupoEmailsAgente({ titulo, itens, vazio, onResolver }) {
   return (
-    <GrupoHoje titulo={lista.length > MAX_EMAILS_GRUPO ? `${titulo} — 5 de ${lista.length}` : titulo} cor="red" itens={visiveis} vazio={vazio}
-      render={(e, i) => {
-        const subir = () => mover(i, -1), descer = () => mover(i, 1);
-        subir.ok = i > 0; descer.ok = i < lista.length - 1;
-        return <LinhaEmailAgente key={e.chave} entrada={e} onResolver={onResolver} onSubir={subir} onDescer={descer} />;
-      }} />
+    <GrupoHoje titulo={titulo} cor="red" itens={itens} vazio={vazio} rolar="19rem"
+      render={(e) => <LinhaEmailAgente key={e.chave} entrada={e} onResolver={onResolver} />} />
   );
 }
 
@@ -8952,9 +8928,9 @@ function HojeView() {
       )}
       <GrupoHoje titulo="Próximos passos para hoje ou atrasados" cor="red" itens={passos} vazio="Nenhum próximo passo para hoje."
         render={(x) => <LinhaHoje key={x.c.n} c={x.c} concluir={x.ultimo.proximoPasso || ""} {...em("passo", x)}>{x.ultimo.proximoPasso || "próximo passo"} · {x.atraso ? `atrasado ${x.atraso} dias` : "hoje"}</LinhaHoje>} />
-      <GrupoEmailsAgente id="hoje" titulo="Próximos passos para hoje (emails)" itens={pendentesHojeAgente} vazio="Nenhum email por tratar hoje." onResolver={marcarResolvidaManual} />
-      <GrupoEmailsAgente id="atrasados" titulo="Atrasados (emails)" itens={atrasadosAgente} vazio="Nenhum email atrasado." onResolver={marcarResolvidaManual} />
-      <GrupoEmailsAgente id="pendentes" titulo="Pendentes (emails)" itens={pendentesMarcadosAgente} vazio="Nenhum email marcado como Pendente no Outlook." onResolver={marcarResolvidaManual} />
+      <GrupoEmailsAgente titulo="Próximos passos para hoje (emails)" itens={pendentesHojeAgente} vazio="Nenhum email por tratar hoje." onResolver={marcarResolvidaManual} />
+      <GrupoEmailsAgente titulo="Atrasados (emails)" itens={atrasadosAgente} vazio="Nenhum email atrasado." onResolver={marcarResolvidaManual} />
+      <GrupoEmailsAgente titulo="Pendentes (emails)" itens={pendentesMarcadosAgente} vazio="Nenhum email marcado como Pendente no Outlook." onResolver={marcarResolvidaManual} />
       <GrupoHoje titulo="Permanência termina em menos de 1 mês" cor="red" itens={renovacoes.filter((x) => x.dias <= 30)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 1 a 3 meses" cor="amber" itens={renovacoes.filter((x) => x.dias > 30 && x.dias <= 90)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 3 a 6 meses" itens={renovacoes.filter((x) => x.dias > 90)} vazio="Ninguém neste grupo." render={renov} />
