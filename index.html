@@ -521,8 +521,9 @@ async function sincronizarEmailsAgente(lista, opcoes = {}) {
       estado: item.respondido ? "resolvido" : item.emProgresso ? "em_progresso" : "pendente",
       dataResolucao: item.respondido ? agora : null,
       motivoResolucao: item.respondido ? "respondido" : null,
+      marcaPendente: !!item.marcaPendente, // categoria "Pendente" do Outlook
     };
-    const mudou = !anterior || anterior.estado !== novoDoc.estado || anterior.remetenteNome !== novoDoc.remetenteNome
+    const mudou = !anterior || anterior.estado !== novoDoc.estado || !!anterior.marcaPendente !== novoDoc.marcaPendente || anterior.remetenteNome !== novoDoc.remetenteNome
       || anterior.remetenteEmail !== novoDoc.remetenteEmail || anterior.assunto !== novoDoc.assunto || anterior.recebidoEm !== novoDoc.recebidoEm;
     if (!mudou) return; // idempotência — já estava exatamente assim, não escreve nem conta
     batch.set(colecao.doc(item.chave), novoDoc, { merge: true }); // merge: não apaga a "importancia" já avaliada pelo Jev
@@ -7932,7 +7933,7 @@ function GrupoHoje({ titulo, cor, itens, vazio, render }) {
 // Não reaproveita LinhaHoje de propósito: essa está desenhada em torno de um cliente
 // (c.n/c.e) e de diálogos que gravam no histórico de contactos de um NIF — uma
 // entrada de email não está ligada a nenhum cliente (ver data-model.md).
-function LinhaEmailAgente({ entrada, onResolver }) {
+function LinhaEmailAgente({ entrada, onResolver, onSubir, onDescer }) {
   const [aResolver, setAResolver] = useState(false);
   const resolver = async () => {
     setAResolver(true);
@@ -7953,8 +7954,40 @@ function LinhaEmailAgente({ entrada, onResolver }) {
           ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0" title="Importância 2/4 (Jev)">Média</span>
           : <span className="text-[11px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600 whitespace-nowrap shrink-0" title={`Importância ${entrada.importancia}/4 (Jev)`}>Baixa</span>)}
       {entrada.estado === "em_progresso" && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap shrink-0">Em Progresso</span>}
+      {onSubir && <span className="flex shrink-0">
+        <button onClick={onSubir} disabled={!onSubir.ok} title="Subir" aria-label="Subir" className="px-1 text-neutral-500 hover:text-neutral-900 disabled:opacity-25">▲</button>
+        <button onClick={onDescer} disabled={!onDescer.ok} title="Descer" aria-label="Descer" className="px-1 text-neutral-500 hover:text-neutral-900 disabled:opacity-25">▼</button>
+      </span>}
       <button onClick={resolver} disabled={aResolver} className="text-xs text-emerald-700 hover:text-emerald-900 underline whitespace-nowrap shrink-0 disabled:opacity-40">{aResolver ? "…" : "Resolvido"}</button>
     </div>
+  );
+}
+
+// Mostra só os 5 emails mais importantes (nota do Jev) de cada grupo. ▲▼ muda a ordem à mão
+// (guardada neste browser); descer o 5.º faz entrar o 6.º. Emails novos de importância Alta/Crítica
+// entram sempre à frente; os restantes novos ficam depois da ordem guardada.
+const MAX_EMAILS_GRUPO = 5;
+function GrupoEmailsAgente({ id, titulo, itens, vazio, onResolver }) {
+  const chaveLS = `dvbOrdemEmails:${id}`;
+  const [ordem, setOrdem] = useState(() => { try { return JSON.parse(localStorage.getItem(chaveLS) || "[]"); } catch { return []; } });
+  const lista = useMemo(() => {
+    const pos = new Map(ordem.map((c, i) => [c, i]));
+    const novos = itens.filter((e) => !pos.has(e.chave));
+    const antigos = itens.filter((e) => pos.has(e.chave)).sort((a, b) => pos.get(a.chave) - pos.get(b.chave));
+    return [...novos.filter((e) => e.importancia >= 3), ...antigos, ...novos.filter((e) => !(e.importancia >= 3))];
+  }, [itens, ordem]);
+  const mover = (i, d) => {
+    const c = lista.map((e) => e.chave); [c[i], c[i + d]] = [c[i + d], c[i]];
+    setOrdem(c); try { localStorage.setItem(chaveLS, JSON.stringify(c)); } catch {}
+  };
+  const visiveis = lista.slice(0, MAX_EMAILS_GRUPO);
+  return (
+    <GrupoHoje titulo={lista.length > MAX_EMAILS_GRUPO ? `${titulo} — 5 de ${lista.length}` : titulo} cor="red" itens={visiveis} vazio={vazio}
+      render={(e, i) => {
+        const subir = () => mover(i, -1), descer = () => mover(i, 1);
+        subir.ok = i > 0; descer.ok = i < lista.length - 1;
+        return <LinhaEmailAgente key={e.chave} entrada={e} onResolver={onResolver} onSubir={subir} onDescer={descer} />;
+      }} />
   );
 }
 
@@ -8884,15 +8917,17 @@ function HojeView() {
   const emailsAgente = useEmailsAgente();
   const diaLocalAgente = (v) => { const x = new Date(v); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; };
   const hojeIsoAgente = diaLocalAgente(new Date());
-  const { pendentesHojeAgente, emProgressoAgente, atrasadosAgente } = useMemo(() => {
-    const pendentesHoje = [], emProgresso = [], atrasados = [];
+  // "Pendente" (categoria do Outlook) tem grupo próprio; os restantes dividem-se por dia (hoje / atrasados).
+  const { pendentesHojeAgente, pendentesMarcadosAgente, atrasadosAgente } = useMemo(() => {
+    const hoje = [], marcados = [], atrasados = [];
     emailsAgente.forEach((e) => {
       const diaRecebido = e.recebidoEm ? diaLocalAgente(e.recebidoEm) : "";
-      if (diaRecebido >= hojeIsoAgente) pendentesHoje.push(e); // "Em progresso" é só uma etiqueta: o dia decide a secção
+      if (e.marcaPendente) marcados.push(e);
+      else if (diaRecebido >= hojeIsoAgente) hoje.push(e);
       else atrasados.push(e);
     });
     const porData = (a, b) => ((typeof b.importancia === "number" ? b.importancia : -1) - (typeof a.importancia === "number" ? a.importancia : -1)) || (b.recebidoEm || "").localeCompare(a.recebidoEm || "");
-    return { pendentesHojeAgente: pendentesHoje.sort(porData), emProgressoAgente: emProgresso.sort(porData), atrasadosAgente: atrasados.sort(porData) };
+    return { pendentesHojeAgente: hoje.sort(porData), pendentesMarcadosAgente: marcados.sort(porData), atrasadosAgente: atrasados.sort(porData) };
   }, [emailsAgente, hojeIsoAgente]);
   const renov = (x) => <LinhaHoje key={x.c.n} c={x.c} resolver={{ chave: `renovacao:${x.conta}:${x.fim}`, resumo: `Permanência termina a ${formatarDataIsoPT(x.fim)}` }} {...em("renovacao", x)}>fim {formatarDataIsoPT(x.fim)} · daqui a {x.dias} dias · conta {rotuloConta(x.conta)}</LinhaHoje>;
   return (
@@ -8917,10 +8952,9 @@ function HojeView() {
       )}
       <GrupoHoje titulo="Próximos passos para hoje ou atrasados" cor="red" itens={passos} vazio="Nenhum próximo passo para hoje."
         render={(x) => <LinhaHoje key={x.c.n} c={x.c} concluir={x.ultimo.proximoPasso || ""} {...em("passo", x)}>{x.ultimo.proximoPasso || "próximo passo"} · {x.atraso ? `atrasado ${x.atraso} dias` : "hoje"}</LinhaHoje>} />
-      <GrupoHoje titulo="Próximos passos para hoje (emails)" cor="red" itens={[...pendentesHojeAgente, ...emProgressoAgente]} vazio="Nenhum email por tratar hoje."
-        render={(e) => <LinhaEmailAgente key={e.chave} entrada={e} onResolver={marcarResolvidaManual} />} />
-      <GrupoHoje titulo="Atrasados (emails)" cor="red" itens={atrasadosAgente} vazio="Nenhum email atrasado."
-        render={(e) => <LinhaEmailAgente key={e.chave} entrada={e} onResolver={marcarResolvidaManual} />} />
+      <GrupoEmailsAgente id="hoje" titulo="Próximos passos para hoje (emails)" itens={pendentesHojeAgente} vazio="Nenhum email por tratar hoje." onResolver={marcarResolvidaManual} />
+      <GrupoEmailsAgente id="atrasados" titulo="Atrasados (emails)" itens={atrasadosAgente} vazio="Nenhum email atrasado." onResolver={marcarResolvidaManual} />
+      <GrupoEmailsAgente id="pendentes" titulo="Pendentes (emails)" itens={pendentesMarcadosAgente} vazio="Nenhum email marcado como Pendente no Outlook." onResolver={marcarResolvidaManual} />
       <GrupoHoje titulo="Permanência termina em menos de 1 mês" cor="red" itens={renovacoes.filter((x) => x.dias <= 30)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 1 a 3 meses" cor="amber" itens={renovacoes.filter((x) => x.dias > 30 && x.dias <= 90)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 3 a 6 meses" itens={renovacoes.filter((x) => x.dias > 90)} vazio="Ninguém neste grupo." render={renov} />
