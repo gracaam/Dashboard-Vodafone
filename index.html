@@ -8778,6 +8778,10 @@ async function importarEmailsDoOutlook() {
   }
   const r = await lerOutlookViaExtensao(est.dataInicio || null);
   if (!r.ok) return { erro: true, mensagem: r.erro || "Não foi possível ler o Outlook." };
+  // A extensão nova devolve sempre o campo marcaPendente (true/false); se não vem, a extensão no Chrome é a antiga.
+  if (r.lista.length && !r.lista.some((x) => typeof x.marcaPendente === "boolean")) {
+    return { erro: true, mensagem: "A extensão do Chrome está desatualizada (não lê a categoria Pendente). Em chrome://extensions carregue em ⟳ na extensão e tente outra vez." };
+  }
   const res = await sincronizarEmailsAgente(r.lista, { leituraCompleta: r.completa === true });
   if (res.aviso) return { erro: true, mensagem: res.aviso };
   await registarVerificacaoAgenteEmail();
@@ -8785,7 +8789,7 @@ async function importarEmailsDoOutlook() {
   let imp = "";
   try { const a = await avaliarImportanciaEmailsNovos(); if (a.feitos || a.falhas) imp = ` Importância avaliada em ${a.feitos}${a.falhas ? ` (${a.falhas} falharam, repete na próxima importação)` : ""}.`; }
   catch (e) { imp = ` Não consegui avaliar a importância: ${e.message}.`; }
-  return { mensagem: `Lidos ${r.lista.length} emails: ${res.criadas} novos, ${res.atualizadas} atualizados, ${res.resolvidas} resolvidos.${imp} ${extra}`.trim() };
+  return { mensagem: `Lidos ${r.lista.length} emails (${r.lista.filter((x) => x.marcaPendente).length} com a categoria Pendente): ${res.criadas} novos, ${res.atualizadas} atualizados, ${res.resolvidas} resolvidos.${imp} ${extra}`.trim() };
 }
 function ControloAgenteEmail() {
   const estado = useEstadoAgenteEmail();
@@ -8928,9 +8932,9 @@ function HojeView() {
       )}
       <GrupoHoje titulo="Próximos passos para hoje ou atrasados" cor="red" itens={passos} vazio="Nenhum próximo passo para hoje."
         render={(x) => <LinhaHoje key={x.c.n} c={x.c} concluir={x.ultimo.proximoPasso || ""} {...em("passo", x)}>{x.ultimo.proximoPasso || "próximo passo"} · {x.atraso ? `atrasado ${x.atraso} dias` : "hoje"}</LinhaHoje>} />
+      <GrupoEmailsAgente titulo="Pendentes (emails)" itens={pendentesMarcadosAgente} vazio="Nenhum email marcado como Pendente no Outlook." onResolver={marcarResolvidaManual} />
       <GrupoEmailsAgente titulo="Próximos passos para hoje (emails)" itens={pendentesHojeAgente} vazio="Nenhum email por tratar hoje." onResolver={marcarResolvidaManual} />
       <GrupoEmailsAgente titulo="Atrasados (emails)" itens={atrasadosAgente} vazio="Nenhum email atrasado." onResolver={marcarResolvidaManual} />
-      <GrupoEmailsAgente titulo="Pendentes (emails)" itens={pendentesMarcadosAgente} vazio="Nenhum email marcado como Pendente no Outlook." onResolver={marcarResolvidaManual} />
       <GrupoHoje titulo="Permanência termina em menos de 1 mês" cor="red" itens={renovacoes.filter((x) => x.dias <= 30)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 1 a 3 meses" cor="amber" itens={renovacoes.filter((x) => x.dias > 30 && x.dias <= 90)} vazio="Ninguém neste grupo." render={renov} />
       <GrupoHoje titulo="Permanência termina em 3 a 6 meses" itens={renovacoes.filter((x) => x.dias > 90)} vazio="Ninguém neste grupo." render={renov} />
